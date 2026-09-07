@@ -400,17 +400,42 @@
   <div class="dlg-body" id="rd-body"></div>
 </dialog>
 
+<dialog id="key-dialog">
+  <div class="dlg-head">
+    <strong id="kd-title">New API key</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('key-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="kd-body"></div>
+</dialog>
+
 <script>
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const VIEWS = [
   ['runs', 'Runs'], ['queues', 'Queues'], ['deployments', 'Deployments'],
   ['automations', 'Automations'], ['workers', 'Workers'], ['events', 'Events'],
+  ['settings', 'Settings'],
 ];
+let ME = null;
+
+const cookie = name =>
+  (document.cookie.split('; ').find(c => c.startsWith(name + '=')) || '').split('=')[1] || '';
+
+function toLogin() {
+  location.href = '/login.html?next=' + encodeURIComponent(location.pathname);
+}
+const canWrite = () => !!ME && (ME.machine || ME.role === 'operator' || ME.role === 'admin');
+const isAdmin = () => !!ME && (ME.machine || ME.role === 'admin');
 
 function api(path, opts = {}) {
   const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
   if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
-  return fetch('/api/v1' + path, Object.assign({}, opts, { headers })).then(async r => {
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    const csrf = cookie('pf_csrf');
+    if (csrf) headers['X-CSRF-Token'] = csrf;
+  }
+  return fetch('/api/v1' + path, Object.assign({ credentials: 'same-origin' }, opts, { headers })).then(async r => {
+    if (r.status === 401) { toLogin(); throw new Error('not authenticated'); }
     if (r.status === 204) return null;
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || r.statusText);
@@ -425,8 +450,10 @@ function toast(msg, isErr) {
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 4200);
 }
-const act = (p, o) => api(p, o).then(r => { refreshCurrent(); return r; })
-                              .catch(e => toast(e.message, true));
+const act = (p, o) => {
+  if (!canWrite()) { toast('Your account is read-only', true); return Promise.resolve(); }
+  return api(p, o).then(r => { refreshCurrent(); return r; }).catch(e => toast(e.message, true));
+};
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -450,6 +477,7 @@ function show(v) {
   current = v;
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  if (v === 'settings') { loadSettings(); return; }
   refreshCurrent();
 }
 function refreshCurrent() {
@@ -460,7 +488,8 @@ function refreshCurrent() {
      queues: async () => { await loadQueues(); await loadPending(); },
      deployments: loadDeployments, automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
-     events: loadEvents })[current]();
+     events: loadEvents,
+     settings: () => settingsTab === 'external' ? loadKeys() : loadUsers() })[current]();
 }
 document.getElementById('nav').innerHTML =
   VIEWS.map(([v, label]) => `<button data-v="${v}" onclick="show('${v}')">${label}</button>`).join('');
@@ -736,10 +765,274 @@ function connect() {
   };
 }
 
-show('runs');
-loadFlows();
-connect();
-setInterval(refreshCurrent, 15000);
+// --- settings: external API ----------------------------------------------
+let settingsTab = 'external', extTab = 'keys', apiRoles = null;
+const keyCache = {};
+
+function loadSettings() {
+  if (!isAdmin()) { show('runs'); return; }
+  showSettings(settingsTab);
+}
+function showSettings(s) {
+  settingsTab = s;
+  document.querySelectorAll('#settings-subnav button').forEach(b => b.classList.toggle('active', b.dataset.s === s));
+  document.getElementById('settings-external').hidden = s !== 'external';
+  document.getElementById('settings-users').hidden = s !== 'users';
+  if (s === 'external') {
+    loadExternalSettings();
+    loadRoles().then(() => { loadKeys(); renderExplorer(); });
+  } else {
+    loadUsers();
+  }
+}
+function showExtTab(t) {
+  extTab = t;
+  document.querySelectorAll('#settings-external .subnav button[data-t]').forEach(b => b.classList.toggle('active', b.dataset.t === t));
+  document.getElementById('ext-keys').hidden = t !== 'keys';
+  document.getElementById('ext-explorer').hidden = t !== 'explorer';
+}
+
+async function loadExternalSettings() {
+  try {
+    const cfg = await api('/settings/external-api');
+    const tog = document.getElementById('ext-enabled');
+    tog.setAttribute('aria-checked', String(!!cfg.enabled));
+  } catch (e) { toast(e.message, true); }
+}
+async function toggleExternal() {
+  const tog = document.getElementById('ext-enabled');
+  const next = tog.getAttribute('aria-checked') !== 'true';
+  try {
+    await api('/settings/external-api', { method: 'PUT', body: JSON.stringify({ enabled: next }) });
+    tog.setAttribute('aria-checked', String(next));
+    toast('External API ' + (next ? 'enabled' : 'disabled'));
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadRoles() {
+  if (apiRoles) return apiRoles;
+  apiRoles = await api('/api-roles');
+  const sel = document.getElementById('k-role');
+  if (sel.options.length <= 1) apiRoles.roles.forEach(r => sel.add(new Option(r.label, r.id)));
+  return apiRoles;
+}
+function renderExplorer() {
+  if (!apiRoles) return;
+  const roles = apiRoles.roles;
+  document.getElementById('explorer-head').innerHTML =
+    '<th>Method</th><th>Path</th><th>Scope</th>' + roles.map(r => `<th>${esc(r.label)}</th>`).join('');
+  document.getElementById('explorer').innerHTML = apiRoles.routes.map(rt => `
+    <tr>
+      <td class="mono">${esc(rt.method)}</td>
+      <td class="mono">/api/external/v1${esc(rt.path)}</td>
+      <td class="mono muted">${esc(rt.scope || '—')}</td>
+      ${roles.map(r => `<td>${!rt.scope || (r.scopes || []).includes(rt.scope) ? '✓' : '·'}</td>`).join('')}
+    </tr>`).join('');
+}
+
+async function loadKeys() {
+  const p = new URLSearchParams();
+  const q = document.getElementById('k-search').value.trim();
+  if (q) p.set('search', q);
+  const role = document.getElementById('k-role').value; if (role) p.set('role', role);
+  const st = document.getElementById('k-status').value; if (st) p.set('status', st);
+  const ks = await api('/api-keys?' + p);
+  for (const k in keyCache) delete keyCache[k];
+  ks.forEach(k => { keyCache[k.id] = k; });
+  document.getElementById('keys').innerHTML = ks.length ? ks.map(k => {
+    const chips = [
+      k.redact_pii ? '<span class="chip on">PII redacted</span>' : '',
+      (k.ip_allowlist && k.ip_allowlist.length) ? '<span class="chip on">IP allowlist</span>' : '',
+      k.require_mtls ? '<span class="chip on">mTLS</span>' : '',
+    ].join('');
+    const roleLabel = ((apiRoles && apiRoles.roles.find(r => r.id === k.role)) || {}).label || k.role;
+    return `<tr>
+      <td><strong>${esc(k.name)}</strong><div class="muted">${esc(k.description || '')}</div></td>
+      <td class="mono">pmx_${esc(k.prefix)}…</td>
+      <td>${esc(k.owner_email || '—')}</td>
+      <td>${esc(roleLabel)}<div class="muted">${k.rate_limit_per_min ? k.rate_limit_per_min + '/min' : 'default'}</div></td>
+      <td>${chips || '<span class="muted">—</span>'}</td>
+      <td>${when(k.last_used_at)}</td>
+      <td>${k.expires_at ? esc(new Date(k.expires_at).toLocaleDateString()) : '—'}</td>
+      <td>${k.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">inactive</span>'}</td>
+      <td class="row">
+        <button class="act" onclick="openKeyForm('${k.id}')">Edit</button>
+        <button class="act" onclick="keyHistory('${k.id}')">History</button>
+        <button class="act" onclick="rotateKey('${k.id}')">Rotate</button>
+        <button class="act" onclick="deleteKey('${k.id}')">Delete</button>
+      </td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="9" class="empty">No API keys yet.</td></tr>';
+}
+
+function openKeyForm(id) {
+  const k = id ? keyCache[id] : null;
+  const roles = (apiRoles && apiRoles.roles) || [];
+  document.getElementById('kd-title').textContent = k ? 'Edit API key' : 'New API key';
+  document.getElementById('kd-body').innerHTML = `
+    <form class="inline" onsubmit="saveKey(event, ${k ? `'${k.id}'` : 'null'})">
+      <label>Name<input name="name" required value="${k ? esc(k.name) : ''}"></label>
+      <label>Owner email<input name="owner_email" type="email" value="${k ? esc(k.owner_email || '') : ''}"></label>
+      <label>Expires<input name="expires_at" type="date" value="${k && k.expires_at ? k.expires_at.slice(0, 10) : ''}"></label>
+      <label class="full">Description<textarea name="description">${k ? esc(k.description || '') : ''}</textarea></label>
+      <label>Role<select name="role" onchange="showScopes()">
+        ${roles.map(r => `<option value="${r.id}" ${k && k.role === r.id ? 'selected' : ''}>${esc(r.label)}</option>`).join('')}
+      </select></label>
+      <label>Rate limit / min<input name="rate_limit_per_min" type="number" min="0" placeholder="role default"
+        value="${k && k.rate_limit_per_min ? k.rate_limit_per_min : ''}"></label>
+      <label class="full">IP allowlist — comma-separated IPs or CIDRs, blank = any
+        <input name="ip_allowlist" value="${k && k.ip_allowlist ? esc(k.ip_allowlist.join(', ')) : ''}"></label>
+      <label class="row"><input type="checkbox" name="active" ${!k || k.active ? 'checked' : ''}> Active</label>
+      <label class="row"><input type="checkbox" name="require_mtls" ${k && k.require_mtls ? 'checked' : ''}> Require mutual TLS</label>
+      <label class="row"><input type="checkbox" name="redact_pii" ${k && k.redact_pii ? 'checked' : ''}> Redact PII in responses</label>
+      <div class="full" id="kd-scopes"></div>
+      <div class="full row"><button class="act primary" type="submit">${k ? 'Save changes' : 'Create key'}</button></div>
+    </form>`;
+  showScopes();
+  document.getElementById('key-dialog').showModal();
+}
+function showScopes() {
+  const sel = document.querySelector('#kd-body select[name=role]');
+  if (!sel) return;
+  const r = ((apiRoles && apiRoles.roles) || []).find(x => x.id === sel.value);
+  document.getElementById('kd-scopes').innerHTML = r
+    ? `<div class="muted" style="margin-bottom:4px">${esc(r.description)}</div>` +
+      r.scopes.map(s => `<span class="chip">${esc(s)}</span>`).join('')
+    : '';
+}
+async function saveKey(ev, id) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const body = {
+    name: fd.get('name'),
+    owner_email: fd.get('owner_email') || '',
+    description: fd.get('description') || '',
+    role: fd.get('role'),
+    expires_at: fd.get('expires_at') || '',
+    active: fd.get('active') === 'on',
+    require_mtls: fd.get('require_mtls') === 'on',
+    redact_pii: fd.get('redact_pii') === 'on',
+    ip_allowlist: (fd.get('ip_allowlist') || '').split(',').map(s => s.trim()).filter(Boolean),
+    rate_limit_per_min: fd.get('rate_limit_per_min') ? parseInt(fd.get('rate_limit_per_min'), 10) : 0,
+  };
+  try {
+    if (id) {
+      await api('/api-keys/' + id, { method: 'PATCH', body: JSON.stringify(body) });
+      toast('Key updated');
+      document.getElementById('key-dialog').close();
+    } else {
+      const res = await api('/api-keys', { method: 'POST', body: JSON.stringify(body) });
+      showSecret(res.secret, 'Key created — copy it now, it is shown only once.');
+    }
+    loadKeys();
+  } catch (e) { toast(e.message, true); }
+}
+function showSecret(secret, note) {
+  document.getElementById('kd-title').textContent = 'API key secret';
+  document.getElementById('kd-body').innerHTML = `
+    <p class="muted" style="padding:12px 14px 0;margin:0">${esc(note)}</p>
+    <div class="secretbox"><code id="sv">${esc(secret)}</code>
+      <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('sv').textContent).then(()=>toast('Copied'))">Copy</button>
+    </div>`;
+  document.getElementById('key-dialog').showModal();
+}
+async function rotateKey(id) {
+  if (!confirm('Rotate this key? The current secret stops working immediately.')) return;
+  try {
+    const res = await api('/api-keys/' + id + '/rotate', { method: 'POST' });
+    showSecret(res.secret, 'Key rotated — the previous secret no longer works.');
+    loadKeys();
+  } catch (e) { toast(e.message, true); }
+}
+async function deleteKey(id) {
+  const k = keyCache[id] || {};
+  if (!confirm('Delete API key "' + (k.name || id) + '"? This cannot be undone.')) return;
+  try { await api('/api-keys/' + id, { method: 'DELETE' }); toast('Key deleted'); loadKeys(); }
+  catch (e) { toast(e.message, true); }
+}
+async function keyHistory(id) {
+  const k = keyCache[id] || {};
+  const evs = await api('/api-keys/' + id + '/history?limit=200');
+  document.getElementById('kd-title').textContent = 'History — ' + (k.name || id);
+  document.getElementById('kd-body').innerHTML = `<div class="scroll"><table>
+    <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Detail</th></tr></thead>
+    <tbody>${evs.length ? evs.map(e => `<tr>
+      <td>${when(e.at)}</td><td>${esc(e.actor)}</td><td class="mono">${esc(e.action)}</td>
+      <td class="mono muted">${esc(JSON.stringify(e.detail ?? {}).slice(0, 160))}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No history.</td></tr>'}</tbody></table></div>`;
+  document.getElementById('key-dialog').showModal();
+}
+
+// --- settings: users ---------------------------------------------------------
+async function loadUsers() {
+  const us = await api('/users');
+  document.getElementById('users').innerHTML = us.map(u => `
+    <tr>
+      <td><strong>${esc(u.email)}</strong></td>
+      <td><select onchange="setUserRole('${u.id}', this.value)">
+        ${['viewer', 'operator', 'admin'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
+      </select></td>
+      <td>${u.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">disabled</span>'}</td>
+      <td>${when(u.last_login_at)}</td>
+      <td class="row">
+        <button class="act" onclick="resetUserPw('${u.id}')">Reset password</button>
+        <button class="act" onclick="setUserActive('${u.id}', ${!u.active})">${u.active ? 'Deactivate' : 'Activate'}</button>
+      </td>
+    </tr>`).join('');
+}
+async function createUser(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  try {
+    await api('/users', { method: 'POST', body: JSON.stringify({
+      email: fd.get('email'), password: fd.get('password'), role: fd.get('role'),
+    }) });
+    toast('User created'); ev.target.reset(); loadUsers();
+  } catch (e) { toast(e.message, true); }
+}
+const setUserRole = (id, role) => api('/users/' + id, { method: 'PATCH', body: JSON.stringify({ role }) })
+  .then(() => { toast('Role updated'); loadUsers(); }).catch(e => { toast(e.message, true); loadUsers(); });
+const setUserActive = (id, active) => api('/users/' + id, { method: 'PATCH', body: JSON.stringify({ active }) })
+  .then(() => { toast(active ? 'Activated' : 'Deactivated'); loadUsers(); }).catch(e => toast(e.message, true));
+function resetUserPw(id) {
+  const pw = prompt('New password (at least 8 characters):');
+  if (!pw) return;
+  api('/users/' + id, { method: 'PATCH', body: JSON.stringify({ password: pw }) })
+    .then(() => toast('Password reset')).catch(e => toast(e.message, true));
+}
+
+// --- boot ------------------------------------------------------------------
+async function bootstrap() {
+  try {
+    const r = await fetch('/api/v1/auth/me', {
+      credentials: 'same-origin',
+      headers: TOKEN ? { Authorization: 'Bearer ' + TOKEN } : {},
+    });
+    if (!r.ok) return toLogin();
+    ME = await r.json();
+  } catch { return toLogin(); }
+
+  document.body.classList.toggle('can-write', canWrite());
+  document.body.classList.toggle('is-admin', isAdmin());
+  document.getElementById('who').innerHTML =
+    `<b>${esc(ME.email)}</b><span class="role">${esc(ME.machine ? 'machine' : ME.role)}</span>` +
+    `<button class="act" onclick="logout()">Log out</button>`;
+  if (!isAdmin()) {
+    const b = document.querySelector('#nav button[data-v="settings"]');
+    if (b) b.remove();
+  }
+
+  show('runs');
+  loadFlows();
+  connect();
+  setInterval(refreshCurrent, 15000);
+}
+async function logout() {
+  try { await api('/auth/logout', { method: 'POST' }); } catch (e) { /* going to login anyway */ }
+  toLogin();
+}
+
+bootstrap();
 </script>
 </body>
 </html>
