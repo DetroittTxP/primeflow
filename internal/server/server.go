@@ -4,6 +4,16 @@
 // The API is the only way anything mutates state: workers, the CLI and the UI
 // all speak it, so there is one place where the orchestration rules and the
 // admin controls are enforced.
+//
+// Authentication has two independent surfaces:
+//
+//   - /api/v1/*    — the operator API. A human authenticates with a session
+//     cookie (see auth.go) carrying a role; a machine authenticates with the
+//     static PRIMEFLOW_API_TOKEN and is treated as an admin. /api/v1/health is
+//     always open.
+//   - /api/external/v1/*  — the External API. Authenticated by issued API keys
+//     with per-key security controls and a global master switch (see external.go
+//     and apikeys.go).
 package server
 
 import (
@@ -11,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,23 +29,39 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/primex/primeflow/internal/apiauth"
+	"github.com/primex/primeflow/internal/authn"
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/events"
 	"github.com/primex/primeflow/internal/store"
 )
 
+// DefaultSessionTTL is used when Config.SessionTTL is zero.
+const DefaultSessionTTL = 7 * 24 * time.Hour
+
 // Config configures the HTTP server.
 type Config struct {
 	Addr string
-	// APIToken, when set, is required as "Authorization: Bearer <token>" on
-	// every /api route. Leave empty only on a trusted network.
+	// APIToken, when set, is accepted as "Authorization: Bearer <token>" on
+	// /api/v1 routes for machine clients (workers, CLI). Human operators use
+	// login sessions regardless. Leave empty only on a trusted network.
 	APIToken string
 	// UIEnabled serves the bundled operator console at /.
 	UIEnabled bool
 	// CORSOrigin allows a separately hosted front end (e.g. the PrimeX
 	// console) to call this API.
 	CORSOrigin string
+
+	// TrustedProxyCIDRs lists the networks an edge proxy may connect from. Only
+	// when the immediate peer is in this set are X-Forwarded-For and
+	// X-SSL-Client-Verify believed.
+	TrustedProxyCIDRs []*net.IPNet
+	// SessionTTL is how long a login session lasts; it slides forward on use.
+	SessionTTL time.Duration
+	// CookieSecure marks the session cookies Secure. Set it when the console is
+	// served over HTTPS (directly or via a terminating proxy).
+	CookieSecure bool
 }
 
 // Server holds the API dependencies.
@@ -44,6 +71,9 @@ type Server struct {
 	events *events.Emitter
 	log    *slog.Logger
 	cfg    Config
+
+	loginThrottle *authn.Throttle
+	rateLimiter   *apiauth.RateLimiter
 }
 
 // New builds a server.
@@ -54,12 +84,24 @@ func New(s store.Store, b bus.Bus, em *events.Emitter, log *slog.Logger, cfg Con
 	if cfg.Addr == "" {
 		cfg.Addr = ":8080"
 	}
-	return &Server{store: s, bus: b, events: em, log: log, cfg: cfg}
+	if cfg.SessionTTL <= 0 {
+		cfg.SessionTTL = DefaultSessionTTL
+	}
+	return &Server{
+		store: s, bus: b, events: em, log: log, cfg: cfg,
+		loginThrottle: authn.NewThrottle(),
+		rateLimiter:   apiauth.NewRateLimiter(),
+	}
 }
 
 // Handler returns the fully wired HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// --- auth (operator login) ---
+	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	mux.HandleFunc("GET /api/v1/auth/me", s.me)
 
 	// --- health & catalogue ---
 	mux.HandleFunc("GET /api/v1/health", s.health)
@@ -109,11 +151,39 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/webhooks/{deployment}", s.webhook)
 	mux.HandleFunc("GET /api/v1/stream", s.stream)
 
+	// --- admin: operator accounts ---
+	mux.HandleFunc("GET /api/v1/users", s.listUsers)
+	mux.HandleFunc("POST /api/v1/users", s.createUser)
+	mux.HandleFunc("PATCH /api/v1/users/{id}", s.updateUser)
+	mux.HandleFunc("DELETE /api/v1/users/{id}", s.deleteUser)
+
+	// --- admin: External API settings & keys ---
+	mux.HandleFunc("GET /api/v1/settings/external-api", s.getExternalAPISettings)
+	mux.HandleFunc("PUT /api/v1/settings/external-api", s.putExternalAPISettings)
+	mux.HandleFunc("GET /api/v1/api-roles", s.apiRoles)
+	mux.HandleFunc("GET /api/v1/api-keys", s.listAPIKeys)
+	mux.HandleFunc("POST /api/v1/api-keys", s.createAPIKey)
+	mux.HandleFunc("GET /api/v1/api-keys/{id}", s.getAPIKey)
+	mux.HandleFunc("PATCH /api/v1/api-keys/{id}", s.updateAPIKey)
+	mux.HandleFunc("DELETE /api/v1/api-keys/{id}", s.deleteAPIKey)
+	mux.HandleFunc("POST /api/v1/api-keys/{id}/rotate", s.rotateAPIKey)
+	mux.HandleFunc("GET /api/v1/api-keys/{id}/history", s.apiKeyHistory)
+
 	if s.cfg.UIEnabled {
 		mux.Handle("GET /", s.uiHandler())
 	}
 
-	return s.withMiddleware(mux)
+	operator := s.withAuth(mux)
+	external := s.externalMux()
+
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/external/") {
+			external.ServeHTTP(w, r)
+			return
+		}
+		operator.ServeHTTP(w, r)
+	})
+	return s.withCORS(root)
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled.
@@ -129,7 +199,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	s.log.Info("api listening", "addr", s.cfg.Addr, "ui", s.cfg.UIEnabled, "auth", s.cfg.APIToken != "")
+	s.log.Info("api listening", "addr", s.cfg.Addr, "ui", s.cfg.UIEnabled,
+		"machine_token", s.cfg.APIToken != "", "cookie_secure", s.cfg.CookieSecure)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -138,23 +209,16 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 // ------------------------------------------------------------ middleware ---
 
-func (s *Server) withMiddleware(next http.Handler) http.Handler {
+func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.CORSOrigin != "" {
 			h := w.Header()
 			h.Set("Access-Control-Allow-Origin", s.cfg.CORSOrigin)
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-			h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key, X-CSRF-Token")
+			h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+			h.Set("Access-Control-Allow-Credentials", "true")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-		}
-		// The health endpoint stays open so load balancers do not need a token.
-		if s.cfg.APIToken != "" && strings.HasPrefix(r.URL.Path, "/api/") &&
-			r.URL.Path != "/api/v1/health" {
-			if !s.authorised(r) {
-				writeErr(w, http.StatusUnauthorized, errors.New("missing or invalid bearer token"))
 				return
 			}
 		}
@@ -162,13 +226,139 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) authorised(r *http.Request) bool {
-	got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if got == s.cfg.APIToken {
+// unauthenticated routes on the operator surface: the health probe, the login
+// and logout endpoints, and the login page itself.
+func openOperatorPath(method, path string) bool {
+	switch {
+	case path == "/api/v1/health":
+		return true
+	case path == "/api/v1/auth/login" && method == http.MethodPost:
+		return true
+	case path == "/api/v1/auth/logout" && method == http.MethodPost:
+		return true
+	case path == "/login.html" || path == "/favicon.ico":
 		return true
 	}
-	// The SSE stream is opened by EventSource, which cannot set headers.
-	return r.URL.Query().Get("token") == s.cfg.APIToken
+	return false
+}
+
+// adminOperatorPath reports whether a route requires an admin principal (user
+// management, API-key management, instance settings).
+func adminOperatorPath(path string) bool {
+	return strings.HasPrefix(path, "/api/v1/users") ||
+		strings.HasPrefix(path, "/api/v1/api-keys") ||
+		strings.HasPrefix(path, "/api/v1/api-roles") ||
+		strings.HasPrefix(path, "/api/v1/settings/")
+}
+
+func (s *Server) withAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		if openOperatorPath(r.Method, path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		p, csrfOK := s.resolvePrincipal(r)
+		if p == nil {
+			// A browser navigating to a page gets bounced to the login screen;
+			// an API client gets a clean 401.
+			if r.Method == http.MethodGet && !strings.HasPrefix(path, "/api/") {
+				http.Redirect(w, r, "/login.html", http.StatusSeeOther)
+				return
+			}
+			writeErr(w, http.StatusUnauthorized, errors.New("authentication required"))
+			return
+		}
+
+		// Session-authenticated writes must carry a matching CSRF token. Machine
+		// tokens are exempt: they are not ambient credentials.
+		if !p.Machine && isWrite(r.Method) && !csrfOK {
+			writeErr(w, http.StatusForbidden, errors.New("missing or invalid CSRF token"))
+			return
+		}
+
+		if strings.HasPrefix(path, "/api/") {
+			if adminOperatorPath(path) {
+				if !p.canAdmin() {
+					writeErr(w, http.StatusForbidden, errors.New("admin role required"))
+					return
+				}
+			} else if isWrite(r.Method) && !p.canMutate() {
+				writeErr(w, http.StatusForbidden, errors.New("this account is read-only"))
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
+	})
+}
+
+func isWrite(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return true
+}
+
+// resolvePrincipal identifies the caller. It returns (nil, false) when there is
+// no valid credential. The bool is whether a CSRF check passed (always true for
+// machine tokens, which do not need one).
+func (s *Server) resolvePrincipal(r *http.Request) (*principal, bool) {
+	// 1. Static machine token (workers, CLI). Also accepted as ?token= so the
+	//    SSE EventSource, which cannot set headers, still works for scripts.
+	if s.cfg.APIToken != "" {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if got == s.cfg.APIToken || r.URL.Query().Get("token") == s.cfg.APIToken {
+			return &principal{Machine: true, Email: "machine-token", Role: authn.RoleAdmin}, true
+		}
+	}
+
+	// 2. Browser session cookie.
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return nil, false
+	}
+	_, user, err := s.store.GetSession(r.Context(), c.Value, time.Now().UTC())
+	if err != nil {
+		return nil, false
+	}
+	// Slide the expiry forward, at most once a minute worth of writes.
+	_ = s.store.TouchSession(r.Context(), c.Value, time.Now().UTC(), time.Now().Add(s.cfg.SessionTTL))
+
+	csrfOK := false
+	if cc, err := r.Cookie(csrfCookie); err == nil && cc.Value != "" {
+		csrfOK = subtleEqual(cc.Value, r.Header.Get(csrfHeader))
+	}
+	return &principal{
+		UserID: user.ID, Email: user.Email, Role: authn.Role(user.Role),
+	}, csrfOK
+}
+
+func subtleEqual(a, b string) bool {
+	if len(a) != len(b) || a == "" {
+		return false
+	}
+	var v byte
+	for i := 0; i < len(a); i++ {
+		v |= a[i] ^ b[i]
+	}
+	return v == 0
+}
+
+// ----------------------------------------------------------- client IP ---
+
+func (s *Server) clientIPAddr(r *http.Request) net.IP {
+	return apiauth.ClientIP(r, s.cfg.TrustedProxyCIDRs)
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if ip := s.clientIPAddr(r); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 // -------------------------------------------------------------- helpers ---
