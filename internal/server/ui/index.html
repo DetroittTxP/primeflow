@@ -121,6 +121,43 @@
     max-width: 380px; z-index: 50;
   }
   .toast.err { border-left-color: var(--err); }
+
+  /* auth + settings */
+  .who { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .who b { color: var(--ink); font-weight: 600; }
+  .who .role {
+    text-transform: uppercase; letter-spacing: .04em; font-size: 10px; font-weight: 700;
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--accent);
+  }
+  body:not(.can-write) .writer-only { display: none !important; }
+  body:not(.is-admin) .admin-only { display: none !important; }
+  .subnav { display: flex; gap: 4px; padding: 12px 14px 0; flex-wrap: wrap; }
+  .subnav button {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    padding: 5px 11px; border-radius: 999px; cursor: pointer; font: inherit;
+  }
+  .subnav button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
+  .toggle {
+    position: relative; width: 38px; height: 22px; border-radius: 999px; border: none;
+    background: var(--line); cursor: pointer; flex: none; transition: background .12s;
+  }
+  .toggle::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+    border-radius: 50%; background: #fff; transition: left .12s;
+  }
+  .toggle[aria-checked="true"] { background: var(--ok); }
+  .toggle[aria-checked="true"]::after { left: 18px; }
+  .chip {
+    display: inline-block; font-size: 10.5px; font-weight: 600; padding: 1px 7px; margin: 1px;
+    border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .chip.on { color: var(--accent); border-color: currentColor; }
+  code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .secretbox {
+    display: flex; gap: 8px; align-items: center; margin: 10px 14px; padding: 10px 12px;
+    background: var(--accent-soft); border: 1px solid var(--line); border-radius: 6px;
+  }
+  .secretbox code { flex: 1; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -129,6 +166,7 @@
   <nav id="nav"></nav>
   <div class="grow"></div>
   <div class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
+  <div class="who" id="who"></div>
 </header>
 
 <main>

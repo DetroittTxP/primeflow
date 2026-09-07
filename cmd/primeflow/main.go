@@ -17,6 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/primex/primeflow/internal/authn"
+	"github.com/primex/primeflow/internal/store"
 	"github.com/primex/primeflow/pkg/primeflow"
 )
 
@@ -35,6 +39,8 @@ func main() {
 		err = cmdServer(ctx, args)
 	case "migrate":
 		err = cmdMigrate(ctx, args)
+	case "user":
+		err = cmdUser(ctx, args)
 	case "run":
 		err = cmdRun(ctx, args)
 	case "runs":
@@ -60,6 +66,13 @@ func usage() {
 Server:
   primeflow server [-addr :8080] [-no-ui]     run the API, UI, scheduler and automations
   primeflow migrate                           apply the database schema
+
+Operator accounts (talk straight to the database, like migrate):
+  primeflow user add -email a@x -password s [-role admin|operator|viewer]
+  primeflow user list
+  primeflow user passwd -email a@x -password new
+  primeflow user role   -email a@x -role operator
+  primeflow user deactivate -email a@x
 
 Admin (talks to a running server over the API):
   primeflow deploy -f deployments.json        create or update deployments
@@ -117,6 +130,115 @@ func cmdMigrate(ctx context.Context, _ []string) error {
 	}
 	fmt.Println("schema applied")
 	return nil
+}
+
+// ---------------------------------------------------------------- user ---
+
+func cmdUser(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: primeflow user add|list|passwd|role|deactivate ...")
+	}
+	sub, rest := args[0], args[1:]
+
+	fs := flag.NewFlagSet("user "+sub, flag.ExitOnError)
+	email := fs.String("email", "", "account email")
+	password := fs.String("password", "", "password (min 8 chars)")
+	role := fs.String("role", "viewer", "admin | operator | viewer")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+
+	app, err := primeflow.Open(ctx, primeflow.Options{})
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+	st := app.Store
+
+	switch sub {
+	case "list":
+		us, err := st.ListUsers(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%-32s %-10s %-8s %s\n", "EMAIL", "ROLE", "STATUS", "LAST LOGIN")
+		for _, u := range us {
+			status := "active"
+			if !u.Active {
+				status = "disabled"
+			}
+			last := "never"
+			if u.LastLoginAt != nil {
+				last = u.LastLoginAt.Local().Format("2006-01-02 15:04")
+			}
+			fmt.Printf("%-32s %-10s %-8s %s\n", trunc(u.Email, 32), u.Role, status, last)
+		}
+		return nil
+
+	case "add":
+		if *email == "" || len(*password) < 8 {
+			return fmt.Errorf("-email and a -password of at least 8 characters are required")
+		}
+		if !authn.ValidRole(*role) {
+			return fmt.Errorf("-role must be admin, operator or viewer")
+		}
+		u, err := st.CreateUser(ctx, store.UserInput{
+			ID: uuid.NewString(), Email: *email,
+			PasswordHash: authn.HashPassword(*password), Role: *role, Active: true,
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("created %s (%s)\n", u.Email, u.Role)
+		return nil
+
+	case "passwd":
+		if *email == "" || len(*password) < 8 {
+			return fmt.Errorf("-email and a -password of at least 8 characters are required")
+		}
+		u, err := st.GetUserByEmail(ctx, *email)
+		if err != nil {
+			return err
+		}
+		if _, err := st.UpdateUser(ctx, u.ID, nil, nil, authn.HashPassword(*password)); err != nil {
+			return err
+		}
+		_ = st.DeleteUserSessions(ctx, u.ID)
+		fmt.Printf("password updated for %s\n", u.Email)
+		return nil
+
+	case "role":
+		if *email == "" || !authn.ValidRole(*role) {
+			return fmt.Errorf("-email and a valid -role are required")
+		}
+		u, err := st.GetUserByEmail(ctx, *email)
+		if err != nil {
+			return err
+		}
+		if _, err := st.UpdateUser(ctx, u.ID, role, nil, ""); err != nil {
+			return err
+		}
+		_ = st.DeleteUserSessions(ctx, u.ID)
+		fmt.Printf("%s is now %s\n", u.Email, *role)
+		return nil
+
+	case "deactivate":
+		if *email == "" {
+			return fmt.Errorf("-email is required")
+		}
+		u, err := st.GetUserByEmail(ctx, *email)
+		if err != nil {
+			return err
+		}
+		no := false
+		if _, err := st.UpdateUser(ctx, u.ID, nil, &no, ""); err != nil {
+			return err
+		}
+		_ = st.DeleteUserSessions(ctx, u.ID)
+		fmt.Printf("%s deactivated\n", u.Email)
+		return nil
+	}
+	return fmt.Errorf("unknown user subcommand %q", sub)
 }
 
 // --------------------------------------------------------- admin client ---

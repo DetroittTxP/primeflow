@@ -60,6 +60,8 @@ type Scheduler struct {
 	events *events.Emitter
 	log    *slog.Logger
 	cfg    Config
+
+	lastSweep time.Time // rate-limits the housekeeping sweep
 }
 
 // New builds a scheduler.
@@ -91,7 +93,28 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			}
 			s.materialise(ctx)
 			s.reclaim(ctx)
+			s.sweep(ctx)
 		}
+	}
+}
+
+// sweep is periodic housekeeping the leader runs at most every 30 minutes:
+// expired login sessions and an over-long API-key audit trail. Both are
+// best-effort — a failure is logged and retried next window.
+func (s *Scheduler) sweep(ctx context.Context) {
+	if time.Since(s.lastSweep) < 30*time.Minute {
+		return
+	}
+	s.lastSweep = time.Now()
+	if n, err := s.store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
+		s.log.Warn("session sweep failed", "err", err)
+	} else if n > 0 {
+		s.log.Debug("pruned expired sessions", "count", n)
+	}
+	if n, err := s.store.TrimAPIKeyEvents(ctx, 200); err != nil {
+		s.log.Warn("api-key event trim failed", "err", err)
+	} else if n > 0 {
+		s.log.Debug("trimmed api-key events", "count", n)
 	}
 }
 
