@@ -206,8 +206,12 @@ Configuration comes from the environment, so the same image runs everywhere:
 | `PRIMEFLOW_LEASE` | lease duration | `60s` |
 | `PRIMEFLOW_POLL` | fallback poll interval | `2s` |
 | `PRIMEFLOW_HTTP_ADDR` | server listen address | `:8080` |
-| `PRIMEFLOW_API_TOKEN` | bearer token required on `/api` | none |
+| `PRIMEFLOW_API_TOKEN` | bearer token for machine clients (workers, CLI) on `/api/v1` | none |
 | `PRIMEFLOW_CORS_ORIGIN` | allow the PrimeX console to call the API | none |
+| `PRIMEFLOW_ADMIN_EMAIL` / `PRIMEFLOW_ADMIN_PASSWORD` | seed the first operator account on an empty database | none |
+| `PRIMEFLOW_SESSION_TTL` | operator login lifetime (slides on use) | `168h` |
+| `PRIMEFLOW_COOKIE_SECURE` | mark session cookies `Secure` | auto (on when a proxy is trusted) |
+| `PRIMEFLOW_TRUSTED_PROXY_CIDRS` | networks whose `X-Forwarded-For` / client-cert headers are believed | none |
 
 ### SDK reference
 
@@ -323,10 +327,27 @@ a flow.
 
 ---
 
+## Authentication
+
+Two independent surfaces, detailed in [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md):
+
+- **Operator API & console** (`/api/v1`). Humans log in (`POST /api/v1/auth/login`)
+  and get a session cookie carrying one of three roles — `viewer` (read-only),
+  `operator` (day-to-day run/queue/deployment control), `admin` (adds user, API-key
+  and settings management). Browser writes carry a double-submit CSRF token. Workers
+  and the CLI keep using `PRIMEFLOW_API_TOKEN` as a bearer token, treated as `admin`.
+  Seed the first admin with `PRIMEFLOW_ADMIN_*` or `primeflow user add`.
+- **External API** (`/api/external/v1`). A role-gated, key-authenticated projection
+  of runs, deployments, queues and events for external integrations. Managed from
+  **Settings → External API** in the console: a global master switch, issued keys
+  each with a role (scope bundle) plus per-key IP allowlist, rate limit, mutual-TLS
+  requirement and PII redaction, and a per-key audit trail. A key whose role lacks a
+  route's scope gets `403`; a bad or disabled key gets `401`.
+
 ## API
 
-All routes are under `/api/v1`. `GET /api/v1/health` is always unauthenticated
-so probes need no token.
+All operator routes are under `/api/v1`. `GET /api/v1/health` is always
+unauthenticated so probes need no credential.
 
 | | |
 |---|---|
@@ -343,6 +364,14 @@ so probes need no token.
 | `GET /events`, `GET/POST /automations` | event feed and rules |
 | `POST /webhooks/{deployment}` | external trigger |
 | `GET /stream` | Server-Sent Events, live |
+| `POST /auth/login` · `/auth/logout` · `GET /auth/me` | operator login |
+| `GET/POST /users`, `PATCH/DELETE /users/{id}` | operator accounts (admin) |
+| `GET/PUT /settings/external-api` | External API master switch (admin) |
+| `GET/POST /api-keys`, `PATCH/DELETE /api-keys/{id}`, `POST /api-keys/{id}/rotate`, `GET /api-keys/{id}/history` | External API keys (admin) |
+| `GET /api-roles` | role / scope / route catalogue (admin) |
+
+The External API lives under `/api/external/v1` (runs, deployments, queues,
+events) and is documented in [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md).
 
 ---
 
@@ -414,4 +443,8 @@ Honest list of what is not built yet:
 - **Log retention.** `pf_logs` grows without bound. Add a partition or a
   cleanup job before production.
 - **Sub-flows.** `RunDeployment` fans out but does not wait for children.
-- **RBAC.** A single bearer token, not per-user roles.
+- **Shared rate limiting.** The login throttle and the per-API-key rate limiter
+  are in-process, so limits are per server replica. A cluster-wide limiter needs
+  Redis and is not built.
+- **Auth extras.** No SSO/OAuth and no self-service password reset — an admin
+  resets passwords via the console or `primeflow user passwd`.
