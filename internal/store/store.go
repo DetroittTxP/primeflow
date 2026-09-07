@@ -148,7 +148,71 @@ type Store interface {
 	// --- leadership for singleton loops ---
 	AcquireLeadership(ctx context.Context, role, holder string, ttl time.Duration) (bool, error)
 
+	// --- operator login & external API (see AuthStore) ---
+	AuthStore
+
 	Close() error
+}
+
+// --- operator accounts, sessions ---
+
+// UserInput creates or updates an operator account. PasswordHash is written only
+// when non-empty, so a role/active change need not resupply it.
+type UserInput struct {
+	ID           string
+	Email        string
+	PasswordHash string
+	Role         string
+	Active       bool
+}
+
+// APIKeyFilter narrows an API-key listing. Zero values mean "no constraint".
+type APIKeyFilter struct {
+	Role   string
+	Active *bool
+	Search string
+}
+
+// AuthStore is the persistence surface for operator login and the External API
+// subsystem. It is part of Store; it is called out separately only for reading.
+type AuthStore interface {
+	CreateUser(ctx context.Context, in UserInput) (*core.User, error)
+	GetUser(ctx context.Context, id string) (*core.User, error)
+	GetUserByEmail(ctx context.Context, email string) (*core.User, error)
+	// VerifyLogin returns the user and its stored password hash for a login
+	// attempt; the hash never leaves the store package otherwise.
+	GetUserAuth(ctx context.Context, email string) (user *core.User, passwordHash string, err error)
+	ListUsers(ctx context.Context) ([]core.User, error)
+	CountUsers(ctx context.Context) (int, error)
+	UpdateUser(ctx context.Context, id string, role *string, active *bool, passwordHash string) (*core.User, error)
+	TouchUserLogin(ctx context.Context, id string, at time.Time) error
+
+	CreateSession(ctx context.Context, s *core.Session) error
+	// GetSession returns the session and its user, or ErrNotFound when the
+	// session is missing, expired, or the user is inactive.
+	GetSession(ctx context.Context, id string, now time.Time) (*core.Session, *core.User, error)
+	TouchSession(ctx context.Context, id string, lastSeen, expires time.Time) error
+	DeleteSession(ctx context.Context, id string) error
+	DeleteUserSessions(ctx context.Context, userID string) error
+	DeleteExpiredSessions(ctx context.Context, now time.Time) (int, error)
+
+	// --- external API settings ---
+	GetExternalAPISettings(ctx context.Context) (core.ExternalAPISettings, error)
+	PutExternalAPISettings(ctx context.Context, s core.ExternalAPISettings) error
+
+	// --- api keys ---
+	CreateAPIKey(ctx context.Context, k *core.APIKey) error
+	GetAPIKey(ctx context.Context, id string) (*core.APIKey, error)
+	GetAPIKeyByPrefix(ctx context.Context, prefix string) (*core.APIKey, error)
+	ListAPIKeys(ctx context.Context, f APIKeyFilter) ([]core.APIKey, error)
+	UpdateAPIKey(ctx context.Context, k *core.APIKey) error
+	SetAPIKeySecret(ctx context.Context, id, prefix, secretHash string) error
+	DeleteAPIKey(ctx context.Context, id string) error
+	TouchAPIKey(ctx context.Context, id string, at time.Time) error
+
+	AppendAPIKeyEvent(ctx context.Context, e *core.APIKeyEvent) error
+	ListAPIKeyEvents(ctx context.Context, apiKeyID string, limit int) ([]core.APIKeyEvent, error)
+	TrimAPIKeyEvents(ctx context.Context, keep int) (int, error)
 }
 
 // StateOpts carries the side effects that accompany a state change.
