@@ -116,6 +116,14 @@ func (s *Scheduler) sweep(ctx context.Context) {
 	} else if n > 0 {
 		s.log.Debug("trimmed api-key events", "count", n)
 	}
+	if lr, err := s.store.GetLogRetention(ctx); err == nil && lr.Enabled && lr.MaxAgeHours > 0 {
+		cutoff := time.Now().Add(-time.Duration(lr.MaxAgeHours) * time.Hour)
+		if n, more, err := s.store.DeleteLogsOlderThan(ctx, cutoff, 100000); err != nil {
+			s.log.Warn("log retention sweep failed", "err", err)
+		} else if n > 0 {
+			s.log.Info("pruned old logs", "count", n, "more_pending", more, "older_than", cutoff)
+		}
+	}
 }
 
 // materialise creates the runs each schedule calls for inside the lookahead.

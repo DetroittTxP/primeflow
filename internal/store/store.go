@@ -44,6 +44,11 @@ type CreateRunInput struct {
 	Timeout        time.Duration
 	Tags           []string
 	IdempotencyKey string
+
+	// Sub-flow lineage, set by runtimeBridge.TriggerDeployment.
+	ParentRunID   *string
+	ParentTaskKey string
+	TraceContext  string
 }
 
 // LeaseRequest is a worker asking for work.
@@ -127,10 +132,32 @@ type Store interface {
 	ListLogs(ctx context.Context, flowRunID string, afterID int64, limit int) ([]core.LogRecord, error)
 	CreateArtifact(ctx context.Context, a *core.Artifact) error
 	ListArtifacts(ctx context.Context, flowRunID string) ([]core.Artifact, error)
+	// GetLogRetention / PutLogRetention manage the pf_logs cleanup policy;
+	// DeleteLogsOlderThan is the batched delete the janitor runs.
+	GetLogRetention(ctx context.Context) (core.LogRetention, error)
+	PutLogRetention(ctx context.Context, in core.LogRetention) error
+	DeleteLogsOlderThan(ctx context.Context, cutoff time.Time, maxRows int) (deleted int, more bool, err error)
+
+	// --- sub-flows ---
+	// ListChildRuns returns every run whose parent_run_id is parentID.
+	ListChildRuns(ctx context.Context, parentID string) ([]core.FlowRun, error)
+	// CountUnfinishedChildren counts children not yet in a terminal state.
+	CountUnfinishedChildren(ctx context.Context, parentID string) (int, error)
+	// AncestorDeploymentIDs walks parent_run_id upward from runID (bounded by
+	// maxDepth) and returns the deployment id of each ancestor, nearest first.
+	// It is how the sub-flow guard detects recursion and enforces a depth cap.
+	AncestorDeploymentIDs(ctx context.Context, runID string, maxDepth int) ([]string, error)
+	// ResumeSuspendedRun reschedules a run only if it is still SCHEDULED, so a
+	// parent that is transiently RUNNING is never disturbed. Returns
+	// ErrNotFound when nothing was resumed.
+	ResumeSuspendedRun(ctx context.Context, runID string, at time.Time) (*core.FlowRun, error)
 
 	// --- events & automations ---
 	AppendEvent(ctx context.Context, e *core.Event) error
 	ListEvents(ctx context.Context, limit int) ([]core.Event, error)
+	// Stats returns time-bucketed flow-run / task-run / event activity over the
+	// window, for the console Dashboard. buckets is the desired slice count.
+	Stats(ctx context.Context, window time.Duration, buckets int) (core.Stats, error)
 	// ListEventsAfter reads forward from a sequence cursor; the automation
 	// evaluator uses it so no event is evaluated twice or skipped.
 	ListEventsAfter(ctx context.Context, afterSeq int64, limit int) ([]core.Event, error)

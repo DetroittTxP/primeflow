@@ -14,16 +14,21 @@ import (
 // fakeRuntime is an in-memory Runtime. It stands in for the engine so the SDK's
 // checkpoint semantics can be tested without a database.
 type fakeRuntime struct {
-	mu     sync.Mutex
-	cps    map[string]sdk.Checkpoint
-	cache  map[string]json.RawMessage
-	logs   []sdk.LogEntry
-	arts   []sdk.ArtifactSpec
-	saveNo int
+	mu        sync.Mutex
+	cps       map[string]sdk.Checkpoint
+	cache     map[string]json.RawMessage
+	runStates map[string]sdk.RunState
+	logs      []sdk.LogEntry
+	arts      []sdk.ArtifactSpec
+	saveNo    int
 }
 
 func newFake() *fakeRuntime {
-	return &fakeRuntime{cps: map[string]sdk.Checkpoint{}, cache: map[string]json.RawMessage{}}
+	return &fakeRuntime{
+		cps:       map[string]sdk.Checkpoint{},
+		cache:     map[string]json.RawMessage{},
+		runStates: map[string]sdk.RunState{},
+	}
 }
 
 func (f *fakeRuntime) LoadCheckpoint(_ context.Context, key string) (*sdk.Checkpoint, error) {
@@ -69,6 +74,15 @@ func (f *fakeRuntime) Artifact(_ context.Context, a sdk.ArtifactSpec) error {
 
 func (f *fakeRuntime) TriggerDeployment(context.Context, string, json.RawMessage, sdk.TriggerOptions) (string, error) {
 	return "run-1", nil
+}
+
+func (f *fakeRuntime) GetRunState(_ context.Context, runID string) (sdk.RunState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if st, ok := f.runStates[runID]; ok {
+		return st, nil
+	}
+	return sdk.RunState{Status: "COMPLETED"}, nil
 }
 
 func newCtx(t *testing.T, rt sdk.Runtime, params any) *sdk.Context {

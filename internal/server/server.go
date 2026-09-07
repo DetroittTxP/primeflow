@@ -34,7 +34,11 @@ import (
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/events"
+	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/store"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // DefaultSessionTTL is used when Config.SessionTTL is zero.
@@ -62,6 +66,9 @@ type Config struct {
 	// CookieSecure marks the session cookies Secure. Set it when the console is
 	// served over HTTPS (directly or via a terminating proxy).
 	CookieSecure bool
+
+	// Metrics, when non-nil, enables the /metrics endpoint and HTTP RED series.
+	Metrics *metrics.Metrics
 }
 
 // Server holds the API dependencies.
@@ -106,8 +113,10 @@ func (s *Server) Handler() http.Handler {
 	// --- health & catalogue ---
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/flows", s.listFlows)
+	mux.HandleFunc("GET /api/v1/flows/{name}", s.getFlow)
 	mux.HandleFunc("GET /api/v1/workers", s.listWorkers)
 	mux.HandleFunc("GET /api/v1/summary", s.summary)
+	mux.HandleFunc("GET /api/v1/stats", s.stats)
 
 	// --- deployments ---
 	mux.HandleFunc("GET /api/v1/deployments", s.listDeployments)
@@ -125,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/tasks", s.runTasks)
 	mux.HandleFunc("GET /api/v1/runs/{id}/logs", s.runLogs)
 	mux.HandleFunc("GET /api/v1/runs/{id}/artifacts", s.runArtifacts)
+	mux.HandleFunc("GET /api/v1/runs/{id}/children", s.runChildren)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/retry", s.retryRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/reschedule", s.rescheduleRun)
@@ -139,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	// --- queues ---
 	mux.HandleFunc("GET /api/v1/queues", s.listQueues)
 	mux.HandleFunc("POST /api/v1/queues", s.upsertQueue)
+	mux.HandleFunc("GET /api/v1/queues/{name}", s.getQueue)
 	mux.HandleFunc("GET /api/v1/queues/{name}/pending", s.queuePending)
 	mux.HandleFunc("POST /api/v1/queues/{name}/pause", s.pauseQueue(true))
 	mux.HandleFunc("POST /api/v1/queues/{name}/resume", s.pauseQueue(false))
@@ -160,6 +171,8 @@ func (s *Server) Handler() http.Handler {
 	// --- admin: External API settings & keys ---
 	mux.HandleFunc("GET /api/v1/settings/external-api", s.getExternalAPISettings)
 	mux.HandleFunc("PUT /api/v1/settings/external-api", s.putExternalAPISettings)
+	mux.HandleFunc("GET /api/v1/settings/log-retention", s.getLogRetention)
+	mux.HandleFunc("PUT /api/v1/settings/log-retention", s.putLogRetention)
 	mux.HandleFunc("GET /api/v1/api-roles", s.apiRoles)
 	mux.HandleFunc("GET /api/v1/api-keys", s.listAPIKeys)
 	mux.HandleFunc("POST /api/v1/api-keys", s.createAPIKey)
@@ -169,12 +182,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/api-keys/{id}/rotate", s.rotateAPIKey)
 	mux.HandleFunc("GET /api/v1/api-keys/{id}/history", s.apiKeyHistory)
 
+	// Prometheus scrape target. Open like /api/v1/health — scrapers carry no
+	// credential — and only mounted when metrics are enabled.
+	if reg := s.cfg.Metrics.Registry(); reg != nil {
+		mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	}
+
 	if s.cfg.UIEnabled {
 		mux.Handle("GET /", s.uiHandler())
 	}
 
-	operator := s.withAuth(mux)
-	external := s.externalMux()
+	// withMetrics sits directly around each mux so it observes the request
+	// *after* the auth and otelhttp layers have taken their own copies — that is
+	// the only place http.Request.Pattern (set by the mux on match) is visible.
+	operator := s.withAuth(s.withMetrics(mux))
+	external := s.withMetrics(s.externalMux())
 
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/external/") {
@@ -183,7 +205,56 @@ func (s *Server) Handler() http.Handler {
 		}
 		operator.ServeHTTP(w, r)
 	})
-	return s.withCORS(root)
+
+	// Server spans + inbound trace-context extraction. otelhttp is a no-op
+	// tracer when tracing is disabled, so this is always safe to install.
+	return otelhttp.NewHandler(s.withCORS(root), "primeflow.http")
+}
+
+// withMetrics records the HTTP RED series. The route label is the ServeMux
+// pattern (e.g. "GET /api/v1/runs/{id}"), never the raw path, so cardinality
+// stays bounded.
+func (s *Server) withMetrics(next http.Handler) http.Handler {
+	if s.cfg.Metrics == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		route := r.Pattern
+		if route == "" {
+			route = "other"
+		}
+		s.cfg.Metrics.ObserveHTTP(route, r.Method, codeClass(sw.code), time.Since(start))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(c int) { r.code = c; r.ResponseWriter.WriteHeader(c) }
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func codeClass(c int) string {
+	switch {
+	case c >= 500:
+		return "5xx"
+	case c >= 400:
+		return "4xx"
+	case c >= 300:
+		return "3xx"
+	case c >= 200:
+		return "2xx"
+	default:
+		return "1xx"
+	}
 }
 
 // ListenAndServe runs the HTTP server until ctx is cancelled.
@@ -230,7 +301,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 // and logout endpoints, and the login page itself.
 func openOperatorPath(method, path string) bool {
 	switch {
-	case path == "/api/v1/health":
+	case path == "/api/v1/health" || path == "/metrics":
 		return true
 	case path == "/api/v1/auth/login" && method == http.MethodPost:
 		return true

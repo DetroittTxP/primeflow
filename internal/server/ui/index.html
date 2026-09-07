@@ -4,94 +4,183 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PrimeFlow</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6feb'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h6' stroke='white' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h6' stroke='white' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #6b7280;
-    --line: #e3e6ea; --accent: #2f6feb; --accent-soft: #e8f0fe;
-    --ok: #1a7f47; --warn: #b45309; --err: #c0392b; --run: #2f6feb; --idle: #6b7280;
-    --radius: 8px;
+    --bg: #fbfbfc; --panel: #ffffff; --ink: #1c1f27; --muted: #697086;
+    --line: #e8e9ee; --accent: #2563eb; --accent-soft: #eef3ff; --accent-2: #93b0ff;
+    --grid: #edeef3;
+    --ok: #12894a; --warn: #b45309; --err: #d1352b; --run: #2563eb; --idle: #9aa1b0;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.04);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1115; --panel: #171a21; --ink: #e6e8ec; --muted: #9aa3b2;
-      --line: #262b35; --accent: #6ea1ff; --accent-soft: #1c2740;
-      --ok: #4ade80; --warn: #fbbf24; --err: #f87171; --run: #6ea1ff; --idle: #9aa3b2;
+      --bg: #0e1013; --panel: #16181d; --ink: #e7e9ee; --muted: #949cae;
+      --line: #262a32; --accent: #6ea1ff; --accent-soft: #182337; --accent-2: #3b5691;
+      --grid: #22262e;
+      --ok: #46c98a; --warn: #f2a83c; --err: #f2726a; --run: #6ea1ff; --idle: #7c8493;
+      --shadow: 0 1px 2px rgba(0,0,0,.3);
     }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--bg); color: var(--ink);
+    margin: 0; background: var(--bg); color: var(--ink); min-height: 100vh;
+    display: grid; grid-template-columns: 216px 1fr; grid-template-rows: auto 1fr;
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   header {
-    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    grid-column: 1 / -1;
+    display: flex; align-items: center; gap: 14px; padding: 12px 20px;
     background: var(--panel); border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 20; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 30;
   }
-  .brand { font-weight: 650; letter-spacing: -0.01em; font-size: 15px; }
+  .brand { font-weight: 660; letter-spacing: -0.01em; font-size: 15px; }
   .brand span { color: var(--accent); }
-  nav { display: flex; gap: 4px; flex-wrap: wrap; }
-  nav button {
-    background: none; border: 1px solid transparent; color: var(--muted);
-    padding: 5px 11px; border-radius: 999px; cursor: pointer; font: inherit;
-  }
-  nav button:hover { color: var(--ink); }
-  nav button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
   .grow { flex: 1; }
   .live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
   .dot.on { background: var(--ok); }
-  main { padding: 20px; max-width: 1400px; margin: 0 auto; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+
+  aside.side {
+    grid-column: 1; grid-row: 2; background: var(--panel);
+    border-right: 1px solid var(--line); padding: 12px 10px;
+    position: sticky; top: 57px; align-self: start; height: calc(100vh - 57px); overflow-y: auto;
   }
-  .card .n { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
-  .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  aside .nav { display: flex; flex-direction: column; gap: 2px; }
+  aside .nav button {
+    display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+    background: none; border: 0; color: var(--muted); font: inherit;
+    padding: 8px 10px; border-radius: 7px; cursor: pointer;
+  }
+  aside .nav button:hover { background: var(--accent-soft); color: var(--ink); }
+  aside .nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  aside .nav button .ic { width: 15px; text-align: center; opacity: .85; }
+
+  main { grid-column: 2; grid-row: 2; padding: 20px; max-width: 1360px; }
+  @media (max-width: 900px) {
+    body { grid-template-columns: 1fr; }
+    header { grid-column: 1; }
+    aside.side {
+      grid-column: 1; grid-row: 3; position: static; height: auto; border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    aside .nav { flex-direction: row; overflow-x: auto; }
+    main { grid-column: 1; grid-row: 2; }
+  }
+
   section { display: none; }
   section.active { display: block; }
+  .view-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .view-head h1 { font-size: 18px; font-weight: 640; margin: 0; letter-spacing: -0.01em; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 13px 15px; box-shadow: var(--shadow);
+  }
+  .card .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
+  .card .n { font-size: 27px; font-weight: 640; letter-spacing: -0.02em; margin-top: 2px; }
+  .card .delta { font-size: 12px; font-weight: 600; }
+  .card .delta.up { color: var(--ok); } .card .delta.down { color: var(--err); }
+  .card .spark { margin-top: 6px; height: 34px; }
+  .card.mini .n { font-size: 20px; }
+
   .panel {
     background: var(--panel); border: 1px solid var(--line);
-    border-radius: var(--radius); overflow: hidden; margin-bottom: 18px;
+    border-radius: var(--radius); overflow: hidden; margin-bottom: 16px; box-shadow: var(--shadow);
   }
   .panel > h2 {
-    margin: 0; padding: 11px 14px; font-size: 13px; font-weight: 600;
+    margin: 0; padding: 11px 15px; font-size: 12.5px; font-weight: 640;
     border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px;
+    text-transform: none; letter-spacing: 0;
   }
   .panel > h2 .grow { flex: 1; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  th, td { text-align: left; padding: 9px 15px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
   tr:last-child td { border-bottom: none; }
   tbody tr:hover { background: var(--accent-soft); }
   .scroll { overflow-x: auto; }
+
   .pill {
-    display: inline-block; padding: 1px 8px; border-radius: 999px;
-    font-size: 11.5px; font-weight: 600; border: 1px solid transparent; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; white-space: nowrap; border: 0;
   }
-  .s-COMPLETED { color: var(--ok); border-color: currentColor; }
-  .s-RUNNING, .s-PENDING { color: var(--run); border-color: currentColor; }
-  .s-FAILED, .s-CRASHED { color: var(--err); border-color: currentColor; }
-  .s-SCHEDULED, .s-PAUSED { color: var(--muted); border-color: currentColor; }
-  .s-CANCELLED, .s-CANCELLING { color: var(--warn); border-color: currentColor; }
-  button.act, select, input {
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .s-COMPLETED { color: var(--ok); background: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .s-RUNNING, .s-PENDING { color: var(--run); background: color-mix(in srgb, var(--run) 13%, transparent); }
+  .s-FAILED, .s-CRASHED { color: var(--err); background: color-mix(in srgb, var(--err) 13%, transparent); }
+  .s-SCHEDULED, .s-PAUSED { color: var(--muted); background: color-mix(in srgb, var(--muted) 13%, transparent); }
+  .s-CANCELLED, .s-CANCELLING { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .pill.plain::before { display: none; }
+
+  button.act, select, input, .seg button {
     font: inherit; background: var(--panel); color: var(--ink);
-    border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 7px; padding: 5px 10px; cursor: pointer;
   }
   button.act:hover { border-color: var(--accent); color: var(--accent); }
   button.act.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.act.primary:hover { filter: brightness(1.06); }
   input, select { cursor: auto; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; padding: 5px 11px; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-  .prio {
-    display: inline-flex; align-items: center; gap: 5px;
-  }
+  code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .prio { display: inline-flex; align-items: center; gap: 5px; }
   .prio b { min-width: 22px; text-align: right; font-variant-numeric: tabular-nums; }
   .bar { width: 46px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .pin { color: var(--warn); font-weight: 700; }
+  .who { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .who b { color: var(--ink); font-weight: 600; }
+  .who .role {
+    text-transform: uppercase; letter-spacing: .04em; font-size: 10px; font-weight: 700;
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--accent);
+  }
+  body:not(.can-write) .writer-only { display: none !important; }
+  body:not(.is-admin) .admin-only { display: none !important; }
+
+  /* charts */
+  .chart svg, .strip svg { display: block; width: 100%; overflow: visible; }
+  .chart { padding: 10px 14px 4px; }
+  .axis text { font-size: 10px; fill: var(--muted); }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+
+  /* dashboard: recent-flow + pool cards */
+  .flowgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  .fcard { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; background: var(--panel); box-shadow: var(--shadow); }
+  .fcard h3 { margin: 0 0 2px; font-size: 13px; font-weight: 640; }
+  .fdots { display: flex; gap: 3px; margin: 8px 0; flex-wrap: wrap; }
+  .fdot { width: 9px; height: 9px; border-radius: 3px; }
+  .fmini { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .fmini a { color: var(--ink); text-decoration: none; }
+  .fmini a:hover { color: var(--accent); }
+  .poolrow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 8px; text-align: center; }
+  .poolrow .pv { font-size: 17px; font-weight: 640; }
+  .poolrow .pk { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+  /* runs timeline strip */
+  .strip { padding: 6px 14px 2px; border-bottom: 1px solid var(--line); }
+
+  /* event timeline */
+  .tl { padding: 6px 0; }
+  .tl-row { display: grid; grid-template-columns: 92px 22px 1fr; gap: 8px; padding: 6px 15px; align-items: start; }
+  .tl-row:hover { background: var(--accent-soft); }
+  .tl-t { color: var(--muted); font-size: 11.5px; text-align: right; padding-top: 2px; }
+  .tl-rail { position: relative; }
+  .tl-rail::before { content: ""; position: absolute; left: 10px; top: -8px; bottom: -8px; width: 1px; background: var(--line); }
+  .tl-dot { position: absolute; left: 6px; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: var(--idle); box-shadow: 0 0 0 3px var(--panel); }
+  .tl-dot.ev-run { background: var(--run); } .tl-dot.ev-err { background: var(--err); } .tl-dot.ev-auto { background: var(--warn); }
+  .tl-body summary { cursor: pointer; list-style: none; }
+  .tl-body summary::-webkit-details-marker { display: none; }
+  .tl-body pre { margin: 4px 0 0; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+
   pre.logs {
     margin: 0; padding: 12px 14px; max-height: 420px; overflow: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55;
@@ -99,9 +188,9 @@
   .lvl-ERROR { color: var(--err); } .lvl-WARN { color: var(--warn); } .lvl-DEBUG { color: var(--muted); }
   dialog {
     border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
-    color: var(--ink); padding: 0; width: min(900px, 94vw); max-height: 88vh;
+    color: var(--ink); padding: 0; width: min(920px, 94vw); max-height: 88vh; box-shadow: 0 20px 60px rgba(0,0,0,.28);
   }
-  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog::backdrop { background: rgba(15,18,25,.5); }
   .dlg-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
   .dlg-body { padding: 0; overflow: auto; max-height: calc(88vh - 52px); }
   .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; padding: 14px 16px; }
@@ -112,25 +201,15 @@
   form.inline .full { grid-column: 1 / -1; }
   textarea {
     font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel);
-    color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px; min-height: 70px;
+    color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 7px; min-height: 70px;
   }
   .toast {
     position: fixed; bottom: 18px; right: 18px; background: var(--panel);
     border: 1px solid var(--line); border-left: 3px solid var(--accent);
-    border-radius: 6px; padding: 10px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
-    max-width: 380px; z-index: 50;
+    border-radius: 8px; padding: 10px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.2);
+    max-width: 380px; z-index: 60;
   }
   .toast.err { border-left-color: var(--err); }
-
-  /* auth + settings */
-  .who { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-  .who b { color: var(--ink); font-weight: 600; }
-  .who .role {
-    text-transform: uppercase; letter-spacing: .04em; font-size: 10px; font-weight: 700;
-    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--accent);
-  }
-  body:not(.can-write) .writer-only { display: none !important; }
-  body:not(.is-admin) .admin-only { display: none !important; }
   .subnav { display: flex; gap: 4px; padding: 12px 14px 0; flex-wrap: wrap; }
   .subnav button {
     background: none; border: 1px solid transparent; color: var(--muted);
@@ -152,10 +231,9 @@
     border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
   }
   .chip.on { color: var(--accent); border-color: currentColor; }
-  code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .secretbox {
     display: flex; gap: 8px; align-items: center; margin: 10px 14px; padding: 10px 12px;
-    background: var(--accent-soft); border: 1px solid var(--line); border-radius: 6px;
+    background: var(--accent-soft); border: 1px solid var(--line); border-radius: 8px;
   }
   .secretbox code { flex: 1; word-break: break-all; }
 </style>
@@ -163,32 +241,54 @@
 <body>
 <header>
   <div class="brand">Prime<span>Flow</span></div>
-  <nav id="nav"></nav>
   <div class="grow"></div>
+  <div class="seg" id="win-switch" hidden>
+    <button data-w="8h">8h</button><button data-w="24h" class="active">24h</button><button data-w="168h">1w</button>
+  </div>
   <div class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
   <div class="who" id="who"></div>
 </header>
 
-<main>
-  <div class="cards" id="cards"></div>
+<aside class="side"><div class="nav" id="nav"></div></aside>
 
-  <section id="v-runs" class="active">
+<main>
+  <section id="v-dashboard">
+    <div class="view-head"><h1>Dashboard</h1></div>
+    <div class="cards" id="dash-cards"></div>
+    <div class="panel">
+      <h2>Flow runs<span class="grow"></span><span class="muted" id="dash-fr-window"></span></h2>
+      <div class="chart" id="dash-fr-chart"></div>
+    </div>
+    <div class="panel">
+      <h2>Recent flows</h2>
+      <div style="padding:12px 14px"><div class="flowgrid" id="dash-flows"></div></div>
+    </div>
+    <div class="panel">
+      <h2>Work pools</h2>
+      <div style="padding:12px 14px"><div class="flowgrid" id="dash-pools"></div></div>
+    </div>
+  </section>
+
+  <section id="v-runs">
+    <div class="view-head"><h1>Flow runs</h1></div>
     <div class="panel">
       <h2>
-        Flow runs
+        <span class="seg" id="f-state">
+          <button data-s="" class="active">All</button>
+          <button data-s="RUNNING">Running</button>
+          <button data-s="COMPLETED">Completed</button>
+          <button data-s="FAILED">Failed</button>
+          <button data-s="SCHEDULED">Scheduled</button>
+        </span>
         <span class="grow"></span>
-        <select id="f-state">
-          <option value="">All states</option>
-          <option>SCHEDULED</option><option>PENDING</option><option>RUNNING</option>
-          <option>COMPLETED</option><option>FAILED</option><option>CRASHED</option>
-          <option>CANCELLED</option><option>CANCELLING</option><option>PAUSED</option>
-        </select>
-        <input id="f-search" placeholder="search name / id" size="18">
+        <select id="f-queue"><option value="">All pools</option></select>
+        <input id="f-search" placeholder="search name / id" size="16">
         <button class="act" onclick="loadRuns()">Refresh</button>
       </h2>
+      <div class="strip" id="runs-strip"></div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>Run</th><th>Flow</th><th>State</th><th>Queue</th>
+          <th>Run</th><th>Flow</th><th>State</th><th>Pool</th>
           <th>Priority</th><th>Scheduled</th><th>Attempt</th><th></th>
         </tr></thead>
         <tbody id="runs"></tbody>
@@ -196,23 +296,45 @@
     </div>
   </section>
 
-  <section id="v-queues">
+  <section id="v-flows">
+    <div class="view-head"><h1>Flows</h1></div>
     <div class="panel">
-      <h2>Work queues<span class="grow"></span><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <h2>Registered flows<span class="grow"></span><button class="act" onclick="loadFlowsPage()">Refresh</button></h2>
+      <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+        Every flow a worker has registered. Flows are Go functions — this is the catalogue, not an editor.
+        Open one for its parameters, recent runs, and a quick-run form.
+      </p>
       <div class="scroll"><table>
-        <thead><tr><th>Queue</th><th>State</th><th>Limit</th><th>Ready</th><th>Waiting</th><th>Running</th><th>Failed 24h</th><th></th></tr></thead>
+        <thead><tr><th>Flow</th><th>Version</th><th>Description</th><th>Tags</th><th>Last run</th><th>Runs</th></tr></thead>
+        <tbody id="flows-page"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="v-queues">
+    <div class="view-head"><h1>Work pools</h1></div>
+    <div class="panel">
+      <h2>Pools<span class="grow"></span><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+        A pool is a named lane of work. <b>Desired</b> is the worker count PrimeFlow publishes as
+        <code>primeflow_queue_desired_workers</code> for a KEDA <code>ScaledObject</code> or an HPA to act on —
+        PrimeFlow never starts workers itself. <b>Autoscale…</b> sets min / max / ready-per-worker.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Pool</th><th>State</th><th>Limit</th><th>Ready</th><th>Waiting</th><th>Running</th>
+          <th>Workers</th><th>Desired</th><th>Owner</th><th></th>
+        </tr></thead>
         <tbody id="queues"></tbody>
       </table></div>
     </div>
     <div class="panel">
-      <h2>
-        Dispatch order
-        <span class="grow"></span>
+      <h2>Dispatch order<span class="grow"></span>
         <select id="q-pick" onchange="loadPending()"></select>
         <button class="act" onclick="loadPending()">Refresh</button>
       </h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
-        This is the exact order the next worker will take work in. Pinned runs come first, then priority, then age.
+        The exact order the next worker will take work in. Pinned runs first, then priority, then age.
       </p>
       <div class="scroll"><table>
         <thead><tr><th>#</th><th>Run</th><th>Flow</th><th>Priority</th><th>Scheduled</th><th>Controls</th></tr></thead>
@@ -222,19 +344,20 @@
   </section>
 
   <section id="v-deployments">
+    <div class="view-head"><h1>Deployments</h1></div>
     <div class="panel">
       <h2>Deployments<span class="grow"></span><button class="act" onclick="loadDeployments()">Refresh</button></h2>
       <div class="scroll"><table>
-        <thead><tr><th>Name</th><th>Flow</th><th>Schedule</th><th>Queue</th><th>Priority</th><th>State</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Flow</th><th>Schedule</th><th>Pool</th><th>Priority</th><th>State</th><th></th></tr></thead>
         <tbody id="deployments"></tbody>
       </table></div>
     </div>
-    <div class="panel">
+    <div class="panel writer-only">
       <h2>New / update deployment</h2>
       <form class="inline" id="dep-form" onsubmit="saveDeployment(event)">
         <label>Name<input name="name" required placeholder="nightly-metering"></label>
         <label>Flow<select name="flow_name" id="dep-flow" required></select></label>
-        <label>Work queue<input name="work_queue" placeholder="default"></label>
+        <label>Work pool<input name="work_queue" placeholder="default"></label>
         <label>Priority<input name="priority" type="number" min="0" max="100" value="50"></label>
         <label>Schedule kind
           <select name="schedule_kind">
@@ -253,6 +376,7 @@
   </section>
 
   <section id="v-automations">
+    <div class="view-head"><h1>Automations</h1></div>
     <div class="panel">
       <h2>Automations<span class="grow"></span><button class="act" onclick="loadAutomations()">Refresh</button></h2>
       <div class="scroll"><table>
@@ -260,13 +384,13 @@
         <tbody id="automations"></tbody>
       </table></div>
     </div>
-    <div class="panel">
+    <div class="panel writer-only">
       <h2>New / update automation</h2>
       <form class="inline" onsubmit="saveAutomation(event)">
         <label>Name<input name="name" required placeholder="escalate-failed-provisioning"></label>
         <label>Match event<input name="match_event" placeholder="flow-run.FAILED  or  flow-run.*"></label>
         <label>Match flow<input name="match_flow" placeholder=""></label>
-        <label>Match queue<input name="match_work_queue" placeholder=""></label>
+        <label>Match pool<input name="match_work_queue" placeholder=""></label>
         <label>Threshold<input name="threshold" type="number" min="1" value="1"></label>
         <label>Window<input name="window" placeholder="10m"></label>
         <label>Action
@@ -288,10 +412,11 @@
   </section>
 
   <section id="v-workers">
+    <div class="view-head"><h1>Workers</h1></div>
     <div class="panel">
       <h2>Workers<span class="grow"></span><button class="act" onclick="loadWorkers()">Refresh</button></h2>
       <div class="scroll"><table>
-        <thead><tr><th>Name</th><th>Status</th><th>Queues</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
+        <thead><tr><th>Name</th><th>Status</th><th>Pools</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
         <tbody id="workers"></tbody>
       </table></div>
     </div>
@@ -305,16 +430,15 @@
   </section>
 
   <section id="v-events">
+    <div class="view-head"><h1>Event feed</h1></div>
     <div class="panel">
-      <h2>Event feed<span class="grow"></span><button class="act" onclick="loadEvents()">Refresh</button></h2>
-      <div class="scroll"><table>
-        <thead><tr><th>When</th><th>Event</th><th>Resource</th><th>Detail</th></tr></thead>
-        <tbody id="events"></tbody>
-      </table></div>
+      <h2>Recent events<span class="grow"></span><button class="act" onclick="loadEvents()">Refresh</button></h2>
+      <div class="tl" id="events"></div>
     </div>
   </section>
 
   <section id="v-settings" class="admin-only">
+    <div class="view-head"><h1>Settings</h1></div>
     <div class="subnav" id="settings-subnav">
       <button data-s="external" class="active" onclick="showSettings('external')">External API</button>
       <button data-s="users" onclick="showSettings('users')">Users</button>
@@ -332,6 +456,16 @@
           <code>Authorization: Bearer &lt;key&gt;</code> or <code>X-API-Key: &lt;key&gt;</code>.
           A key whose role lacks the endpoint's scope gets a 403 rather than a 401.
         </p>
+      </div>
+
+      <div class="panel">
+        <h2>Log retention</h2>
+        <form class="inline" onsubmit="saveRetention(event)">
+          <label class="row"><input type="checkbox" id="lr-enabled"> Prune old <code>pf_logs</code></label>
+          <label>Keep for (hours)<input id="lr-hours" type="number" min="1" placeholder="720"></label>
+          <div class="full row"><button class="act primary" type="submit">Save</button>
+            <span class="muted">The janitor deletes older run logs every 30&nbsp;min. Task state, artifacts and events are untouched.</span></div>
+        </form>
       </div>
 
       <div class="subnav">
@@ -408,21 +542,28 @@
   <div class="dlg-body" id="kd-body"></div>
 </dialog>
 
+<dialog id="flow-dialog">
+  <div class="dlg-head">
+    <strong id="fd-title">Flow</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('flow-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="fd-body"></div>
+</dialog>
+
 <script>
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
 const VIEWS = [
-  ['runs', 'Runs'], ['queues', 'Queues'], ['deployments', 'Deployments'],
-  ['automations', 'Automations'], ['workers', 'Workers'], ['events', 'Events'],
-  ['settings', 'Settings'],
+  ['dashboard', 'Dashboard', '▦'], ['runs', 'Runs', '≣'], ['flows', 'Flows', 'ƒ'],
+  ['queues', 'Work Pools', '⛁'], ['deployments', 'Deployments', '⇪'],
+  ['automations', 'Automations', '⚙'], ['workers', 'Workers', '◈'],
+  ['events', 'Events', '⌁'], ['settings', 'Settings', '⚑'],
 ];
 let ME = null;
 
 const cookie = name =>
   (document.cookie.split('; ').find(c => c.startsWith(name + '=')) || '').split('=')[1] || '';
 
-function toLogin() {
-  location.href = '/login.html?next=' + encodeURIComponent(location.pathname);
-}
+function toLogin() { location.href = '/login.html?next=' + encodeURIComponent(location.pathname); }
 const canWrite = () => !!ME && (ME.machine || ME.role === 'operator' || ME.role === 'admin');
 const isAdmin = () => !!ME && (ME.machine || ME.role === 'admin');
 
@@ -470,48 +611,190 @@ function when(ts) {
 const state = s => `<span class="pill s-${esc(s)}">${esc(s)}</span>`;
 const prio = r => `<span class="prio">${r.queue_position != null ? '<span class="pin" title="pinned to front">▲</span>' : ''}` +
   `<b>${r.priority}</b><span class="bar"><i style="width:${r.priority}%"></i></span></span>`;
+const STCOL = s => ({
+  COMPLETED: 'var(--ok)', RUNNING: 'var(--run)', PENDING: 'var(--run)',
+  FAILED: 'var(--err)', CRASHED: 'var(--err)', CANCELLED: 'var(--warn)', CANCELLING: 'var(--warn)',
+}[s] || 'var(--idle)');
 
-// --- navigation -------------------------------------------------------------
-let current = 'runs';
+// --- tiny SVG chart kit (no library) --------------------------------------
+function svg(inner, w, h) {
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" ` +
+    `style="width:100%;height:${h}px;display:block;overflow:visible">${inner}</svg>`;
+}
+// stacked bars from [{t, <key>:n, ...}] and series [{key,color}]
+function bars(buckets, series, h = 120) {
+  if (!buckets.length) return '<div class="empty">No activity in this window.</div>';
+  const w = Math.max(buckets.length * 8, 300);
+  const max = Math.max(1, ...buckets.map(b => series.reduce((a, s) => a + (b[s.key] || 0), 0)));
+  const bw = w / buckets.length;
+  let g = '';
+  for (let i = 1; i < 4; i++) { const y = h - (h * i / 4); g += `<line class="gridline" x1="0" y1="${y}" x2="${w}" y2="${y}"/>`; }
+  const rects = buckets.map((b, i) => {
+    let y = h, x = i * bw + bw * 0.15, bar = '';
+    for (const s of series) {
+      const v = b[s.key] || 0; if (!v) continue;
+      const bh = (v / max) * (h - 2);
+      y -= bh;
+      bar += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw * 0.7).toFixed(1)}" height="${bh.toFixed(1)}" fill="${s.color}"><title>${new Date(b.t).toLocaleString()} — ${s.key}: ${v}</title></rect>`;
+    }
+    return bar;
+  }).join('');
+  return svg(g + rects, w, h) ;
+}
+// line + soft area from a number[]
+function line(values, color = 'var(--accent)', h = 60) {
+  if (values.length < 2) return '';
+  const w = Math.max(values.length * 6, 240);
+  const max = Math.max(1, ...values), stepx = w / (values.length - 1);
+  const pts = values.map((v, i) => `${(i * stepx).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`);
+  return svg(
+    `<polygon points="0,${h} ${pts.join(' ')} ${w},${h}" fill="${color}" opacity="0.12"/>` +
+    `<polyline points="${pts.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5"/>`,
+    w, h);
+}
+const spark = (values, color) => line(values, color || 'var(--accent)', 34);
+
+// --- navigation ----------------------------------------------------------
+let current = 'dashboard';
 function show(v) {
   current = v;
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  document.getElementById('win-switch').hidden = v !== 'dashboard';
   if (v === 'settings') { loadSettings(); return; }
   refreshCurrent();
 }
 function refreshCurrent() {
-  loadSummary();
-  // loadPending reads the queue picker that loadQueues populates, so it has to
-  // wait for it rather than race it.
-  ({ runs: loadRuns,
+  ({ dashboard: loadDashboard,
+     runs: loadRuns,
+     flows: loadFlowsPage,
      queues: async () => { await loadQueues(); await loadPending(); },
-     deployments: loadDeployments, automations: loadAutomations,
+     deployments: loadDeployments,
+     automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
      events: loadEvents,
      settings: () => settingsTab === 'external' ? loadKeys() : loadUsers() })[current]();
 }
-document.getElementById('nav').innerHTML =
-  VIEWS.map(([v, label]) => `<button data-v="${v}" onclick="show('${v}')">${label}</button>`).join('');
+document.getElementById('nav').innerHTML = VIEWS.map(([v, label, ic]) =>
+  `<button data-v="${v}" onclick="show('${v}')"><span class="ic">${ic}</span>${label}</button>`).join('');
 
-// --- loaders ----------------------------------------------------------------
-async function loadSummary() {
+// --- dashboard ----------------------------------------------------------
+let dashWindow = localStorage.getItem('pf-window') || '24h';
+document.querySelectorAll('#win-switch button').forEach(b => {
+  b.classList.toggle('active', b.dataset.w === dashWindow);
+  b.onclick = () => {
+    dashWindow = b.dataset.w; localStorage.setItem('pf-window', dashWindow);
+    document.querySelectorAll('#win-switch button').forEach(x => x.classList.toggle('active', x === b));
+    loadDashboard();
+  };
+});
+const winLabel = w => ({ '8h': 'last 8 hours', '24h': 'last 24 hours', '168h': 'last 7 days' }[w] || w);
+const trend = arr => {
+  const h = arr.slice(0, Math.floor(arr.length / 2)).reduce((a, b) => a + b, 0);
+  const t = arr.slice(Math.floor(arr.length / 2)).reduce((a, b) => a + b, 0);
+  if (!h) return t ? { d: 100, up: true } : { d: 0, up: true };
+  return { d: Math.round(((t - h) / h) * 100), up: t >= h };
+};
+
+async function loadDashboard() {
+  let s;
+  try { s = await api('/stats?window=' + dashWindow); }
+  catch (e) { return; }
+  const fr = s.flow_runs || { by_state: {}, buckets: [] };
+  const tr = s.task_runs || { buckets: [] };
+  const ev = s.events || { buckets: [] };
+  const taskVals = (tr.buckets || []).map(b => b.completed + b.failed);
+  const evVals = (ev.buckets || []).map(b => b.n);
+  const tD = trend(taskVals), eD = trend(evVals);
+  const deltaEl = d => d.d ? `<span class="delta ${d.up ? 'up' : 'down'}">${d.up ? '↑' : '↓'} ${Math.abs(d.d)}%</span>` : '<span class="muted" style="font-size:12px">flat</span>';
+
+  document.getElementById('dash-cards').innerHTML = `
+    <div class="card"><div class="k">Flow runs</div>
+      <div class="n">${fr.total || 0}</div>
+      <div class="spark">${line((fr.buckets || []).map(b => b.completed + b.failed + b.other), 'var(--accent)', 34)}</div></div>
+    <div class="card"><div class="k">Task runs</div>
+      <div class="n">${tr.total || 0} ${deltaEl(tD)}</div>
+      <div class="spark">${spark(taskVals, 'var(--ok)')}</div></div>
+    <div class="card"><div class="k">Events</div>
+      <div class="n">${ev.total || 0} ${deltaEl(eD)}</div>
+      <div class="spark">${spark(evVals, 'var(--accent-2)')}</div></div>
+    <div class="card mini"><div class="k">Completed</div><div class="n" style="color:var(--ok)">${fr.by_state.COMPLETED || 0}</div></div>
+    <div class="card mini"><div class="k">Failed / crashed</div><div class="n" style="color:var(--err)">${(fr.by_state.FAILED || 0) + (fr.by_state.CRASHED || 0)}</div></div>
+    <div class="card mini"><div class="k">Running</div><div class="n" style="color:var(--run)">${(fr.by_state.RUNNING || 0) + (fr.by_state.PENDING || 0)}</div></div>`;
+
+  document.getElementById('dash-fr-window').textContent = winLabel(dashWindow);
+  document.getElementById('dash-fr-chart').innerHTML = bars(fr.buckets || [], [
+    { key: 'completed', color: 'var(--ok)' },
+    { key: 'failed', color: 'var(--err)' },
+    { key: 'other', color: 'var(--idle)' },
+  ], 130);
+
+  // recent flows, grouped
   try {
-    const s = await api('/summary');
-    const order = ['RUNNING', 'SCHEDULED', 'PENDING', 'COMPLETED', 'FAILED', 'CRASHED'];
-    document.getElementById('cards').innerHTML =
-      order.map(k => `<div class="card"><div class="n">${s.states[k] ?? 0}</div><div class="k">${k.toLowerCase()}</div></div>`).join('') +
-      `<div class="card"><div class="n">${s.workers_online}/${s.workers_total}</div><div class="k">workers online</div></div>`;
-  } catch (e) { /* header is decorative; do not interrupt the page for it */ }
+    const { runs } = await api('/runs?limit=120');
+    const byFlow = {};
+    runs.forEach(r => (byFlow[r.flow_name] = byFlow[r.flow_name] || []).push(r));
+    const cards = Object.entries(byFlow).sort((a, b) =>
+      new Date(b[1][0].scheduled_at) - new Date(a[1][0].scheduled_at)).slice(0, 9).map(([flow, rs]) => `
+      <div class="fcard">
+        <h3>${esc(flow)}</h3>
+        <div class="muted" style="font-size:12px">${rs.length} recent · last ${when(rs[0].scheduled_at)}</div>
+        <div class="fdots">${rs.slice(0, 14).map(r => `<span class="fdot" style="background:${STCOL(r.state)}" title="${esc(r.name)} — ${r.state}"></span>`).join('')}</div>
+        ${rs.slice(0, 2).map(r => `<div class="fmini"><a href="#" onclick="openRun('${r.id}');return false">${esc(r.name)}</a>${state(r.state)}</div>`).join('')}
+      </div>`).join('');
+    document.getElementById('dash-flows').innerHTML = cards || '<div class="empty">No runs yet.</div>';
+  } catch (e) { /* non-fatal */ }
+
+  // work pools
+  try {
+    const [qs, ws] = await Promise.all([api('/queues'), api('/workers').catch(() => [])]);
+    document.getElementById('dash-pools').innerHTML = qs.map(q => {
+      const online = ws.filter(w => w.online && (w.queues || []).includes(q.name)).length;
+      return `<div class="fcard">
+        <h3>${esc(q.name)} ${q.paused ? '<span class="pill s-PAUSED">paused</span>' : ''}</h3>
+        <div class="muted" style="font-size:12px">${esc(q.owner || 'no owner')}</div>
+        <div class="poolrow">
+          <div><div class="pv">${q.ready}</div><div class="pk">ready</div></div>
+          <div><div class="pv">${q.running}</div><div class="pk">running</div></div>
+          <div><div class="pv">${online}</div><div class="pk">workers</div></div>
+          <div><div class="pv">${desiredWorkers(q)}</div><div class="pk">desired</div></div>
+        </div></div>`;
+    }).join('') || '<div class="empty">No pools.</div>';
+  } catch (e) { /* non-fatal */ }
 }
 
+const desiredWorkers = q => {
+  const t = q.target_ready_per_worker || 5;
+  let n = Math.ceil((q.ready || 0) / t);
+  if (n < (q.min_workers || 0)) n = q.min_workers || 0;
+  if (q.max_workers != null && n > q.max_workers) n = q.max_workers;
+  return n < 0 ? 0 : n;
+};
+
+// --- runs -------------------------------------------------------------------
+let runsFilterState = '';
+document.querySelectorAll('#f-state button').forEach(b => b.onclick = () => {
+  runsFilterState = b.dataset.s;
+  document.querySelectorAll('#f-state button').forEach(x => x.classList.toggle('active', x === b));
+  loadRuns();
+});
+
 async function loadRuns() {
-  const st = document.getElementById('f-state').value;
   const q = document.getElementById('f-search').value.trim();
-  const params = new URLSearchParams({ limit: '80' });
-  if (st) params.set('state', st);
+  const queue = document.getElementById('f-queue').value;
+  const params = new URLSearchParams({ limit: '100' });
+  if (runsFilterState) params.set('state', runsFilterState);
   if (q) params.set('search', q);
+  if (queue) params.set('queue', queue);
   const { runs } = await api('/runs?' + params);
+
+  // pool filter options (once)
+  const qsel = document.getElementById('f-queue');
+  if (qsel.options.length <= 1) {
+    try { (await api('/queues')).forEach(x => qsel.add(new Option(x.name, x.name))); } catch (e) {}
+  }
+
+  document.getElementById('runs-strip').innerHTML = runsStrip(runs);
   document.getElementById('runs').innerHTML = runs.length ? runs.map(r => `
     <tr>
       <td><a href="#" onclick="openRun('${r.id}');return false" class="mono">${esc(r.name)}</a></td>
@@ -523,38 +806,53 @@ async function loadRuns() {
       <td>${r.run_count}${r.retries ? ' / ' + (r.retries + 1) : ''}</td>
       <td class="row">
         ${['SCHEDULED', 'RUNNING', 'PENDING'].includes(r.state)
-          ? `<button class="act" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button>` : ''}
+          ? `<button class="act writer-only" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button>` : ''}
         ${['FAILED', 'CRASHED', 'CANCELLED', 'COMPLETED'].includes(r.state)
-          ? `<button class="act" onclick="act('/runs/${r.id}/retry',{method:'POST'})">Resume</button>` : ''}
+          ? `<button class="act writer-only" onclick="act('/runs/${r.id}/retry',{method:'POST'})">Resume</button>` : ''}
       </td>
     </tr>`).join('') : '<tr><td colspan="8" class="empty">No runs match.</td></tr>';
 }
 
+// runsStrip: a 60px band placing each run by scheduled_at, coloured by state.
+function runsStrip(runs) {
+  if (!runs.length) return '';
+  const ts = runs.map(r => +new Date(r.scheduled_at));
+  const t0 = Math.min(...ts), t1 = Math.max(...ts, t0 + 1000), span = Math.max(1, t1 - t0);
+  const W = 1000, H = 46;
+  const ticks = runs.map(r => {
+    const x = ((+new Date(r.scheduled_at) - t0) / span) * (W - 8) + 4;
+    return `<rect x="${x.toFixed(1)}" y="8" width="3" height="30" rx="1.5" fill="${STCOL(r.state)}"
+      style="cursor:pointer" onclick="openRun('${r.id}')"><title>${esc(r.name)} — ${r.state} — ${new Date(r.scheduled_at).toLocaleString()}</title></rect>`;
+  }).join('');
+  return svg(`<line x1="0" y1="38" x2="${W}" y2="38" class="gridline"/>` + ticks, W, H) +
+    `<div class="muted" style="font-size:10.5px;display:flex;justify-content:space-between">
+       <span>${new Date(t0).toLocaleString()}</span><span>${new Date(t1).toLocaleString()}</span></div>`;
+}
+
 async function loadQueues() {
-  const qs = await api('/queues');
+  const [qs, ws] = await Promise.all([api('/queues'), api('/workers').catch(() => [])]);
+  const online = q => ws.filter(w => w.online && (w.queues || []).includes(q)).length;
   document.getElementById('queues').innerHTML = qs.map(q => `
     <tr>
-      <td><strong>${esc(q.name)}</strong><div class="muted">${esc(q.description || '')}</div></td>
+      <td><strong>${esc(q.name)}</strong><div class="muted">${esc(q.description || '')} ${esc(q.pool_type && q.pool_type !== 'pull' ? '· ' + q.pool_type : '')}</div></td>
       <td>${q.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
       <td>${q.concurrency_limit ?? '∞'}</td>
-      <td>${q.ready}</td><td>${q.scheduled}</td><td>${q.running}</td><td>${q.failed_24h}</td>
+      <td>${q.ready}</td><td>${q.scheduled}</td><td>${q.running}</td>
+      <td>${online(q.name)}</td>
+      <td><b>${desiredWorkers(q)}</b> <span class="muted">${q.min_workers || 0}–${q.max_workers ?? '∞'}</span></td>
+      <td class="muted">${esc(q.owner || '—')}</td>
       <td class="row">
-        <button class="act" onclick="act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})">
+        <button class="act writer-only" onclick="act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})">
           ${q.paused ? 'Resume' : 'Pause'}</button>
-        <button class="act" onclick="setLimit('${esc(q.name)}', ${q.concurrency_limit ?? 'null'})">Limit…</button>
+        <button class="act writer-only" onclick="setLimit('${esc(q.name)}', ${q.concurrency_limit ?? 'null'})">Limit…</button>
+        <button class="act writer-only" onclick='setAutoscale(${JSON.stringify(q)})'>Autoscale…</button>
       </td>
     </tr>`).join('');
   const pick = document.getElementById('q-pick');
   const keep = pick.value;
   pick.innerHTML = qs.map(q => `<option>${esc(q.name)}</option>`).join('');
-  if (keep && qs.some(q => q.name === keep)) {
-    pick.value = keep;
-  } else if (qs.length) {
-    // Open on the lane that actually has work waiting — an empty panel is a
-    // useless first impression on a busy system.
-    const busiest = qs.reduce((a, b) => (b.scheduled > a.scheduled ? b : a), qs[0]);
-    pick.value = busiest.name;
-  }
+  if (keep && qs.some(q => q.name === keep)) pick.value = keep;
+  else if (qs.length) pick.value = qs.reduce((a, b) => (b.scheduled > a.scheduled ? b : a), qs[0]).name;
 }
 
 function setLimit(name, cur) {
@@ -563,6 +861,25 @@ function setLimit(name, cur) {
   const limit = v.trim() === '' ? null : parseInt(v, 10);
   if (limit !== null && (isNaN(limit) || limit < 0)) return toast('Limit must be a non-negative number', true);
   act('/queues', { method: 'POST', body: JSON.stringify({ name, concurrency_limit: limit }) });
+}
+
+function setAutoscale(q) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const min = prompt('Minimum workers for pool "' + q.name + '"', q.min_workers ?? 0);
+  if (min === null) return;
+  const max = prompt('Maximum workers (blank = unbounded)', q.max_workers ?? '');
+  if (max === null) return;
+  const target = prompt('Target ready runs per worker', q.target_ready_per_worker ?? 5);
+  if (target === null) return;
+  const owner = prompt('Owner / team (blank = none)', q.owner ?? '');
+  if (owner === null) return;
+  const body = {
+    name: q.name, min_workers: parseInt(min, 10) || 0,
+    target_ready_per_worker: parseInt(target, 10) || 5, owner: owner.trim(),
+  };
+  if (max.trim() === '') body.clear_max_workers = true;
+  else body.max_workers = parseInt(max, 10);
+  act('/queues', { method: 'POST', body: JSON.stringify(body) });
 }
 
 async function loadPending() {
@@ -576,7 +893,7 @@ async function loadPending() {
       <td>${esc(r.flow_name)}</td>
       <td>${prio(r)}</td>
       <td>${when(r.scheduled_at)}</td>
-      <td class="row">
+      <td class="row writer-only">
         <button class="act" onclick="act('/runs/${r.id}/front',{method:'POST'})" title="Run this next">▲ Front</button>
         <button class="act" onclick="bump('${r.id}', 100)">Urgent</button>
         <button class="act" onclick="bump('${r.id}', 50)">Normal</button>
@@ -589,9 +906,99 @@ async function loadPending() {
 
 const bump = (id, p) => act('/runs/' + id + '/priority', { method: 'POST', body: JSON.stringify({ priority: p }) });
 function moveQueue(id) {
-  const q = prompt('Move run to which work queue?');
+  const q = prompt('Move run to which work pool?');
   if (q) act('/runs/' + id + '/queue', { method: 'POST', body: JSON.stringify({ queue: q }) });
 }
+
+// --- flows catalogue --------------------------------------------------------
+async function loadFlowsPage() {
+  const fs = await api('/flows');
+  const rows = await Promise.all(fs.map(async f => {
+    let last = '—', count = 0;
+    try {
+      const { runs, total } = await api('/runs?flow=' + encodeURIComponent(f.name) + '&limit=1');
+      count = total; if (runs[0]) last = state(runs[0].state) + ' ' + when(runs[0].scheduled_at);
+    } catch (e) {}
+    return `<tr onclick="openFlow('${esc(f.name)}')" style="cursor:pointer">
+      <td><strong>${esc(f.name)}</strong></td>
+      <td class="mono">${esc(f.version)}</td>
+      <td class="muted">${esc(f.description || '')}</td>
+      <td class="mono muted">${(f.tags || []).map(esc).join(', ')}</td>
+      <td>${last}</td><td>${count}</td>
+    </tr>`;
+  }));
+  document.getElementById('flows-page').innerHTML = rows.length ? rows.join('')
+    : '<tr><td colspan="6" class="empty">No worker has registered a flow yet.</td></tr>';
+}
+
+async function openFlow(name) {
+  const dlg = document.getElementById('flow-dialog');
+  document.getElementById('fd-body').innerHTML = '<div class="empty">Loading…</div>';
+  document.getElementById('fd-title').textContent = name;
+  dlg.showModal();
+  const f = await api('/flows/' + encodeURIComponent(name));
+  const schema = f.params_schema && f.params_schema.fields || [];
+  const fieldInput = fld => {
+    const req = fld.required ? 'required' : '';
+    const ex = fld.example != null ? esc(typeof fld.example === 'object' ? JSON.stringify(fld.example) : fld.example) : '';
+    if (fld.type === 'boolean') return `<select name="${esc(fld.name)}"><option value="">—</option><option>true</option><option>false</option></select>`;
+    const t = fld.type === 'integer' || fld.type === 'number' ? 'number' : 'text';
+    return `<input name="${esc(fld.name)}" type="${t}" ${req} placeholder="${ex}" data-kind="${esc(fld.type)}">`;
+  };
+  document.getElementById('fd-body').innerHTML = `
+    <dl class="kv">
+      <dt>Flow</dt><dd>${esc(f.name)}</dd>
+      <dt>Description</dt><dd>${esc(f.description || '—')}</dd>
+      <dt>Versions</dt><dd class="mono">${f.versions.map(v => esc(v.version)).join(', ')}</dd>
+      <dt>Total runs</dt><dd>${f.total_runs}</dd>
+    </dl>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Quick run</h2>
+      ${canWrite() ? `<form class="inline" onsubmit="quickRun(event, '${esc(f.name)}')">
+        ${schema.length ? schema.map(fld => `<label>${esc(fld.name)} <span class="muted">${esc(fld.type)}${fld.required ? ' *' : ''}</span>${fieldInput(fld)}</label>`).join('')
+          : '<label class="full">Parameters (JSON)<textarea name="__json" placeholder="{}"></textarea></label>'}
+        <div class="full row"><button class="act primary" type="submit">Run flow</button></div>
+      </form>` : '<p class="muted" style="padding:14px">Your account is read-only.</p>'}
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Recent runs (${f.recent_runs.length})</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Run</th><th>State</th><th>Pool</th><th>Scheduled</th></tr></thead>
+        <tbody>${f.recent_runs.map(r => `<tr>
+          <td><a href="#" class="mono" onclick="document.getElementById('flow-dialog').close();openRun('${r.id}');return false">${esc(r.name)}</a></td>
+          <td>${state(r.state)}</td><td>${esc(r.work_queue)}</td><td>${when(r.scheduled_at)}</td></tr>`).join('')
+          || '<tr><td colspan="4" class="empty">No runs yet.</td></tr>'}</tbody>
+      </table></div>
+    </div>`;
+}
+
+async function quickRun(ev, flow) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  let params = {};
+  if (fd.has('__json')) {
+    try { params = JSON.parse(fd.get('__json') || '{}'); }
+    catch { return toast('Parameters must be valid JSON', true); }
+  } else {
+    for (const el of ev.target.querySelectorAll('[name]')) {
+      const v = el.value.trim();
+      if (v === '') continue;
+      const kind = el.dataset.kind;
+      params[el.name] = kind === 'integer' ? parseInt(v, 10)
+        : kind === 'number' ? parseFloat(v)
+        : kind === 'boolean' ? v === 'true'
+        : kind === 'array' || kind === 'object' ? safeJSON(v, v)
+        : v;
+    }
+  }
+  try {
+    const run = await api('/runs', { method: 'POST', body: JSON.stringify({ flow_name: flow, parameters: params }) });
+    toast('Started ' + run.name);
+    document.getElementById('flow-dialog').close();
+    show('runs');
+  } catch (e) { toast(e.message, true); }
+}
+const safeJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
 async function loadDeployments() {
   const ds = await api('/deployments');
@@ -603,7 +1010,7 @@ async function loadDeployments() {
       <td>${esc(d.work_queue)}</td>
       <td>${d.priority}</td>
       <td>${d.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
-      <td class="row">
+      <td class="row writer-only">
         <button class="act primary" onclick="act('/deployments/${d.id}/run',{method:'POST',body:'{}'})">Run now</button>
         <button class="act" onclick="act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})">${d.paused ? 'Resume' : 'Pause'}</button>
         <button class="act" onclick="if(confirm('Delete deployment ${esc(d.name)}?'))act('/deployments/${d.id}',{method:'DELETE'})">Delete</button>
@@ -646,11 +1053,11 @@ async function loadAutomations() {
     <tr>
       <td><strong>${esc(a.name)}</strong> ${a.enabled ? '' : '<span class="pill s-PAUSED">off</span>'}
           <div class="muted">${esc(a.description || '')}</div></td>
-      <td class="mono">${esc(a.match_event || 'any')}${a.match_flow ? ' · flow=' + esc(a.match_flow) : ''}${a.match_work_queue ? ' · queue=' + esc(a.match_work_queue) : ''}</td>
+      <td class="mono">${esc(a.match_event || 'any')}${a.match_flow ? ' · flow=' + esc(a.match_flow) : ''}${a.match_work_queue ? ' · pool=' + esc(a.match_work_queue) : ''}</td>
       <td>${a.threshold}${a.window ? ' / ' + Math.round(a.window / 1e9) + 's' : ''}</td>
       <td class="mono">${esc(a.action)}</td>
       <td>${when(a.last_fired_at)}</td>
-      <td><button class="act" onclick="if(confirm('Delete ${esc(a.name)}?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
+      <td class="writer-only"><button class="act" onclick="if(confirm('Delete ${esc(a.name)}?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No automations yet.</td></tr>';
 }
 
@@ -682,40 +1089,61 @@ async function loadWorkers() {
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
 }
 
+// --- event timeline -------------------------------------------------------
+function evClass(name) {
+  if (/\.(FAILED|CRASHED)$/.test(name)) return 'ev-err';
+  if (name.startsWith('automation') || name.startsWith('external-api') || name.startsWith('work-queue')) return 'ev-auto';
+  if (name.startsWith('flow-run') || name.startsWith('webhook')) return 'ev-run';
+  return '';
+}
 async function loadEvents() {
-  const evs = await api('/events?limit=120');
-  document.getElementById('events').innerHTML = evs.map(e => `
-    <tr>
-      <td>${when(e.occurred)}</td>
-      <td class="mono">${esc(e.event)}</td>
-      <td class="mono muted">${esc(e.resource_type)}/${esc(String(e.resource_id).slice(0, 8))}</td>
-      <td class="muted">${esc(JSON.stringify(e.payload ?? {}).slice(0, 140))}</td>
-    </tr>`).join('');
+  const evs = await api('/events?limit=150');
+  document.getElementById('events').innerHTML = evs.length ? evs.map(e => {
+    const payload = JSON.stringify(e.payload ?? {}, null, 1);
+    const hasPayload = payload && payload !== '{}' && payload !== 'null';
+    return `<div class="tl-row">
+      <div class="tl-t" title="${esc(new Date(e.occurred).toLocaleString())}">${when(e.occurred).replace(/<[^>]+>/g, '')}</div>
+      <div class="tl-rail"><span class="tl-dot ${evClass(e.event)}"></span></div>
+      <div class="tl-body">
+        <details ${hasPayload ? '' : 'open'}>
+          <summary><span class="mono">${esc(e.event)}</span>
+            <span class="muted mono"> · ${esc(e.resource_type)}/${esc(String(e.resource_id).slice(0, 8))}</span></summary>
+          ${hasPayload ? `<pre>${esc(payload)}</pre>` : ''}
+        </details>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty">No events yet.</div>';
 }
 
-// --- run detail -------------------------------------------------------------
+// --- run detail ----------------------------------------------------------
 async function openRun(id) {
   const dlg = document.getElementById('run-dialog');
   document.getElementById('rd-body').innerHTML = '<div class="empty">Loading…</div>';
   dlg.showModal();
-  const [run, tasks, logs, arts] = await Promise.all([
+  const [run, tasks, logs, arts, kids] = await Promise.all([
     api('/runs/' + id), api('/runs/' + id + '/tasks'),
     api('/runs/' + id + '/logs?limit=800'), api('/runs/' + id + '/artifacts'),
+    api('/runs/' + id + '/children').catch(() => []),
   ]);
   document.getElementById('rd-title').innerHTML = esc(run.name) + ' ' + state(run.state);
   document.getElementById('rd-body').innerHTML = `
     <dl class="kv">
       <dt>Run id</dt><dd class="mono">${esc(run.id)}</dd>
       <dt>Flow</dt><dd>${esc(run.flow_name)}</dd>
-      <dt>Queue</dt><dd>${esc(run.work_queue)}</dd>
+      <dt>Pool</dt><dd>${esc(run.work_queue)}</dd>
       <dt>Priority</dt><dd>${prio(run)}</dd>
       <dt>Attempt</dt><dd>${run.run_count}${run.retries ? ' of ' + (run.retries + 1) : ''}</dd>
       <dt>Scheduled</dt><dd>${when(run.scheduled_at)}</dd>
       <dt>Started</dt><dd>${when(run.started_at)}</dd>
       <dt>Ended</dt><dd>${when(run.ended_at)}</dd>
+      ${run.parent_run_id ? `<dt>Parent</dt><dd><a href="#" class="mono" onclick="openRun('${run.parent_run_id}');return false">${esc(run.parent_run_id.slice(0, 8))}</a></dd>` : ''}
       ${run.state_message ? `<dt>Message</dt><dd class="mono">${esc(run.state_message)}</dd>` : ''}
       ${run.result ? `<dt>Result</dt><dd class="mono">${esc(JSON.stringify(run.result))}</dd>` : ''}
     </dl>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Timeline</h2>
+      <div class="scroll" style="padding:10px 14px">${swimlane(run, tasks, kids)}</div>
+    </div>
     <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
       <h2>Checkpoints (${tasks.length})</h2>
       <div class="scroll"><table>
@@ -746,7 +1174,48 @@ async function openRun(id) {
     </div>`;
 }
 
-// --- live stream ------------------------------------------------------------
+// swimlane: a Temporal-style execution view — a Flow-run lane, one lane per
+// checkpoint, one per sub-flow — laid out on a shared time axis. Pure SVG.
+function swimlane(run, tasks, kids) {
+  const lanes = [];
+  const num = t => t ? +new Date(t) : null;
+  lanes.push({ label: 'Flow run', state: run.state, start: num(run.started_at) || num(run.scheduled_at), end: num(run.ended_at) });
+  tasks.forEach(t => lanes.push({ label: t.task_key, state: t.state, start: num(t.started_at), end: num(t.ended_at), sub: t.run_count > 1 ? 'x' + t.run_count : '' }));
+  (kids || []).forEach(k => lanes.push({
+    label: '⑃ ' + k.name, state: k.state, start: num(k.started_at) || num(k.created_at), end: num(k.ended_at),
+    onclick: `document.getElementById('run-dialog').close();openRun('${k.id}')`,
+  }));
+
+  const times = lanes.flatMap(l => [l.start, l.end]).filter(Boolean);
+  if (!times.length) return '<span class="muted">Nothing executed yet.</span>';
+  const t0 = Math.min(...times), t1 = Math.max(...times, t0 + 1000), span = Math.max(1, t1 - t0);
+  const W = 900, LABEL = 220, TRACK = W - LABEL - 12, ROW = 24, TOP = 22, H = TOP + lanes.length * ROW + 6;
+  const X = t => LABEL + ((t - t0) / span) * TRACK;
+
+  // axis ticks
+  let axis = `<line x1="${LABEL}" y1="${TOP - 6}" x2="${W}" y2="${TOP - 6}" class="gridline"/>`;
+  for (let i = 0; i <= 4; i++) {
+    const tt = t0 + (span * i / 4), x = X(tt);
+    axis += `<line x1="${x}" y1="${TOP - 6}" x2="${x}" y2="${H}" class="gridline"/>`;
+    axis += `<text class="axis" x="${x + 2}" y="${TOP - 10}">${new Date(tt).toLocaleTimeString()}</text>`;
+  }
+  const rows = lanes.map((l, i) => {
+    const y = TOP + i * ROW;
+    const s = l.start != null ? l.start : t0;
+    const e = l.end != null ? l.end : t1;
+    const x = X(s), w = Math.max(3, X(e) - X(s));
+    const cur = l.onclick ? ` style="cursor:pointer" onclick="${l.onclick}"` : '';
+    return `<g${cur}>
+      <text class="axis" x="0" y="${y + ROW / 2 + 3}" fill="var(--muted)">${esc(l.label.length > 36 ? l.label.slice(0, 35) + '…' : l.label)}</text>
+      <rect x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" width="${w.toFixed(1)}" height="${ROW - 10}" rx="3" fill="${STCOL(l.state)}" opacity="0.9">
+        <title>${esc(l.label)} — ${l.state}${l.start && l.end ? ' — ' + ((l.end - l.start) / 1000).toFixed(2) + 's' : ''}</title></rect>
+      ${l.sub ? `<text class="axis" x="${(x + w + 4).toFixed(1)}" y="${y + ROW / 2 + 3}">${l.sub}</text>` : ''}
+    </g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;min-width:${(W / 1.4).toFixed(0)}px" xmlns="http://www.w3.org/2000/svg">${axis}${rows}</svg>`;
+}
+
+// --- live stream --------------------------------------------------------
 let pending = null;
 function connect() {
   const es = new EventSource('/api/v1/stream' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
@@ -758,19 +1227,18 @@ function connect() {
     document.getElementById('livedot').classList.remove('on');
     document.getElementById('livetext').textContent = 'reconnecting…';
   };
-  // Coalesce bursts: a hundred state changes in a second should cost one redraw.
   es.onmessage = () => {
     if (pending) return;
     pending = setTimeout(() => { pending = null; refreshCurrent(); }, 600);
   };
 }
 
-// --- settings: external API ----------------------------------------------
+// --- settings: external API --------------------------------------------
 let settingsTab = 'external', extTab = 'keys', apiRoles = null;
 const keyCache = {};
 
 function loadSettings() {
-  if (!isAdmin()) { show('runs'); return; }
+  if (!isAdmin()) { show('dashboard'); return; }
   showSettings(settingsTab);
 }
 function showSettings(s) {
@@ -778,12 +1246,8 @@ function showSettings(s) {
   document.querySelectorAll('#settings-subnav button').forEach(b => b.classList.toggle('active', b.dataset.s === s));
   document.getElementById('settings-external').hidden = s !== 'external';
   document.getElementById('settings-users').hidden = s !== 'users';
-  if (s === 'external') {
-    loadExternalSettings();
-    loadRoles().then(() => { loadKeys(); renderExplorer(); });
-  } else {
-    loadUsers();
-  }
+  if (s === 'external') { loadExternalSettings(); loadRoles().then(() => { loadKeys(); renderExplorer(); }); }
+  else loadUsers();
 }
 function showExtTab(t) {
   extTab = t;
@@ -795,8 +1259,23 @@ function showExtTab(t) {
 async function loadExternalSettings() {
   try {
     const cfg = await api('/settings/external-api');
-    const tog = document.getElementById('ext-enabled');
-    tog.setAttribute('aria-checked', String(!!cfg.enabled));
+    document.getElementById('ext-enabled').setAttribute('aria-checked', String(!!cfg.enabled));
+  } catch (e) { toast(e.message, true); }
+  try {
+    const lr = await api('/settings/log-retention');
+    document.getElementById('lr-enabled').checked = !!lr.enabled;
+    document.getElementById('lr-hours').value = lr.max_age_hours || '';
+  } catch (e) {}
+}
+async function saveRetention(ev) {
+  ev.preventDefault();
+  const hours = parseInt(document.getElementById('lr-hours').value, 10);
+  try {
+    await api('/settings/log-retention', { method: 'PUT', body: JSON.stringify({
+      enabled: document.getElementById('lr-enabled').checked,
+      max_age_hours: hours > 0 ? hours : undefined,
+    }) });
+    toast('Log retention saved');
   } catch (e) { toast(e.message, true); }
 }
 async function toggleExternal() {
@@ -1001,7 +1480,7 @@ function resetUserPw(id) {
     .then(() => toast('Password reset')).catch(e => toast(e.message, true));
 }
 
-// --- boot ------------------------------------------------------------------
+// --- boot ---------------------------------------------------------------
 async function bootstrap() {
   try {
     const r = await fetch('/api/v1/auth/me', {
@@ -1022,13 +1501,13 @@ async function bootstrap() {
     if (b) b.remove();
   }
 
-  show('runs');
+  show('dashboard');
   loadFlows();
   connect();
   setInterval(refreshCurrent, 15000);
 }
 async function logout() {
-  try { await api('/auth/logout', { method: 'POST' }); } catch (e) { /* going to login anyway */ }
+  try { await api('/auth/logout', { method: 'POST' }); } catch (e) {}
   toLogin();
 }
 

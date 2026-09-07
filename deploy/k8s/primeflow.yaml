@@ -42,6 +42,13 @@ data:
   PRIMEFLOW_COOKIE_SECURE: "true"
   PRIMEFLOW_TRUSTED_PROXY_CIDRS: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
   PRIMEFLOW_SESSION_TTL: "168h"
+  # Notification bus. Point at a NATS or Redis service; omit for polling-only.
+  PRIMEFLOW_NATS_URL: "nats://nats.primeflow.svc.cluster.local:4222"
+  # Bounded pf_logs. The leader prunes older run logs every 30 min.
+  PRIMEFLOW_LOG_RETENTION: "720h"
+  # Uncomment to export traces (server AND workers pick this up).
+  # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc:4318"
+  # OTEL_SERVICE_NAME: "primeflow"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -92,9 +99,32 @@ kind: Service
 metadata:
   name: primeflow
   namespace: primeflow
+  labels: {app: primeflow, component: server}
 spec:
   selector: {app: primeflow, component: server}
+  # /metrics is on the same listener as the API (:8080 -> port 80 here).
   ports: [{name: http, port: 80, targetPort: http}]
+---
+# Prometheus Operator scrape config. Apply only if the ServiceMonitor CRD exists.
+# The server's /metrics carries queue depth, desired-worker targets and API RED;
+# each worker exposes flow/task execution timings on its own :9090 (scrape the
+# pods directly with a PodMonitor, or add a headless Service per worker pool).
+# apiVersion: monitoring.coreos.com/v1
+# kind: ServiceMonitor
+# metadata:
+#   name: primeflow
+#   namespace: primeflow
+#   labels: {app: primeflow}
+# spec:
+#   selector: {matchLabels: {app: primeflow, component: server}}
+#   endpoints: [{port: http, path: /metrics, interval: 15s}]
+# ---
+# apiVersion: monitoring.coreos.com/v1
+# kind: PodMonitor
+# metadata: {name: primeflow-workers, namespace: primeflow, labels: {app: primeflow}}
+# spec:
+#   selector: {matchLabels: {app: primeflow, component: worker}}
+#   podMetricsEndpoints: [{port: metrics, path: /metrics, interval: 15s}]
 ---
 # One worker Deployment per lane. Duplicate this block per queue and give each
 # its own replica count and resource profile.
@@ -123,8 +153,10 @@ spec:
         - name: worker
           image: registry.example.com/primex/primeflow:latest
           command: ["/usr/local/bin/primex-worker"]
+          ports: [{name: metrics, containerPort: 9090}]
           envFrom:
             - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
           env:
             - name: PRIMEFLOW_QUEUES
               value: "vcd"
@@ -162,8 +194,10 @@ spec:
         - name: worker
           image: registry.example.com/primex/primeflow:latest
           command: ["/usr/local/bin/primex-worker"]
+          ports: [{name: metrics, containerPort: 9090}]
           envFrom:
             - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
           env:
             - name: PRIMEFLOW_QUEUES
               value: "metering"
@@ -179,9 +213,43 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: ["ALL"]}
 ---
-# Scale workers on queue depth rather than CPU: a lane backing up is the signal
-# that matters, and CPU stays flat while flows wait on vCD.
-# Requires a metrics adapter that can expose primeflow_queue_ready.
+# ---------------------------------------------------------------------------
+# Autoscaling the vcd worker pool on real workload signal.
+#
+# PrimeFlow does NOT start workers. The server publishes, per queue, on /metrics:
+#   primeflow_queue_ready{queue="vcd"}            - runs whose time has come
+#   primeflow_queue_desired_workers{queue="vcd"}  - clamp(ceil(ready/target), min, max)
+#     where target/min/max come from the work-pool settings (Console -> Work Pools
+#     -> Autoscale, or POST /api/v1/queues).
+#
+# Pick ONE of the two blocks below. Both stay commented until their CRDs exist.
+# ---------------------------------------------------------------------------
+#
+# A) KEDA (recommended). Scales straight off the Prometheus query, to zero if you
+#    let it. `helm install keda kedacore/keda -n keda --create-namespace` first.
+#
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: primeflow-worker-vcd
+#   namespace: primeflow
+# spec:
+#   scaleTargetRef: {name: primeflow-worker-vcd}
+#   minReplicaCount: 2
+#   maxReplicaCount: 20
+#   pollingInterval: 15
+#   cooldownPeriod: 120
+#   triggers:
+#     - type: prometheus
+#       metadata:
+#         serverAddress: http://prometheus.monitoring.svc:9090
+#         query: max(primeflow_queue_desired_workers{queue="vcd"})
+#         threshold: "1"          # desired replicas == the query value
+#         activationThreshold: "0"
+#
+# B) Plain HPA v2 via prometheus-adapter (exposes primeflow_queue_ready as an
+#    external metric). Scale so each worker carries ~5 ready runs.
+#
 # apiVersion: autoscaling/v2
 # kind: HorizontalPodAutoscaler
 # metadata:

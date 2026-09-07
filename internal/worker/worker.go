@@ -9,17 +9,20 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/engine"
 	"github.com/primex/primeflow/internal/events"
+	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/store"
 	"github.com/primex/primeflow/pkg/sdk"
 )
@@ -38,6 +41,14 @@ type Config struct {
 	// its own runs; too long and a dead worker's runs stall for that long.
 	LeaseDuration     time.Duration
 	HeartbeatInterval time.Duration
+	// Metrics, when non-nil, is threaded into the engine for flow/task timings.
+	Metrics *metrics.Metrics
+	// MetricsAddr, when set and Metrics is non-nil, serves this worker's
+	// Prometheus registry (flow/task execution timings live in the worker
+	// process, not the server). Each worker pod is scraped separately.
+	MetricsAddr string
+	// MaxSubflowDepth bounds RunDeployment recursion (0 = engine default of 8).
+	MaxSubflowDepth int
 }
 
 func (c *Config) applyDefaults() {
@@ -91,7 +102,9 @@ func New(s store.Store, b bus.Bus, reg *sdk.Registry, em *events.Emitter, log *s
 		log = slog.Default()
 	}
 	id := uuid.NewString()
-	eng := engine.New(s, reg, em, log, engine.Config{WorkerID: id})
+	eng := engine.New(s, reg, em, log, engine.Config{
+		WorkerID: id, Metrics: cfg.Metrics, MaxSubflowDepth: cfg.MaxSubflowDepth,
+	})
 	return &Worker{
 		id: id, cfg: cfg, store: s, bus: b, engine: eng, reg: reg, log: log,
 		slots:   make(chan struct{}, cfg.Concurrency),
@@ -112,6 +125,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	w.publishCatalogue(ctx)
 	w.subscribe(ctx)
+	w.serveMetrics(ctx)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -224,6 +238,31 @@ func (w *Worker) subscribe(ctx context.Context) {
 	}
 }
 
+// serveMetrics exposes this worker's Prometheus registry on its own listener, so
+// flow- and task-execution timings (which happen in this process, not the
+// server) are scrapeable. One goroutine, shut down with ctx.
+func (w *Worker) serveMetrics(ctx context.Context) {
+	reg := w.cfg.Metrics.Registry()
+	if reg == nil || w.cfg.MetricsAddr == "" {
+		return
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	srv := &http.Server{Addr: w.cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	go func() {
+		w.log.Info("worker metrics listening", "addr", w.cfg.MetricsAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			w.log.Warn("worker metrics listener stopped", "err", err)
+		}
+	}()
+}
+
 func (w *Worker) watches(queue string) bool {
 	if queue == "" {
 		return true
@@ -242,7 +281,7 @@ func (w *Worker) publishCatalogue(ctx context.Context) {
 	for _, f := range w.reg.List() {
 		fl := &core.Flow{
 			ID: uuid.NewString(), Name: f.Name, Version: f.Version,
-			Description: f.Description, Tags: f.Tags,
+			Description: f.Description, Tags: f.Tags, ParamsSchema: f.ParamsSchema,
 		}
 		if err := w.store.UpsertFlow(ctx, fl); err != nil {
 			w.log.Warn("register flow failed", "flow", f.Name, "err", err)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
+	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/store"
 )
 
@@ -576,11 +577,19 @@ func (s *Server) listQueues(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upsertQueue(w http.ResponseWriter, r *http.Request) {
+	// Pointer fields: nil means "keep the stored value" so a small PATCH-style
+	// body (just concurrency_limit, say) does not reset the autoscaling envelope.
 	var b struct {
-		Name             string `json:"name"`
-		Description      string `json:"description,omitempty"`
-		ConcurrencyLimit *int   `json:"concurrency_limit,omitempty"`
-		Paused           bool   `json:"paused,omitempty"`
+		Name                 string  `json:"name"`
+		Description          *string `json:"description,omitempty"`
+		ConcurrencyLimit     *int    `json:"concurrency_limit,omitempty"`
+		Paused               *bool   `json:"paused,omitempty"`
+		MinWorkers           *int    `json:"min_workers,omitempty"`
+		MaxWorkers           *int    `json:"max_workers,omitempty"`
+		TargetReadyPerWorker *int    `json:"target_ready_per_worker,omitempty"`
+		Owner                *string `json:"owner,omitempty"`
+		PoolType             *string `json:"pool_type,omitempty"`
+		ClearMaxWorkers      bool    `json:"clear_max_workers,omitempty"`
 	}
 	if err := decode(r, &b); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -590,15 +599,96 @@ func (s *Server) upsertQueue(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("name is required"))
 		return
 	}
-	q := &core.WorkQueue{
-		Name: b.Name, Description: b.Description,
-		ConcurrencyLimit: b.ConcurrencyLimit, Paused: b.Paused,
+	q, err := s.store.GetWorkQueue(r.Context(), b.Name)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			fail(w, err)
+			return
+		}
+		q = &core.WorkQueue{Name: b.Name, TargetReadyPerWorker: 5, PoolType: "pull"}
+	}
+	if b.Description != nil {
+		q.Description = *b.Description
+	}
+	if b.ConcurrencyLimit != nil {
+		q.ConcurrencyLimit = b.ConcurrencyLimit
+	}
+	if b.Paused != nil {
+		q.Paused = *b.Paused
+	}
+	if b.MinWorkers != nil {
+		q.MinWorkers = *b.MinWorkers
+	}
+	if b.ClearMaxWorkers {
+		q.MaxWorkers = nil
+	} else if b.MaxWorkers != nil {
+		q.MaxWorkers = b.MaxWorkers
+	}
+	if b.TargetReadyPerWorker != nil {
+		q.TargetReadyPerWorker = *b.TargetReadyPerWorker
+	}
+	if b.Owner != nil {
+		q.Owner = *b.Owner
+	}
+	if b.PoolType != nil {
+		if *b.PoolType != "pull" && *b.PoolType != "push" {
+			writeErr(w, http.StatusBadRequest, errors.New(`pool_type must be "pull" or "push"`))
+			return
+		}
+		q.PoolType = *b.PoolType
+	}
+	if q.MinWorkers < 0 || (q.MaxWorkers != nil && *q.MaxWorkers < q.MinWorkers) {
+		writeErr(w, http.StatusBadRequest, errors.New("min_workers must be >= 0 and <= max_workers"))
+		return
 	}
 	if err := s.store.UpsertWorkQueue(r.Context(), q); err != nil {
 		fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, q)
+}
+
+// getQueue returns one work pool plus its live workers and the computed
+// autoscaling target — the exact number a KEDA ScaledObject or HPA should scale
+// the worker Deployment to.
+func (s *Server) getQueue(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	stats, err := s.store.QueueStats(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	var qs *store.QueueStat
+	for i := range stats {
+		if stats[i].Name == name {
+			qs = &stats[i]
+			break
+		}
+	}
+	if qs == nil {
+		writeErr(w, http.StatusNotFound, store.ErrNotFound)
+		return
+	}
+	workers, _ := s.store.ListWorkers(r.Context())
+	now := time.Now().UTC()
+	type wk struct {
+		core.WorkerInfo
+		Online bool `json:"online"`
+	}
+	var mine []wk
+	for _, x := range workers {
+		for _, q := range x.Queues {
+			if q == name {
+				mine = append(mine, wk{WorkerInfo: x, Online: x.Online(now, 90*time.Second)})
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"queue":           qs,
+		"workers":         mine,
+		"desired_workers": metrics.DesiredWorkers(qs.Ready, qs.TargetReadyPerWorker, qs.MinWorkers, qs.MaxWorkers),
+	})
 }
 
 // queuePending shows the queue in dispatch order — the view an operator needs

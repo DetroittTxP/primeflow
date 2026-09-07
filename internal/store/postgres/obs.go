@@ -169,6 +169,224 @@ SELECT id, flow_run_id, task_run_id, level, message, fields, ts
 	return out, rows.Err()
 }
 
+// GetLogRetention reads the pf_settings row keyed "log_retention".
+func (s *Store) GetLogRetention(ctx context.Context) (core.LogRetention, error) {
+	var raw []byte
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM pf_settings WHERE key='log_retention'`).Scan(&raw)
+	if err != nil {
+		if mapErr(err) == store.ErrNotFound {
+			return core.LogRetention{Enabled: true, MaxAgeHours: 720}, nil
+		}
+		return core.LogRetention{}, mapErr(err)
+	}
+	var out core.LogRetention
+	_ = json.Unmarshal(raw, &out)
+	return out, nil
+}
+
+// PutLogRetention overwrites the log-retention setting.
+func (s *Store) PutLogRetention(ctx context.Context, in core.LogRetention) error {
+	raw, _ := json.Marshal(in)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO pf_settings (key, value, updated_at) VALUES ('log_retention', $1, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, raw)
+	return mapErr(err)
+}
+
+// DeleteLogsOlderThan removes pf_logs rows written before cutoff. It deletes in
+// bounded batches so it never holds a long lock, and stops after maxRows so one
+// janitor pass cannot monopolise a connection. It returns the number deleted and
+// whether more remain.
+func (s *Store) DeleteLogsOlderThan(ctx context.Context, cutoff time.Time, maxRows int) (deleted int, more bool, err error) {
+	const batch = 5000
+	if maxRows <= 0 {
+		maxRows = 100000
+	}
+	for deleted < maxRows {
+		res, e := s.db.ExecContext(ctx, `
+DELETE FROM pf_logs WHERE id IN (
+    SELECT id FROM pf_logs WHERE ts < $1 ORDER BY id LIMIT $2
+)`, cutoff.UTC(), batch)
+		if e != nil {
+			return deleted, false, mapErr(e)
+		}
+		n, _ := res.RowsAffected()
+		deleted += int(n)
+		if n < batch {
+			return deleted, false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return deleted, true, ctx.Err()
+		default:
+		}
+	}
+	return deleted, true, nil
+}
+
+// Stats returns time-bucketed activity for the console Dashboard. It runs three
+// date_bin GROUP BY queries (Postgres 14+); on an older server the queries error
+// and the caller gets a zero-value Stats, which the dashboard renders as bare.
+func (s *Store) Stats(ctx context.Context, window time.Duration, buckets int) (core.Stats, error) {
+	if buckets <= 0 {
+		buckets = 48
+	}
+	step := roundStep(window / time.Duration(buckets))
+	out := core.Stats{
+		WindowSeconds: int(window.Seconds()),
+		BucketSeconds: int(step.Seconds()),
+	}
+	out.FlowRuns.ByState = map[string]int{}
+
+	// The date_bin grid origin, matched on the Go side so bucket keys line up.
+	const origin = "TIMESTAMPTZ '2000-01-01 00:00:00+00'"
+	binExpr := func(col string) string {
+		return "date_bin('" + itoa(int(step.Seconds())) + " seconds', " + col + ", " + origin + ")"
+	}
+	since := time.Now().Add(-window).UTC()
+
+	// --- flow runs: activity by outcome class ---
+	frRows, err := s.db.QueryContext(ctx, `
+SELECT `+binExpr(`COALESCE(started_at, scheduled_at, created_at)`)+` AS b,
+       count(*) FILTER (WHERE state = 'COMPLETED')            AS completed,
+       count(*) FILTER (WHERE state IN ('FAILED','CRASHED'))  AS failed,
+       count(*) FILTER (WHERE state NOT IN ('COMPLETED','FAILED','CRASHED')) AS other
+  FROM pf_flow_runs
+ WHERE COALESCE(started_at, scheduled_at, created_at) >= $1
+ GROUP BY b`, since)
+	if err != nil {
+		return out, mapErr(err)
+	}
+	frByBin := map[int64][3]int{}
+	for frRows.Next() {
+		var b time.Time
+		var c, f, o int
+		if err := frRows.Scan(&b, &c, &f, &o); err != nil {
+			frRows.Close()
+			return out, err
+		}
+		frByBin[b.Unix()] = [3]int{c, f, o}
+	}
+	frRows.Close()
+	if err := frRows.Err(); err != nil {
+		return out, err
+	}
+
+	// by_state + total over the window (by creation time).
+	stRows, err := s.db.QueryContext(ctx,
+		`SELECT state, count(*) FROM pf_flow_runs WHERE created_at >= $1 GROUP BY state`, since)
+	if err != nil {
+		return out, mapErr(err)
+	}
+	for stRows.Next() {
+		var st string
+		var n int
+		if err := stRows.Scan(&st, &n); err != nil {
+			stRows.Close()
+			return out, err
+		}
+		out.FlowRuns.ByState[st] = n
+		out.FlowRuns.Total += n
+	}
+	stRows.Close()
+
+	// --- task runs ---
+	trRows, err := s.db.QueryContext(ctx, `
+SELECT `+binExpr(`COALESCE(ended_at, created_at)`)+` AS b,
+       count(*) FILTER (WHERE state = 'COMPLETED')           AS completed,
+       count(*) FILTER (WHERE state IN ('FAILED','CRASHED')) AS failed
+  FROM pf_task_runs
+ WHERE COALESCE(ended_at, created_at) >= $1
+ GROUP BY b`, since)
+	if err != nil {
+		return out, mapErr(err)
+	}
+	trByBin := map[int64][2]int{}
+	for trRows.Next() {
+		var b time.Time
+		var c, f int
+		if err := trRows.Scan(&b, &c, &f); err != nil {
+			trRows.Close()
+			return out, err
+		}
+		trByBin[b.Unix()] = [2]int{c, f}
+		out.TaskRuns.Completed += c
+		out.TaskRuns.Failed += f
+		out.TaskRuns.Total += c + f
+	}
+	trRows.Close()
+
+	// --- events ---
+	evRows, err := s.db.QueryContext(ctx, `
+SELECT `+binExpr(`occurred`)+` AS b, count(*)
+  FROM pf_events WHERE occurred >= $1 GROUP BY b`, since)
+	if err != nil {
+		return out, mapErr(err)
+	}
+	evByBin := map[int64]int{}
+	for evRows.Next() {
+		var b time.Time
+		var n int
+		if err := evRows.Scan(&b, &n); err != nil {
+			evRows.Close()
+			return out, err
+		}
+		evByBin[b.Unix()] = n
+		out.Events.Total += n
+	}
+	evRows.Close()
+
+	// Materialise a contiguous, aligned bucket list.
+	first := binStart(since, step)
+	for t := first; !t.After(time.Now()); t = t.Add(step) {
+		k := t.Unix()
+		fr := frByBin[k]
+		out.FlowRuns.Buckets = append(out.FlowRuns.Buckets,
+			core.FlowRunBucket{T: t, Completed: fr[0], Failed: fr[1], Other: fr[2]})
+		tr := trByBin[k]
+		out.TaskRuns.Buckets = append(out.TaskRuns.Buckets,
+			core.TaskBucket{T: t, Completed: tr[0], Failed: tr[1]})
+		out.Events.Buckets = append(out.Events.Buckets, core.CountBucket{T: t, N: evByBin[k]})
+	}
+	return out, nil
+}
+
+// roundStep snaps a raw bucket width to a friendly value so axis labels are sane.
+func roundStep(d time.Duration) time.Duration {
+	steps := []time.Duration{
+		time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 15 * time.Minute,
+		30 * time.Minute, time.Hour, 2 * time.Hour, 4 * time.Hour, 6 * time.Hour, 12 * time.Hour,
+	}
+	for _, s := range steps {
+		if d <= s {
+			return s
+		}
+	}
+	return 24 * time.Hour
+}
+
+// binStart aligns t down to the date_bin grid (origin 2000-01-01 UTC).
+func binStart(t time.Time, step time.Duration) time.Time {
+	origin := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	n := t.Sub(origin) / step
+	return origin.Add(n * step)
+}
+
+// itoa avoids importing strconv into this file for one call site.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 // ---------------------------------------------------------- artifacts -----
 
 // CreateArtifact stores a human-facing output of a run.

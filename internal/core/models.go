@@ -24,8 +24,12 @@ type Flow struct {
 	Description string            `json:"description,omitempty"`
 	Tags        []string          `json:"tags,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	UpdatedAt   time.Time         `json:"updated_at"`
+	// ParamsSchema is a compact, reflection-derived description of the flow's
+	// parameter struct, published by the worker. The console's Flows page uses it
+	// to render a typed quick-run form. Nil when the flow declared no schema.
+	ParamsSchema json.RawMessage `json:"params_schema,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
 // ScheduleKind selects how Deployment.Schedule is interpreted.
@@ -70,12 +74,25 @@ type Deployment struct {
 // Workers poll one or more queues; operators throttle a queue to protect a
 // downstream system (a vCenter, a billing API) without touching the flows.
 type WorkQueue struct {
-	Name             string    `json:"name"`
-	Description      string    `json:"description,omitempty"`
-	ConcurrencyLimit *int      `json:"concurrency_limit,omitempty"`
-	Paused           bool      `json:"paused"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	ConcurrencyLimit *int   `json:"concurrency_limit,omitempty"`
+	Paused           bool   `json:"paused"`
+
+	// Work-pool autoscaling envelope. The server exposes
+	// primeflow_queue_desired_workers = clamp(ceil(ready / TargetReadyPerWorker),
+	// MinWorkers, MaxWorkers) for a KEDA ScaledObject or an HPA to act on;
+	// PrimeFlow itself never starts or stops workers. Owner is free text so an
+	// external team's pool is attributable. PoolType is "pull" (only mode) or the
+	// reserved "push".
+	MinWorkers           int    `json:"min_workers"`
+	MaxWorkers           *int   `json:"max_workers,omitempty"`
+	TargetReadyPerWorker int    `json:"target_ready_per_worker"`
+	Owner                string `json:"owner,omitempty"`
+	PoolType             string `json:"pool_type,omitempty"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // FlowRun is one execution of a flow.
@@ -116,6 +133,13 @@ type FlowRun struct {
 	Result        json.RawMessage `json:"result,omitempty"`
 	Tags          []string        `json:"tags,omitempty"`
 	CancelRequest bool            `json:"cancel_requested"`
+
+	// Sub-flow lineage. ParentRunID and ParentTaskKey are set when this run was
+	// started by another run's RunDeployment / RunDeploymentAndWait. TraceContext
+	// carries the parent's W3C traceparent so spans nest across the boundary.
+	ParentRunID   *string `json:"parent_run_id,omitempty"`
+	ParentTaskKey *string `json:"parent_task_key,omitempty"`
+	TraceContext  string  `json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -233,6 +257,52 @@ type Automation struct {
 	LastFiredAt *time.Time `json:"last_fired_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// Stats is the time-bucketed activity the console's Dashboard renders. Every
+// bucket list is oldest-first and evenly spaced by BucketSeconds.
+type Stats struct {
+	WindowSeconds int `json:"window_seconds"`
+	BucketSeconds int `json:"bucket_seconds"`
+
+	FlowRuns struct {
+		Total   int             `json:"total"`
+		ByState map[string]int  `json:"by_state"`
+		Buckets []FlowRunBucket `json:"buckets"`
+	} `json:"flow_runs"`
+
+	TaskRuns struct {
+		Total     int          `json:"total"`
+		Completed int          `json:"completed"`
+		Failed    int          `json:"failed"`
+		Buckets   []TaskBucket `json:"buckets"`
+	} `json:"task_runs"`
+
+	Events struct {
+		Total   int           `json:"total"`
+		Buckets []CountBucket `json:"buckets"`
+	} `json:"events"`
+}
+
+// FlowRunBucket counts flow-run activity in one time slice by outcome class.
+type FlowRunBucket struct {
+	T         time.Time `json:"t"`
+	Completed int       `json:"completed"`
+	Failed    int       `json:"failed"`
+	Other     int       `json:"other"`
+}
+
+// TaskBucket counts task-run completions in one time slice.
+type TaskBucket struct {
+	T         time.Time `json:"t"`
+	Completed int       `json:"completed"`
+	Failed    int       `json:"failed"`
+}
+
+// CountBucket is a plain count in one time slice.
+type CountBucket struct {
+	T time.Time `json:"t"`
+	N int       `json:"n"`
 }
 
 // WorkerInfo is a heartbeat record so the UI can show who is online.

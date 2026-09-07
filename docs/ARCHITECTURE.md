@@ -142,6 +142,49 @@ extends it with heartbeats. Three things follow:
 `CRASHED` is deliberately not terminal. A crash is not the flow's fault, so it
 gets one attempt beyond the configured retry budget before it is called failed.
 
+### Why workers cannot deadlock each other
+
+- **Dispatch** is a single `SELECT … FOR UPDATE SKIP LOCKED` (see §3). The row
+  lock is acquired and released inside that one statement. There is no second
+  row locked in the same transaction, so there is no lock-ordering problem and
+  no circular wait between workers.
+- **Lease renewal, heartbeats, state writes** are each single-row `UPDATE`s,
+  independent per run.
+- **Leader election** (`pf_leader`) is one conditional `INSERT … ON CONFLICT`;
+  no lock is held between calls.
+- The only structure that could form a cycle is **sub-flow recursion**
+  (`RunDeployment` from inside a flow). Before a child is created the engine
+  walks `parent_run_id` upward: it refuses if the chain is already
+  `PRIMEFLOW_MAX_SUBFLOW_DEPTH` deep, or if the target deployment is already an
+  ancestor. So the run graph is a bounded DAG by construction.
+
+---
+
+## 4a. Sub-flows
+
+`RunDeploymentAndWait` is built entirely from primitives that already exist:
+
+1. A **task checkpoint** stores the child run id. The trigger carries an
+   idempotency key `child:<parentRunID>:<taskKey>`, so a replaying parent gets
+   the *same* child back instead of spawning a second one.
+2. The parent then **suspends** (`SCHEDULED`, lease released) until the child
+   settles. It is woken two ways: the engine, on writing any run to a terminal
+   state, checks `parent_run_id` and — if no sibling is still unfinished —
+   reschedules the parent; failing that, the parent's own 30-second suspend
+   re-poll is the backstop.
+3. On resume the parent replays from the top, the checkpoint yields the child
+   id, `GetRunState` reads its outcome, and execution continues. A `FAILED` or
+   `CANCELLED` child returns a permanent error so the parent does not burn its
+   own retry budget on it.
+
+There is a small race — a child that finishes in the window between the parent's
+`CountUnfinishedChildren` check and its `Suspend` — but it is self-healing: the
+child's reschedule of a still-`RUNNING` parent is a no-op, and the parent's next
+replay re-checks. Worst case the parent waits one 30-second re-poll.
+
+The child run also carries the parent's W3C `traceparent`, so `flow_run` spans
+nest across the process boundary.
+
 ---
 
 ## 5. State transitions
@@ -165,6 +208,24 @@ in that state is the one failure operators cannot diagnose from the console.
 needed. One Deployment per queue is the recommended shape: a slow lane scales
 without touching the others, and pausing a lane drains it without a rollout.
 
+The scaling *signal* is published, not acted on. A work queue carries
+`min_workers`, `max_workers` and `target_ready_per_worker`; the server exposes
+`primeflow_queue_desired_workers{queue} = clamp(ceil(ready/target), min, max)` at
+`/metrics`, and a KEDA `ScaledObject` or an HPA external-metric scales the worker
+Deployment to it. PrimeFlow never calls the Kubernetes API — keeping the binary
+free of cluster credentials and portable to a plain `docker compose` or a
+systemd unit. External teams run their own worker Deployment against their own
+pool name; the `owner` field is how the console attributes it.
+
+### Transports
+
+The wake-up bus (`internal/bus`) has three interchangeable implementations,
+selected NATS → Redis → in-process. It is strictly an accelerator: every message
+is a hint ("new work on queue X", "cancel run Y"), correctness never depends on
+delivery, and a consumer that misses one converges on its next poll. A dial
+failure at start-up degrades to polling with a warning rather than refusing to
+run.
+
 **The server** scales horizontally for API traffic. The scheduler and automation
 evaluator must not run N times, so both are leader-elected through a lease row
 in `pf_leader`. Schedule materialisation is *additionally* idempotent on
@@ -181,8 +242,10 @@ happens next, not replay a month of history as if it were live.
 
 ## 7. What will need attention first
 
-- **`pf_logs` growth.** The one unbounded table. Partition by day or add a
-  retention job before this carries production volume.
+- **`pf_logs` growth.** Now bounded by a leader-run age-based delete
+  (`PRIMEFLOW_LOG_RETENTION`, default 720h, batched 5k rows at a time). Native
+  daily partitioning is the next step for very high volume; the delete job is
+  what ships.
 - **Poll amplification.** Fine to a few dozen workers per lane. Beyond that,
   `LISTEN/NOTIFY` or a longer poll interval leaning harder on Redis.
 - **Result size.** Task results are stored as `jsonb` inline. Large payloads

@@ -110,10 +110,10 @@ flow code.
 ```
    PrimeX backend ─┐
    Web console ────┼──► PrimeFlow server ──► PostgreSQL   (state + queue, source of truth)
-   CLI / webhooks ─┘      │  scheduler                │
+   CLI / webhooks ─┘      │  scheduler + janitor      │
                           │  automations              │
-                          │  REST + SSE               ▼
-                          └──────────────────────►  Redis   (wake-ups + live fan-out)
+                          │  REST + SSE + /metrics    ▼
+                          └──────────────────────►  NATS / Redis   (wake-ups + live fan-out)
                                                        ▲
                               Workers  ─────────────────┘
                               (your binary + pkg/sdk)
@@ -121,17 +121,24 @@ flow code.
 
 **Postgres is the only source of truth**, including queue order. Dispatch is a
 single `SELECT … FOR UPDATE SKIP LOCKED` statement, so any number of workers
-pull from the same lane without a broker and without double execution.
+pull from the same lane without a broker and without double execution. That
+statement takes and releases one row lock; there is no lock ordering, no
+cross-row wait, and no advisory lock held across calls — workers cannot deadlock
+each other. The only place a cycle could form is sub-flow recursion, which is
+depth-bounded (see below).
 
-**Redis is an accelerator, never a dependency.** It carries "new work on queue
+**The bus is an accelerator, never a dependency.** It carries "new work on queue
 X", cancellation signals, and the UI's live stream. Lose it and everything still
-works, just with polling latency instead of instant wake-ups. If no Redis URL is
-configured, an in-process bus is used and the system runs on one binary plus
-Postgres.
+works, just with polling latency instead of instant wake-ups. Choose the
+transport with `PRIMEFLOW_NATS_URL` or `PRIMEFLOW_REDIS_URL` (NATS wins if both
+are set); with neither, an in-process bus runs the whole system on one binary
+plus Postgres.
 
-**The server scales horizontally.** The scheduler and automation evaluator are
-leader-elected through a lease row, so N replicas produce one set of scheduled
-runs, not N.
+**The server scales horizontally.** The scheduler, janitor and automation
+evaluator are leader-elected through a lease row, so N replicas produce one set
+of scheduled runs, not N. Worker pools scale on the workload signal PrimeFlow
+publishes at `/metrics` — a KEDA `ScaledObject` or HPA acts on
+`primeflow_queue_desired_workers`; PrimeFlow never launches workers itself.
 
 Full design notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -140,8 +147,8 @@ Full design notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Quick start
 
 ```bash
-docker compose up --build     # Postgres, Redis, server, 2 workers
-open http://localhost:8080
+docker compose up --build     # Postgres, NATS, server, 2 workers
+open http://localhost:8080     # log in as admin@primeflow.local / primeflow-admin
 ```
 
 Or run it directly:
@@ -200,11 +207,16 @@ Configuration comes from the environment, so the same image runs everywhere:
 | Variable | Meaning | Default |
 |---|---|---|
 | `PRIMEFLOW_DATABASE_URL` | Postgres DSN | required |
+| `PRIMEFLOW_NATS_URL` | NATS URL for live updates (wins over Redis) | optional |
 | `PRIMEFLOW_REDIS_URL` | Redis URL for live updates | optional |
 | `PRIMEFLOW_QUEUES` | comma-separated lanes to poll | `default` |
 | `PRIMEFLOW_CONCURRENCY` | runs executed in parallel | `4` |
 | `PRIMEFLOW_LEASE` | lease duration | `60s` |
 | `PRIMEFLOW_POLL` | fallback poll interval | `2s` |
+| `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | how deep `RunDeployment` may nest | `8` |
+| `PRIMEFLOW_LOG_RETENTION` | prune `pf_logs` older than this (Go duration) | `720h` |
+| `PRIMEFLOW_METRICS_ADDR` | worker's own `/metrics` listener (flow/task timings) | `:9090` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | send traces here; unset = tracing off, zero cost | none |
 | `PRIMEFLOW_HTTP_ADDR` | server listen address | `:8080` |
 | `PRIMEFLOW_API_TOKEN` | bearer token for machine clients (workers, CLI) on `/api/v1` | none |
 | `PRIMEFLOW_CORS_ORIGIN` | allow the PrimeX console to call the API | none |
@@ -271,7 +283,8 @@ c.Info("provisioning", "org", p.OrgName)
 c.Markdown("summary", "### VM created…")
 c.Table("usage", rows)
 c.Link("console", vm.Href, "Open in Cloud Director")
-c.RunDeployment("notify-oncall", payload, sdk.TriggerPriority(100))
+c.RunDeployment("notify-oncall", payload, sdk.TriggerPriority(100)) // fire and forget
+child, err := c.RunDeploymentAndWait("provision-vm-standard", params) // durable wait — see Sub-flows
 ```
 
 ---
@@ -369,6 +382,12 @@ unauthenticated so probes need no credential.
 | `GET/PUT /settings/external-api` | External API master switch (admin) |
 | `GET/POST /api-keys`, `PATCH/DELETE /api-keys/{id}`, `POST /api-keys/{id}/rotate`, `GET /api-keys/{id}/history` | External API keys (admin) |
 | `GET /api-roles` | role / scope / route catalogue (admin) |
+| `GET /flows/{name}` | one flow: versions, param schema, recent runs |
+| `GET /queues/{name}` | one work pool: workers + computed `desired_workers` |
+| `GET /runs/{id}/children` | sub-flow runs a run started |
+| `GET/PUT /settings/log-retention` | `pf_logs` cleanup policy (admin) |
+| `GET /stats?window=8h` | time-bucketed activity for the Dashboard |
+| `GET /metrics` | Prometheus (unauthenticated) |
 
 The External API lives under `/api/external/v1` (runs, deployments, queues,
 events) and is documented in [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md).
@@ -424,9 +443,94 @@ internal/worker/        leasing, heartbeats, graceful drain
 internal/server/        REST API, SSE stream, embedded console
 internal/scheduler/     schedule materialisation and the lease janitor
 internal/automations/   event-driven rules
-internal/bus/           Redis pub/sub, with an in-process fallback
-examples/primex-worker/ VM provisioning and metering flows
-deploy/k8s/             manifests
+internal/bus/           NATS and Redis pub/sub, with an in-process fallback
+internal/metrics/       Prometheus registry + scrape-time queue collector
+internal/otelinit/      OTLP tracing setup (no-op unless an endpoint is set)
+examples/primex-worker/ VM provisioning, metering, and a sub-flow fleet demo
+deploy/k8s/             manifests + KEDA/HPA autoscaling examples
+```
+
+---
+
+## Transports
+
+The notification bus has three implementations behind one interface
+(`internal/bus`). Precedence: **NATS → Redis → in-process**.
+
+| Set | Transport | Notes |
+|---|---|---|
+| `PRIMEFLOW_NATS_URL` | core NATS pub/sub | cluster-friendly; `nats://host:4222` |
+| `PRIMEFLOW_REDIS_URL` | Redis pub/sub | also fine for the UI stream |
+| neither | in-process | single binary + Postgres; workers fall back to `PRIMEFLOW_POLL` |
+
+A dial failure at start-up logs a warning and degrades to polling — the bus is
+never load-bearing.
+
+## Observability
+
+**Metrics.** `GET /metrics` (unauthenticated, like `/api/v1/health`) exposes:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `primeflow_queue_ready{queue}` | gauge | scheduled runs whose time has come |
+| `primeflow_queue_scheduled{queue}` · `_running{queue}` | gauge | backlog and in-flight |
+| `primeflow_queue_desired_workers{queue}` | gauge | `clamp(ceil(ready/target), min, max)` — the autoscale target |
+| `primeflow_workers_online` · `_total` | gauge | fleet liveness |
+| `primeflow_flow_run_transitions_total{to_state}` | counter | state changes |
+| `primeflow_flow_run_duration_seconds` · `primeflow_task_run_duration_seconds{outcome}` | histogram | execution timings |
+| `primeflow_http_requests_total{route,method,code}` · `_duration_seconds{route}` | counter/histogram | API RED |
+
+**Traces.** Set `OTEL_EXPORTER_OTLP_ENDPOINT` (standard OTEL env) and PrimeFlow
+emits `flow_run` → `task_run` spans over OTLP/HTTP, with trace context propagated
+from HTTP callers and across `RunDeployment` into child runs. Unset, the tracer
+is a no-op and costs nothing.
+
+## Sub-flows
+
+`RunDeployment(name, params)` fans out and returns immediately. To wait:
+
+```go
+child, err := c.RunDeploymentAndWait("provision-vm-standard", params)
+if err != nil { return nil, err }      // a failed child is a permanent error
+var vm VM
+_ = child.Into(&vm)
+```
+
+It is a durable checkpoint: the child is triggered exactly once no matter how
+often the parent replays, the parent releases its worker slot while the child
+runs, and it resumes the instant the last child settles (or re-polls every 30s
+as a backstop). Every child records its `parent_run_id`, so the console shows the
+tree. Recursion is bounded by `PRIMEFLOW_MAX_SUBFLOW_DEPTH` (default 8) and a
+child whose deployment already appears in the ancestor chain is refused.
+
+## Work pools & autoscaling
+
+A work queue doubles as a **work pool**: give it `min_workers`, `max_workers`,
+`target_ready_per_worker` and an `owner` (`POST /api/v1/queues`, or the console's
+**Work Pools → Autoscale…**). The server then publishes
+`primeflow_queue_desired_workers{queue}` and a KEDA `ScaledObject` or HPA scales
+the matching worker Deployment. PrimeFlow **never launches workers itself** — it
+publishes the target, Kubernetes acts. See
+[`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) for both.
+
+**External teams run their own workers**: point `primex-worker` at your pool with
+`PRIMEFLOW_QUEUES=<pool>`; the `owner` field groups it in the console. Workers
+never block each other — dispatch is one `SKIP LOCKED` statement per poll.
+
+## Console
+
+Single embedded page, no build step. It opens on a **Dashboard** — time-bucketed
+flow-run / task-run / event charts over 8h · 24h · 1w (`GET /api/v1/stats`,
+Postgres 14+ for `date_bin`; without it the dashboard shows bare totals), plus
+recent-flow and work-pool cards. **Runs** has a timeline strip and segmented
+filters; open any run for a Temporal-style execution **Timeline** (a lane per
+checkpoint and sub-flow on a shared time axis). **Event feed** is a rail
+timeline. **Flows** lists every registered flow with its param schema and a typed
+quick-run form — declare a schema so the form is typed:
+
+```go
+sdk.Flow("provision-vm", provisionVM,
+    sdk.ParamsSchema(ProvisionParams{OrgName: "acme", CPU: 2}))
 ```
 
 ---
@@ -435,16 +539,12 @@ deploy/k8s/             manifests
 
 Honest list of what is not built yet:
 
-- **NATS transport.** The `bus.Bus` interface is there and Redis implements it;
-  a NATS implementation is a single file, not yet written.
-- **Prometheus metrics.** Events and the API cover observability today; the
-  HPA example in the manifests assumes a `primeflow_queue_ready` metric that
-  needs an exporter.
-- **Log retention.** `pf_logs` grows without bound. Add a partition or a
-  cleanup job before production.
-- **Sub-flows.** `RunDeployment` fans out but does not wait for children.
-- **Shared rate limiting.** The login throttle and the per-API-key rate limiter
-  are in-process, so limits are per server replica. A cluster-wide limiter needs
-  Redis and is not built.
+- **`pf_logs` partitioning.** A batched age-based delete job ships; native
+  partitioning is the higher-scale option and is not wired.
+- **Push work pools.** The `pool_type` field exists; only `pull` (workers poll)
+  is implemented.
+- **Shared rate limiting.** The login throttle and per-API-key rate limiter are
+  in-process, so limits are per server replica.
 - **Auth extras.** No SSO/OAuth and no self-service password reset — an admin
   resets passwords via the console or `primeflow user passwd`.
+- **Single OTLP exporter.** Traces only; no metrics-over-OTLP, no log export.

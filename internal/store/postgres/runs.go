@@ -19,7 +19,8 @@ import (
 const flowRunCols = `id, name, flow_name, deployment_id, parameters, work_queue,
 	state, state_name, state_message, priority, queue_position, scheduled_at, started_at,
 	ended_at, run_count, retries, retry_delay_ms, timeout_ms, worker_id, lease_expires_at,
-	result, tags, cancel_requested, created_at, updated_at`
+	result, tags, cancel_requested, created_at, updated_at,
+	parent_run_id, parent_task_key, trace_context`
 
 func scanFlowRun(sc interface{ Scan(...any) error }) (*core.FlowRun, error) {
 	var r core.FlowRun
@@ -29,7 +30,8 @@ func scanFlowRun(sc interface{ Scan(...any) error }) (*core.FlowRun, error) {
 		&r.WorkQueue, &st, &r.StateName, &r.StateMessage, &r.Priority, &r.QueuePosition,
 		&r.ScheduledAt, &r.StartedAt, &r.EndedAt, &r.RunCount, &r.Retries, &retryMs, &timeoutMs,
 		&r.WorkerID, &r.LeaseExpiresAt, scanJSON(&r.Result), pq.Array(&r.Tags),
-		&r.CancelRequest, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.CancelRequest, &r.CreatedAt, &r.UpdatedAt,
+		&r.ParentRunID, &r.ParentTaskKey, &r.TraceContext); err != nil {
 		return nil, err
 	}
 	r.State = core.StateType(st)
@@ -64,17 +66,24 @@ func (s *Store) CreateFlowRun(ctx context.Context, in store.CreateRunInput) (*co
 		idem = in.IdempotencyKey
 	}
 
+	var parentTaskKey any
+	if in.ParentTaskKey != "" {
+		parentTaskKey = in.ParentTaskKey
+	}
+
 	const stmt = `
 INSERT INTO pf_flow_runs
   (id, name, flow_name, deployment_id, parameters, work_queue, state, state_name,
-   priority, scheduled_at, retries, retry_delay_ms, timeout_ms, tags, idempotency_key)
-VALUES ($1,$2,$3,$4,$5,$6,'SCHEDULED','Scheduled',$7,$8,$9,$10,$11,$12,$13)
+   priority, scheduled_at, retries, retry_delay_ms, timeout_ms, tags, idempotency_key,
+   parent_run_id, parent_task_key, trace_context)
+VALUES ($1,$2,$3,$4,$5,$6,'SCHEDULED','Scheduled',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 ON CONFLICT (idempotency_key) DO NOTHING
 RETURNING ` + flowRunCols
 
 	row := s.db.QueryRowContext(ctx, stmt, id, in.Name, in.FlowName, in.DeploymentID,
 		nullJSON(in.Parameters), in.WorkQueue, in.Priority, in.ScheduledAt.UTC(),
-		in.Retries, msOf(in.RetryDelay), msOf(in.Timeout), textArray(in.Tags), idem)
+		in.Retries, msOf(in.RetryDelay), msOf(in.Timeout), textArray(in.Tags), idem,
+		in.ParentRunID, parentTaskKey, in.TraceContext)
 
 	r, err := scanFlowRun(row)
 	if errors.Is(err, sql.ErrNoRows) && in.IdempotencyKey != "" {
@@ -98,6 +107,73 @@ func (s *Store) GetFlowRun(ctx context.Context, id string) (*core.FlowRun, error
 	row := s.db.QueryRowContext(ctx, `SELECT `+flowRunCols+` FROM pf_flow_runs WHERE id=$1`, id)
 	r, err := scanFlowRun(row)
 	return r, mapErr(err)
+}
+
+// ListChildRuns returns every run this run started, oldest first.
+func (s *Store) ListChildRuns(ctx context.Context, parentID string) ([]core.FlowRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+flowRunCols+` FROM pf_flow_runs WHERE parent_run_id=$1 ORDER BY created_at`, parentID)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []core.FlowRun
+	for rows.Next() {
+		r, err := scanFlowRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// CountUnfinishedChildren counts children that have not reached a terminal
+// state. A CRASHED child counts as unfinished: the janitor will retry it and the
+// parent should keep waiting.
+func (s *Store) CountUnfinishedChildren(ctx context.Context, parentID string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT count(*) FROM pf_flow_runs
+ WHERE parent_run_id = $1 AND state NOT IN ('COMPLETED','FAILED','CANCELLED')`, parentID).Scan(&n)
+	return n, mapErr(err)
+}
+
+// AncestorDeploymentIDs walks parent_run_id upward from runID and returns the
+// deployment id of each ancestor run, nearest first, stopping at maxDepth. It is
+// the input to the sub-flow recursion / depth guard.
+func (s *Store) AncestorDeploymentIDs(ctx context.Context, runID string, maxDepth int) ([]string, error) {
+	if maxDepth <= 0 {
+		maxDepth = 16
+	}
+	const q = `
+WITH RECURSIVE chain AS (
+    SELECT id, parent_run_id, deployment_id, 1 AS depth
+      FROM pf_flow_runs WHERE id = $1
+    UNION ALL
+    SELECT p.id, p.parent_run_id, p.deployment_id, c.depth + 1
+      FROM pf_flow_runs p JOIN chain c ON p.id = c.parent_run_id
+     WHERE c.depth < $2
+)
+SELECT deployment_id FROM chain WHERE id <> $1 ORDER BY depth`
+	rows, err := s.db.QueryContext(ctx, q, runID, maxDepth)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var dep sql.NullString
+		if err := rows.Scan(&dep); err != nil {
+			return nil, err
+		}
+		if dep.Valid {
+			out = append(out, dep.String)
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out, rows.Err()
 }
 
 // buildFilter renders a FlowRunFilter into a WHERE clause plus arguments.
@@ -491,6 +567,22 @@ UPDATE pf_flow_runs
        scheduled_at = $2, ended_at = NULL, worker_id = NULL, lease_expires_at = NULL,
        cancel_requested = false, updated_at = now()
  WHERE id = $1
+RETURNING ` + flowRunCols
+	row := s.db.QueryRowContext(ctx, stmt, runID, at.UTC())
+	r, err := scanFlowRun(row)
+	return r, mapErr(err)
+}
+
+// ResumeSuspendedRun brings a run out of a durable wait, but ONLY if it is still
+// SCHEDULED (i.e. actually suspended). A parent that is momentarily RUNNING — a
+// child finished before the parent reached its wait — is left alone, so its
+// lease is never cleared out from under an executing worker. Returns
+// store.ErrNotFound when the run was not in a resumable state.
+func (s *Store) ResumeSuspendedRun(ctx context.Context, runID string, at time.Time) (*core.FlowRun, error) {
+	const stmt = `
+UPDATE pf_flow_runs
+   SET scheduled_at = $2, updated_at = now()
+ WHERE id = $1 AND state = 'SCHEDULED'
 RETURNING ` + flowRunCols
 	row := s.db.QueryRowContext(ctx, stmt, runID, at.UTC())
 	r, err := scanFlowRun(row)

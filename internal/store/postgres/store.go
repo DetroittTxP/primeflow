@@ -145,22 +145,23 @@ func (s *Store) UpsertFlow(ctx context.Context, f *core.Flow) error {
 		labels = []byte("{}")
 	}
 	const q = `
-INSERT INTO pf_flows (id, name, version, description, tags, labels)
-VALUES ($1,$2,$3,$4,$5,$6)
+INSERT INTO pf_flows (id, name, version, description, tags, labels, params_schema)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
 ON CONFLICT (name, version) DO UPDATE
-   SET description = EXCLUDED.description,
-       tags        = EXCLUDED.tags,
-       labels      = EXCLUDED.labels,
-       updated_at  = now()
+   SET description   = EXCLUDED.description,
+       tags          = EXCLUDED.tags,
+       labels        = EXCLUDED.labels,
+       params_schema = COALESCE(EXCLUDED.params_schema, pf_flows.params_schema),
+       updated_at    = now()
 RETURNING id, created_at, updated_at`
 	err := s.db.QueryRowContext(ctx, q, f.ID, f.Name, f.Version, f.Description,
-		textArray(f.Tags), labels).Scan(&f.ID, &f.CreatedAt, &f.UpdatedAt)
+		textArray(f.Tags), labels, nullJSON(f.ParamsSchema)).Scan(&f.ID, &f.CreatedAt, &f.UpdatedAt)
 	return mapErr(err)
 }
 
 // ListFlows returns the whole catalogue, newest first.
 func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
-	const q = `SELECT id, name, version, description, tags, labels, created_at, updated_at
+	const q = `SELECT id, name, version, description, tags, labels, params_schema, created_at, updated_at
 	           FROM pf_flows ORDER BY name, version`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
@@ -172,7 +173,7 @@ func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
 		var f core.Flow
 		var labels []byte
 		if err := rows.Scan(&f.ID, &f.Name, &f.Version, &f.Description,
-			pq.Array(&f.Tags), &labels, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			pq.Array(&f.Tags), &labels, scanJSON(&f.ParamsSchema), &f.CreatedAt, &f.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(labels, &f.Labels)
@@ -183,51 +184,70 @@ func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
 
 // ----------------------------------------------------------- work queues ---
 
-// UpsertWorkQueue creates or updates a queue definition.
+const workQueueCols = `name, description, concurrency_limit, paused,
+	min_workers, max_workers, target_ready_per_worker, owner, pool_type,
+	created_at, updated_at`
+
+func scanWorkQueue(sc interface{ Scan(...any) error }) (*core.WorkQueue, error) {
+	var q core.WorkQueue
+	if err := sc.Scan(&q.Name, &q.Description, &q.ConcurrencyLimit, &q.Paused,
+		&q.MinWorkers, &q.MaxWorkers, &q.TargetReadyPerWorker, &q.Owner, &q.PoolType,
+		&q.CreatedAt, &q.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &q, nil
+}
+
+// UpsertWorkQueue creates or updates a queue (a.k.a. work pool) definition.
 func (s *Store) UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error {
+	if q.TargetReadyPerWorker <= 0 {
+		q.TargetReadyPerWorker = 5
+	}
+	if q.PoolType == "" {
+		q.PoolType = "pull"
+	}
 	const stmt = `
-INSERT INTO pf_work_queues (name, description, concurrency_limit, paused)
-VALUES ($1,$2,$3,$4)
+INSERT INTO pf_work_queues
+  (name, description, concurrency_limit, paused, min_workers, max_workers,
+   target_ready_per_worker, owner, pool_type)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (name) DO UPDATE
-   SET description       = EXCLUDED.description,
-       concurrency_limit = EXCLUDED.concurrency_limit,
-       paused            = EXCLUDED.paused,
-       updated_at        = now()
+   SET description             = EXCLUDED.description,
+       concurrency_limit       = EXCLUDED.concurrency_limit,
+       paused                  = EXCLUDED.paused,
+       min_workers             = EXCLUDED.min_workers,
+       max_workers             = EXCLUDED.max_workers,
+       target_ready_per_worker = EXCLUDED.target_ready_per_worker,
+       owner                   = EXCLUDED.owner,
+       pool_type               = EXCLUDED.pool_type,
+       updated_at              = now()
 RETURNING created_at, updated_at`
-	return mapErr(s.db.QueryRowContext(ctx, stmt, q.Name, q.Description, q.ConcurrencyLimit, q.Paused).
+	return mapErr(s.db.QueryRowContext(ctx, stmt, q.Name, q.Description, q.ConcurrencyLimit,
+		q.Paused, q.MinWorkers, q.MaxWorkers, q.TargetReadyPerWorker, q.Owner, q.PoolType).
 		Scan(&q.CreatedAt, &q.UpdatedAt))
 }
 
 // GetWorkQueue loads one queue by name.
 func (s *Store) GetWorkQueue(ctx context.Context, name string) (*core.WorkQueue, error) {
-	const stmt = `SELECT name, description, concurrency_limit, paused, created_at, updated_at
-	              FROM pf_work_queues WHERE name=$1`
-	var q core.WorkQueue
-	err := s.db.QueryRowContext(ctx, stmt, name).
-		Scan(&q.Name, &q.Description, &q.ConcurrencyLimit, &q.Paused, &q.CreatedAt, &q.UpdatedAt)
-	if err != nil {
-		return nil, mapErr(err)
-	}
-	return &q, nil
+	row := s.db.QueryRowContext(ctx, `SELECT `+workQueueCols+` FROM pf_work_queues WHERE name=$1`, name)
+	q, err := scanWorkQueue(row)
+	return q, mapErr(err)
 }
 
 // ListWorkQueues returns every queue, alphabetically.
 func (s *Store) ListWorkQueues(ctx context.Context) ([]core.WorkQueue, error) {
-	const stmt = `SELECT name, description, concurrency_limit, paused, created_at, updated_at
-	              FROM pf_work_queues ORDER BY name`
-	rows, err := s.db.QueryContext(ctx, stmt)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+workQueueCols+` FROM pf_work_queues ORDER BY name`)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
 	var out []core.WorkQueue
 	for rows.Next() {
-		var q core.WorkQueue
-		if err := rows.Scan(&q.Name, &q.Description, &q.ConcurrencyLimit, &q.Paused,
-			&q.CreatedAt, &q.UpdatedAt); err != nil {
+		q, err := scanWorkQueue(rows)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, q)
+		out = append(out, *q)
 	}
 	return out, rows.Err()
 }
@@ -249,7 +269,9 @@ func (s *Store) SetQueuePaused(ctx context.Context, name string, paused bool) er
 // QueueStats returns the per-queue counters the admin screen shows.
 func (s *Store) QueueStats(ctx context.Context) ([]store.QueueStat, error) {
 	const stmt = `
-SELECT q.name, q.description, q.concurrency_limit, q.paused, q.created_at, q.updated_at,
+SELECT q.name, q.description, q.concurrency_limit, q.paused,
+       q.min_workers, q.max_workers, q.target_ready_per_worker, q.owner, q.pool_type,
+       q.created_at, q.updated_at,
        COALESCE(c.scheduled,0), COALESCE(c.ready,0), COALESCE(c.running,0), COALESCE(c.failed,0)
 FROM pf_work_queues q
 LEFT JOIN (
@@ -270,7 +292,9 @@ ORDER BY q.name`
 	for rows.Next() {
 		var st store.QueueStat
 		if err := rows.Scan(&st.Name, &st.Description, &st.ConcurrencyLimit, &st.Paused,
-			&st.CreatedAt, &st.UpdatedAt, &st.Scheduled, &st.Ready, &st.Running, &st.Failed24h); err != nil {
+			&st.MinWorkers, &st.MaxWorkers, &st.TargetReadyPerWorker, &st.Owner, &st.PoolType,
+			&st.CreatedAt, &st.UpdatedAt,
+			&st.Scheduled, &st.Ready, &st.Running, &st.Failed24h); err != nil {
 			return nil, err
 		}
 		out = append(out, st)

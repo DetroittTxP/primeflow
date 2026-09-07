@@ -139,6 +139,31 @@ type TriggerOptions struct {
 	WorkQueue string
 	Delay     time.Duration
 	Tags      []string
+	// IdempotencyKey, when set, makes the trigger safe to replay: a second
+	// trigger with the same key returns the existing run instead of a new one.
+	// RunDeploymentAndWait sets it so a parent's replay never fans out twice.
+	IdempotencyKey string
+	// ParentTaskKey records which of the parent's checkpoints spawned the child,
+	// for the console's sub-flow view.
+	ParentTaskKey string
+}
+
+// RunState is a point-in-time view of another run, used by RunDeploymentAndWait
+// to decide whether to keep waiting.
+type RunState struct {
+	Status  string // COMPLETED | FAILED | CANCELLED | RUNNING | SCHEDULED | ...
+	Result  json.RawMessage
+	Message string
+}
+
+// Terminal reports whether the run has reached a state it will not leave on its
+// own.
+func (s RunState) Terminal() bool {
+	switch s.Status {
+	case "COMPLETED", "FAILED", "CANCELLED":
+		return true
+	}
+	return false
 }
 
 // Runtime is what the engine supplies to a running flow. Authors never
@@ -156,6 +181,8 @@ type Runtime interface {
 	Artifact(ctx context.Context, a ArtifactSpec) error
 	// TriggerDeployment schedules another deployment and returns its run id.
 	TriggerDeployment(ctx context.Context, name string, params json.RawMessage, o TriggerOptions) (string, error)
+	// GetRunState reads another run's current state, for RunDeploymentAndWait.
+	GetRunState(ctx context.Context, runID string) (RunState, error)
 }
 
 // ------------------------------------------------------------- context ------
@@ -325,6 +352,86 @@ func (c *Context) RunDeployment(name string, params any, opts ...TriggerOption) 
 		f(&o)
 	}
 	return c.rt.TriggerDeployment(c.ctx, name, raw, o)
+}
+
+// ChildResult is what a completed sub-flow returns to its parent.
+type ChildResult struct {
+	RunID  string
+	Status string
+	Result json.RawMessage
+}
+
+// Into unmarshals the child's result into v.
+func (r ChildResult) Into(v any) error {
+	if len(r.Result) == 0 || string(r.Result) == "null" {
+		return nil
+	}
+	return json.Unmarshal(r.Result, v)
+}
+
+// RunDeploymentAndWait triggers another deployment and blocks — durably — until
+// it finishes, returning its result. It is a checkpointed operation: the trigger
+// fires exactly once no matter how often the parent replays, and while the child
+// runs the parent releases its worker slot (it is rescheduled the moment the
+// child settles, or re-polls every 30s as a backstop).
+//
+// A failed or cancelled child returns a permanent error, so the parent fails
+// without burning its own retry budget on a child that will not succeed.
+func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerOption) (ChildResult, error) {
+	key := c.nextKey("subflow:" + name)
+
+	cp, err := c.rt.LoadCheckpoint(c.ctx, key)
+	if err != nil {
+		return ChildResult{}, err
+	}
+	var childID string
+	if cp != nil && len(cp.Result) > 0 {
+		_ = json.Unmarshal(cp.Result, &childID)
+	}
+
+	if childID == "" {
+		var raw json.RawMessage
+		if params != nil {
+			b, mErr := json.Marshal(params)
+			if mErr != nil {
+				return ChildResult{}, mErr
+			}
+			raw = b
+		}
+		o := TriggerOptions{
+			IdempotencyKey: "child:" + c.run.RunID + ":" + key,
+			ParentTaskKey:  key,
+		}
+		for _, f := range opts {
+			f(&o)
+		}
+		id, tErr := c.rt.TriggerDeployment(c.ctx, name, raw, o)
+		if tErr != nil {
+			return ChildResult{}, tErr
+		}
+		childID = id
+		idRaw, _ := json.Marshal(childID)
+		if sErr := c.rt.SaveCheckpoint(c.ctx, Checkpoint{
+			Key: key, Name: "subflow:" + name, Status: CheckpointRunning, Result: idRaw,
+		}); sErr != nil {
+			return ChildResult{}, sErr
+		}
+	}
+
+	st, err := c.rt.GetRunState(c.ctx, childID)
+	if err != nil {
+		return ChildResult{}, err
+	}
+	switch {
+	case st.Status == "COMPLETED":
+		return ChildResult{RunID: childID, Status: st.Status, Result: st.Result}, nil
+	case st.Terminal(): // FAILED or CANCELLED
+		return ChildResult{RunID: childID, Status: st.Status},
+			Permanent(fmt.Errorf("sub-flow %q %s: %s", name, st.Status, st.Message))
+	default:
+		return ChildResult{RunID: childID, Status: st.Status},
+			Suspend(time.Now().Add(30*time.Second), "waiting for sub-flow "+name)
+	}
 }
 
 // TriggerOption customises RunDeployment.

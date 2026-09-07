@@ -30,6 +30,8 @@ import (
 	"github.com/primex/primeflow/internal/automations"
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/events"
+	"github.com/primex/primeflow/internal/metrics"
+	"github.com/primex/primeflow/internal/otelinit"
 	"github.com/primex/primeflow/internal/scheduler"
 	"github.com/primex/primeflow/internal/server"
 	"github.com/primex/primeflow/internal/store"
@@ -46,6 +48,10 @@ type Options struct {
 	// RedisURL enables the low-latency notification bus. Optional: without it
 	// the process falls back to polling, which is slower but fully correct.
 	RedisURL string
+	// NatsURL selects NATS as the notification bus. Takes precedence over
+	// RedisURL when both are set. Same "accelerator, never a dependency"
+	// contract: a dial failure degrades to polling, it does not stop start-up.
+	NatsURL string
 
 	// Server options.
 	HTTPAddr   string
@@ -68,12 +74,18 @@ type Options struct {
 	AdminEmail    string
 	AdminPassword string
 
+	// LogRetention, when > 0, sets the pf_logs cleanup horizon on a
+	// migrate-on-start process (PRIMEFLOW_LOG_RETENTION, e.g. "720h").
+	LogRetention time.Duration
+
 	// Worker options.
-	WorkerName    string
-	Queues        []string
-	Concurrency   int
-	LeaseDuration time.Duration
-	PollInterval  time.Duration
+	WorkerName        string
+	Queues            []string
+	Concurrency       int
+	LeaseDuration     time.Duration
+	PollInterval      time.Duration
+	MaxSubflowDepth   int
+	WorkerMetricsAddr string
 
 	// Registry holds the flows this process can execute. Defaults to sdk.Default.
 	Registry *sdk.Registry
@@ -95,6 +107,7 @@ func envOr(key, def string) string {
 func (o *Options) applyEnv() {
 	o.DatabaseURL = firstNonEmpty(o.DatabaseURL, os.Getenv("PRIMEFLOW_DATABASE_URL"), os.Getenv("DATABASE_URL"))
 	o.RedisURL = firstNonEmpty(o.RedisURL, os.Getenv("PRIMEFLOW_REDIS_URL"), os.Getenv("REDIS_URL"))
+	o.NatsURL = firstNonEmpty(o.NatsURL, os.Getenv("PRIMEFLOW_NATS_URL"), os.Getenv("NATS_URL"))
 	o.HTTPAddr = firstNonEmpty(o.HTTPAddr, os.Getenv("PRIMEFLOW_HTTP_ADDR"), ":8080")
 	o.APIToken = firstNonEmpty(o.APIToken, os.Getenv("PRIMEFLOW_API_TOKEN"))
 	o.CORSOrigin = firstNonEmpty(o.CORSOrigin, os.Getenv("PRIMEFLOW_CORS_ORIGIN"))
@@ -102,6 +115,11 @@ func (o *Options) applyEnv() {
 	o.TrustedProxyCIDRs = firstNonEmpty(o.TrustedProxyCIDRs, os.Getenv("PRIMEFLOW_TRUSTED_PROXY_CIDRS"))
 	o.AdminEmail = firstNonEmpty(o.AdminEmail, os.Getenv("PRIMEFLOW_ADMIN_EMAIL"))
 	o.AdminPassword = firstNonEmpty(o.AdminPassword, os.Getenv("PRIMEFLOW_ADMIN_PASSWORD"))
+	if o.LogRetention == 0 {
+		if d, err := time.ParseDuration(os.Getenv("PRIMEFLOW_LOG_RETENTION")); err == nil {
+			o.LogRetention = d
+		}
+	}
 
 	if o.SessionTTL == 0 {
 		if d, err := time.ParseDuration(envOr("PRIMEFLOW_SESSION_TTL", "168h")); err == nil {
@@ -140,6 +158,12 @@ func (o *Options) applyEnv() {
 			o.PollInterval = d
 		}
 	}
+	if o.MaxSubflowDepth == 0 {
+		if n, err := strconv.Atoi(envOr("PRIMEFLOW_MAX_SUBFLOW_DEPTH", "8")); err == nil && n > 0 {
+			o.MaxSubflowDepth = n
+		}
+	}
+	o.WorkerMetricsAddr = firstNonEmpty(o.WorkerMetricsAddr, envOr("PRIMEFLOW_METRICS_ADDR", ":9090"))
 	if o.Registry == nil {
 		o.Registry = sdk.Default
 	}
@@ -167,8 +191,11 @@ type App struct {
 	Store   store.Store
 	Bus     bus.Bus
 	Events  *events.Emitter
+	Metrics *metrics.Metrics
 	Log     *slog.Logger
-	holder  string
+
+	holder       string
+	otelShutdown otelinit.ShutdownFunc
 }
 
 // Open connects to Postgres and (if configured) Redis.
@@ -188,30 +215,82 @@ func Open(ctx context.Context, o Options) (*App, error) {
 		}
 	}
 
+	// Transport precedence: NATS, then Redis, then the in-process bus. Every
+	// path degrades to polling on a dial failure — the bus is never a
+	// dependency, only a latency optimisation.
 	var b bus.Bus
-	if o.RedisURL != "" {
+	switch {
+	case o.NatsURL != "":
+		nb, err := bus.NewNATS(ctx, o.NatsURL, o.Logger)
+		if err != nil {
+			o.Logger.Warn("nats unavailable; falling back to polling", "err", err)
+			b = bus.NewInMemory()
+		} else {
+			o.Logger.Info("notification bus: nats", "url", o.NatsURL)
+			b = nb
+		}
+	case o.RedisURL != "":
 		rb, err := bus.NewRedis(ctx, o.RedisURL, os.Getenv("PRIMEFLOW_REDIS_PASSWORD"), 0, o.Logger)
 		if err != nil {
-			// Redis only reduces latency, so a failure here is a warning, not
-			// a reason to refuse to start.
 			o.Logger.Warn("redis unavailable; falling back to polling", "err", err)
 			b = bus.NewInMemory()
 		} else {
+			o.Logger.Info("notification bus: redis")
 			b = rb
 		}
-	} else {
+	default:
+		o.Logger.Info("notification bus: in-process (no PRIMEFLOW_NATS_URL / PRIMEFLOW_REDIS_URL)")
 		b = bus.NewInMemory()
 	}
 
 	if o.MigrateOnStart {
 		bootstrapAdmin(ctx, st, o)
+		bootstrapSettings(ctx, st, o)
+	}
+
+	// Tracing: a no-op (and free) unless an OTLP endpoint is configured.
+	shutdown, err := otelinit.Setup(ctx, "primeflow", version())
+	if err != nil {
+		o.Logger.Warn("otel setup failed; continuing without tracing", "err", err)
+		shutdown = func(context.Context) error { return nil }
+	} else if otelinit.Enabled() {
+		o.Logger.Info("tracing enabled (OTLP)")
 	}
 
 	return &App{
 		Options: o, Store: st, Bus: b,
-		Events: events.New(st, b, o.Logger), Log: o.Logger,
-		holder: uuid.NewString(),
+		Events:  events.New(st, b, o.Logger),
+		Metrics: metrics.New(st),
+		Log:     o.Logger,
+		holder:  uuid.NewString(), otelShutdown: shutdown,
 	}, nil
+}
+
+// version is a best-effort build version for telemetry resource attributes.
+func version() string {
+	if v := os.Getenv("PRIMEFLOW_VERSION"); v != "" {
+		return v
+	}
+	return "dev"
+}
+
+// bootstrapSettings applies env overrides to the pf_settings rows once, on a
+// migrate-on-start process.
+func bootstrapSettings(ctx context.Context, st store.Store, o Options) {
+	if o.LogRetention <= 0 {
+		return
+	}
+	cur, err := st.GetLogRetention(ctx)
+	if err != nil {
+		return
+	}
+	cur.Enabled = true
+	cur.MaxAgeHours = int(o.LogRetention.Hours())
+	if err := st.PutLogRetention(ctx, cur); err != nil {
+		o.Logger.Warn("could not apply PRIMEFLOW_LOG_RETENTION", "err", err)
+		return
+	}
+	o.Logger.Info("log retention set from environment", "max_age_hours", cur.MaxAgeHours)
 }
 
 // bootstrapAdmin seeds the first operator account from PRIMEFLOW_ADMIN_EMAIL /
@@ -244,6 +323,9 @@ func bootstrapAdmin(ctx context.Context, st store.Store, o Options) {
 
 // Close releases resources.
 func (a *App) Close() error {
+	if a.otelShutdown != nil {
+		_ = a.otelShutdown(context.Background())
+	}
 	if a.Bus != nil {
 		_ = a.Bus.Close()
 	}
@@ -277,6 +359,7 @@ func (a *App) ServeAPI(ctx context.Context) error {
 		TrustedProxyCIDRs: trusted,
 		SessionTTL:        a.Options.SessionTTL,
 		CookieSecure:      cookieSecure,
+		Metrics:           a.Metrics,
 	})
 	sch := scheduler.New(a.Store, a.Events, a.Log, scheduler.Config{Holder: a.holder})
 	autos := automations.New(a.Store, a.Events, a.Log, automations.Config{Holder: a.holder})
@@ -291,11 +374,14 @@ func (a *App) ServeAPI(ctx context.Context) error {
 // ServeWorker runs a worker for the registered flows.
 func (a *App) ServeWorker(ctx context.Context) error {
 	w := worker.New(a.Store, a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
-		Name:          a.Options.WorkerName,
-		Queues:        a.Options.Queues,
-		Concurrency:   a.Options.Concurrency,
-		PollInterval:  a.Options.PollInterval,
-		LeaseDuration: a.Options.LeaseDuration,
+		Name:            a.Options.WorkerName,
+		Queues:          a.Options.Queues,
+		Concurrency:     a.Options.Concurrency,
+		PollInterval:    a.Options.PollInterval,
+		LeaseDuration:   a.Options.LeaseDuration,
+		Metrics:         a.Metrics,
+		MetricsAddr:     a.Options.WorkerMetricsAddr,
+		MaxSubflowDepth: a.Options.MaxSubflowDepth,
 	})
 	return w.Run(ctx)
 }

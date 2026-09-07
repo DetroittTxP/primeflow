@@ -43,6 +43,19 @@ immediately.
 `primeflow user add -email you@org -password '…' -role admin`. The last active
 admin cannot be demoted or deactivated.
 
+**Admin-only routes** (`admin` role or the static token): everything under
+`/api/v1/users`, `/api/v1/api-keys`, `/api/v1/api-roles`, and
+`/api/v1/settings/*` (`external-api`, `log-retention`).
+
+**Read routes any role can call:** `GET /api/v1/flows/{name}`,
+`GET /api/v1/queues/{name}`, `GET /api/v1/runs/{id}/children`,
+`GET /api/v1/stats` (the Dashboard's time-bucketed activity).
+**Mutations (`operator`+):** `POST /api/v1/queues` (work-pool settings, including
+the autoscaling envelope).
+
+**Unauthenticated:** `GET /api/v1/health` and `GET /metrics` (Prometheus
+scrapers carry no credential).
+
 ---
 
 ## 2. API-key roles (`/api/external/v1`)

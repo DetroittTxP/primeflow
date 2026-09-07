@@ -78,3 +78,10 @@ type ExternalAPISettings struct {
 	Enabled                bool `json:"enabled"`
 	DefaultRateLimitPerMin int  `json:"default_rate_limit_per_min"`
 }
+
+// LogRetention is the pf_settings row keyed "log_retention". The janitor deletes
+// pf_logs rows older than MaxAgeHours when Enabled.
+type LogRetention struct {
+	Enabled     bool `json:"enabled"`
+	MaxAgeHours int  `json:"max_age_hours"`
+}

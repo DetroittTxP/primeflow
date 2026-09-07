@@ -1,6 +1,7 @@
 package sdk
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -22,6 +23,9 @@ type FlowDef struct {
 	RetryDelay  time.Duration
 	Timeout     time.Duration
 	Fn          FlowFunc
+	// ParamsSchema is the JSON produced by ParamsSchema(), published to the
+	// server so the console can render a typed quick-run form. Nil if unset.
+	ParamsSchema json.RawMessage
 }
 
 // FlowOption configures a flow at registration time.

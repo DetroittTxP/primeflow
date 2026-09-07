@@ -245,12 +245,54 @@ func billingWrite(c *sdk.Context, day string, rows []meteringRow) error {
 	return nil
 }
 
+// ---------------------------------------------------- fleet (sub-flows) ---
+
+// FleetParams asks for several VMs in one org, provisioned as child runs.
+type FleetParams struct {
+	OrgName  string `json:"org_name"`
+	Template string `json:"template"`
+	Count    int    `json:"count"`
+}
+
+// provisionFleet fans out to the provision-vm-standard deployment once per VM
+// and waits, durably, for every child to finish — releasing its worker slot in
+// between. It is the worked example of RunDeploymentAndWait.
+func provisionFleet(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[FleetParams](c)
+	if err != nil {
+		return nil, err
+	}
+	if p.Count <= 0 || p.Count > 20 {
+		return nil, sdk.Permanent(errors.New("count must be between 1 and 20"))
+	}
+	c.Info("provisioning fleet", "org", p.OrgName, "count", p.Count)
+
+	built := make([]string, 0, p.Count)
+	for i := 0; i < p.Count; i++ {
+		child, err := c.RunDeploymentAndWait("provision-vm-standard", ProvisionParams{
+			OrgName:  p.OrgName,
+			Template: p.Template,
+			Name:     fmt.Sprintf("%s-fleet-%02d", p.OrgName, i+1),
+			CPU:      2, MemoryMB: 4096,
+		})
+		if err != nil {
+			return nil, err
+		}
+		var vm VM
+		_ = child.Into(&vm)
+		built = append(built, vm.ID)
+	}
+	_ = c.Markdown("fleet", fmt.Sprintf("### Fleet ready\n\n%d VMs for **%s**: `%v`", len(built), p.OrgName, built))
+	return map[string]any{"vm_ids": built}, nil
+}
+
 // ------------------------------------------------------------------ main ---
 
 func main() {
 	sdk.Flow("provision-vm", provisionVM,
 		sdk.Description("Provision a VM in VMware Cloud Director and register it for metering"),
 		sdk.Tags("primex", "vcd", "provisioning"),
+		sdk.ParamsSchema(ProvisionParams{OrgName: "acme", Template: "ubuntu-22.04", CPU: 2, MemoryMB: 4096}),
 		sdk.Retries(1),
 		sdk.RetryDelay(30*time.Second),
 		sdk.Timeout(30*time.Minute),
@@ -259,8 +301,16 @@ func main() {
 	sdk.Flow("collect-metering", collectMetering,
 		sdk.Description("Collect per-org usage from Cloud Director and hand it to billing"),
 		sdk.Tags("primex", "metering"),
+		sdk.ParamsSchema(MeteringParams{}),
 		sdk.Retries(2),
 		sdk.RetryDelay(2*time.Minute),
+	)
+
+	sdk.Flow("provision-fleet", provisionFleet,
+		sdk.Description("Provision N VMs as child runs and wait for them all (sub-flow demo)"),
+		sdk.Tags("primex", "vcd", "fleet"),
+		sdk.ParamsSchema(FleetParams{OrgName: "acme", Template: "ubuntu-22.04", Count: 3}),
+		sdk.Timeout(time.Hour),
 	)
 
 	if os.Getenv("PRIMEFLOW_DATABASE_URL") == "" && os.Getenv("DATABASE_URL") == "" {
