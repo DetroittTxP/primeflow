@@ -313,6 +313,83 @@
       </table></div>
     </div>
   </section>
+
+  <section id="v-settings" class="admin-only">
+    <div class="subnav" id="settings-subnav">
+      <button data-s="external" class="active" onclick="showSettings('external')">External API</button>
+      <button data-s="users" onclick="showSettings('users')">Users</button>
+    </div>
+
+    <div id="settings-external">
+      <div class="panel">
+        <h2>Access<span class="grow"></span>
+          <button class="toggle" id="ext-enabled" role="switch" aria-checked="false"
+                  onclick="toggleExternal()" title="Enable or disable every key at once"></button>
+        </h2>
+        <p class="muted" style="padding:10px 14px;margin:0">
+          The master switch for every key at once. With this off, all <code>/api/external/v1/*</code>
+          requests are refused before any key is checked. Every endpoint accepts its key via
+          <code>Authorization: Bearer &lt;key&gt;</code> or <code>X-API-Key: &lt;key&gt;</code>.
+          A key whose role lacks the endpoint's scope gets a 403 rather than a 401.
+        </p>
+      </div>
+
+      <div class="subnav">
+        <button data-t="keys" class="active" onclick="showExtTab('keys')">API Keys</button>
+        <button data-t="explorer" onclick="showExtTab('explorer')">API Explorer</button>
+      </div>
+
+      <div id="ext-keys" class="panel">
+        <h2>API keys<span class="grow"></span>
+          <input id="k-search" placeholder="name / owner / prefix" size="16" oninput="loadKeys()">
+          <select id="k-role" onchange="loadKeys()"><option value="">All roles</option></select>
+          <select id="k-status" onchange="loadKeys()">
+            <option value="">All statuses</option><option value="active">active</option><option value="inactive">inactive</option>
+          </select>
+          <button class="act primary" onclick="openKeyForm()">New API key</button>
+        </h2>
+        <div class="scroll"><table>
+          <thead><tr>
+            <th>Name</th><th>Key</th><th>Owner</th><th>Role</th><th>Controls</th>
+            <th>Last used</th><th>Expires</th><th>Status</th><th></th>
+          </tr></thead>
+          <tbody id="keys"></tbody>
+        </table></div>
+      </div>
+
+      <div id="ext-explorer" class="panel" hidden>
+        <h2>API Explorer</h2>
+        <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+          Every route under <code>/api/external/v1</code> and the scope it needs. The columns show which role can reach it.
+        </p>
+        <div class="scroll"><table>
+          <thead><tr id="explorer-head"><th>Method</th><th>Path</th><th>Scope</th></tr></thead>
+          <tbody id="explorer"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <div id="settings-users" hidden>
+      <div class="panel">
+        <h2>Operator accounts<span class="grow"></span><button class="act" onclick="loadUsers()">Refresh</button></h2>
+        <div class="scroll"><table>
+          <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead>
+          <tbody id="users"></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <h2>New user</h2>
+        <form class="inline" onsubmit="createUser(event)">
+          <label>Email<input name="email" type="email" required placeholder="ops@primex"></label>
+          <label>Password<input name="password" type="password" required minlength="8" placeholder="min 8 chars"></label>
+          <label>Role<select name="role">
+            <option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option>
+          </select></label>
+          <div class="full row"><button class="act primary" type="submit">Create user</button></div>
+        </form>
+      </div>
+    </div>
+  </section>
 </main>
 
 <dialog id="run-dialog">
