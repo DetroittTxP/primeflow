@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrimeFlow</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6feb'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h6' stroke='white' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #2f6feb; --accent-soft: #e8f0fe;
+    --ok: #1a7f47; --warn: #b45309; --err: #c0392b; --run: #2f6feb; --idle: #6b7280;
+    --radius: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --ink: #e6e8ec; --muted: #9aa3b2;
+      --line: #262b35; --accent: #6ea1ff; --accent-soft: #1c2740;
+      --ok: #4ade80; --warn: #fbbf24; --err: #f87171; --run: #6ea1ff; --idle: #9aa3b2;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 20; flex-wrap: wrap;
+  }
+  .brand { font-weight: 650; letter-spacing: -0.01em; font-size: 15px; }
+  .brand span { color: var(--accent); }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    padding: 5px 11px; border-radius: 999px; cursor: pointer; font: inherit;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button.active { background: var(--accent-soft); color: var(--accent); border-color: var(--line); }
+  .grow { flex: 1; }
+  .live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+  .dot.on { background: var(--ok); }
+  main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+  }
+  .card .n { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+  .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  section { display: none; }
+  section.active { display: block; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); overflow: hidden; margin-bottom: 18px;
+  }
+  .panel > h2 {
+    margin: 0; padding: 11px 14px; font-size: 13px; font-weight: 600;
+    border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px;
+  }
+  .panel > h2 .grow { flex: 1; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--accent-soft); }
+  .scroll { overflow-x: auto; }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; border: 1px solid transparent; white-space: nowrap;
+  }
+  .s-COMPLETED { color: var(--ok); border-color: currentColor; }
+  .s-RUNNING, .s-PENDING { color: var(--run); border-color: currentColor; }
+  .s-FAILED, .s-CRASHED { color: var(--err); border-color: currentColor; }
+  .s-SCHEDULED, .s-PAUSED { color: var(--muted); border-color: currentColor; }
+  .s-CANCELLED, .s-CANCELLING { color: var(--warn); border-color: currentColor; }
+  button.act, select, input {
+    font: inherit; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; cursor: pointer;
+  }
+  button.act:hover { border-color: var(--accent); color: var(--accent); }
+  button.act.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  input, select { cursor: auto; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .prio {
+    display: inline-flex; align-items: center; gap: 5px;
+  }
+  .prio b { min-width: 22px; text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { width: 46px; height: 5px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .pin { color: var(--warn); font-weight: 700; }
+  pre.logs {
+    margin: 0; padding: 12px 14px; max-height: 420px; overflow: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55;
+  }
+  .lvl-ERROR { color: var(--err); } .lvl-WARN { color: var(--warn); } .lvl-DEBUG { color: var(--muted); }
+  dialog {
+    border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+    color: var(--ink); padding: 0; width: min(900px, 94vw); max-height: 88vh;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  .dlg-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; }
+  .dlg-body { padding: 0; overflow: auto; max-height: calc(88vh - 52px); }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; padding: 14px 16px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  .empty { padding: 24px 14px; text-align: center; color: var(--muted); }
+  form.inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; padding: 14px; }
+  form.inline label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  form.inline .full { grid-column: 1 / -1; }
+  textarea {
+    font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel);
+    color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 7px; min-height: 70px;
+  }
+  .toast {
+    position: fixed; bottom: 18px; right: 18px; background: var(--panel);
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 6px; padding: 10px 14px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
+    max-width: 380px; z-index: 50;
+  }
+  .toast.err { border-left-color: var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Prime<span>Flow</span></div>
+  <nav id="nav"></nav>
+  <div class="grow"></div>
+  <div class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
+</header>
+
+<main>
+  <div class="cards" id="cards"></div>
+
+  <section id="v-runs" class="active">
+    <div class="panel">
+      <h2>
+        Flow runs
+        <span class="grow"></span>
+        <select id="f-state">
+          <option value="">All states</option>
+          <option>SCHEDULED</option><option>PENDING</option><option>RUNNING</option>
+          <option>COMPLETED</option><option>FAILED</option><option>CRASHED</option>
+          <option>CANCELLED</option><option>CANCELLING</option><option>PAUSED</option>
+        </select>
+        <input id="f-search" placeholder="search name / id" size="18">
+        <button class="act" onclick="loadRuns()">Refresh</button>
+      </h2>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Run</th><th>Flow</th><th>State</th><th>Queue</th>
+          <th>Priority</th><th>Scheduled</th><th>Attempt</th><th></th>
+        </tr></thead>
+        <tbody id="runs"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="v-queues">
+    <div class="panel">
+      <h2>Work queues<span class="grow"></span><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Queue</th><th>State</th><th>Limit</th><th>Ready</th><th>Waiting</th><th>Running</th><th>Failed 24h</th><th></th></tr></thead>
+        <tbody id="queues"></tbody>
+      </table></div>
+    </div>
+    <div class="panel">
+      <h2>
+        Dispatch order
+        <span class="grow"></span>
+        <select id="q-pick" onchange="loadPending()"></select>
+        <button class="act" onclick="loadPending()">Refresh</button>
+      </h2>
+      <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+        This is the exact order the next worker will take work in. Pinned runs come first, then priority, then age.
+      </p>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Run</th><th>Flow</th><th>Priority</th><th>Scheduled</th><th>Controls</th></tr></thead>
+        <tbody id="pending"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="v-deployments">
+    <div class="panel">
+      <h2>Deployments<span class="grow"></span><button class="act" onclick="loadDeployments()">Refresh</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Name</th><th>Flow</th><th>Schedule</th><th>Queue</th><th>Priority</th><th>State</th><th></th></tr></thead>
+        <tbody id="deployments"></tbody>
+      </table></div>
+    </div>
+    <div class="panel">
+      <h2>New / update deployment</h2>
+      <form class="inline" id="dep-form" onsubmit="saveDeployment(event)">
+        <label>Name<input name="name" required placeholder="nightly-metering"></label>
+        <label>Flow<select name="flow_name" id="dep-flow" required></select></label>
+        <label>Work queue<input name="work_queue" placeholder="default"></label>
+        <label>Priority<input name="priority" type="number" min="0" max="100" value="50"></label>
+        <label>Schedule kind
+          <select name="schedule_kind">
+            <option value="">none</option><option value="cron">cron</option><option value="interval">interval</option>
+          </select>
+        </label>
+        <label>Schedule<input name="schedule" placeholder="0 2 * * *  or  15m"></label>
+        <label>Timezone<input name="timezone" value="Asia/Bangkok"></label>
+        <label>Retries<input name="retries" type="number" min="0" value="0"></label>
+        <label>Retry delay<input name="retry_delay" placeholder="30s"></label>
+        <label>Timeout<input name="timeout" placeholder="10m"></label>
+        <label class="full">Parameters (JSON)<textarea name="parameters" placeholder='{"org":"acme"}'></textarea></label>
+        <div class="full row"><button class="act primary" type="submit">Save deployment</button></div>
+      </form>
+    </div>
+  </section>
+
+  <section id="v-automations">
+    <div class="panel">
+      <h2>Automations<span class="grow"></span><button class="act" onclick="loadAutomations()">Refresh</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Name</th><th>Trigger</th><th>Threshold</th><th>Action</th><th>Last fired</th><th></th></tr></thead>
+        <tbody id="automations"></tbody>
+      </table></div>
+    </div>
+    <div class="panel">
+      <h2>New / update automation</h2>
+      <form class="inline" onsubmit="saveAutomation(event)">
+        <label>Name<input name="name" required placeholder="escalate-failed-provisioning"></label>
+        <label>Match event<input name="match_event" placeholder="flow-run.FAILED  or  flow-run.*"></label>
+        <label>Match flow<input name="match_flow" placeholder=""></label>
+        <label>Match queue<input name="match_work_queue" placeholder=""></label>
+        <label>Threshold<input name="threshold" type="number" min="1" value="1"></label>
+        <label>Window<input name="window" placeholder="10m"></label>
+        <label>Action
+          <select name="action">
+            <option value="run-deployment">run-deployment</option>
+            <option value="webhook">webhook</option>
+            <option value="set-priority">set-priority</option>
+            <option value="cancel-run">cancel-run</option>
+            <option value="pause-queue">pause-queue</option>
+            <option value="resume-queue">resume-queue</option>
+          </select>
+        </label>
+        <label class="full">Action config (JSON)
+          <textarea name="action_config" placeholder='{"deployment":"notify-oncall","pass_event":true}'></textarea>
+        </label>
+        <div class="full row"><button class="act primary" type="submit">Save automation</button></div>
+      </form>
+    </div>
+  </section>
+
+  <section id="v-workers">
+    <div class="panel">
+      <h2>Workers<span class="grow"></span><button class="act" onclick="loadWorkers()">Refresh</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Name</th><th>Status</th><th>Queues</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
+        <tbody id="workers"></tbody>
+      </table></div>
+    </div>
+    <div class="panel">
+      <h2>Registered flows</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Flow</th><th>Version</th><th>Description</th></tr></thead>
+        <tbody id="flows"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="v-events">
+    <div class="panel">
+      <h2>Event feed<span class="grow"></span><button class="act" onclick="loadEvents()">Refresh</button></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>When</th><th>Event</th><th>Resource</th><th>Detail</th></tr></thead>
+        <tbody id="events"></tbody>
+      </table></div>
+    </div>
+  </section>
+</main>
+
+<dialog id="run-dialog">
+  <div class="dlg-head">
+    <strong id="rd-title">Run</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('run-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="rd-body"></div>
+</dialog>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('token') || '';
+const VIEWS = [
+  ['runs', 'Runs'], ['queues', 'Queues'], ['deployments', 'Deployments'],
+  ['automations', 'Automations'], ['workers', 'Workers'], ['events', 'Events'],
+];
+
+function api(path, opts = {}) {
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers || {});
+  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+  return fetch('/api/v1' + path, Object.assign({}, opts, { headers })).then(async r => {
+    if (r.status === 204) return null;
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  });
+}
+
+function toast(msg, isErr) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (isErr ? ' err' : '');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+const act = (p, o) => api(p, o).then(r => { refreshCurrent(); return r; })
+                              .catch(e => toast(e.message, true));
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function when(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts), diff = (Date.now() - d) / 1000;
+  const rel = Math.abs(diff) < 60 ? Math.round(Math.abs(diff)) + 's'
+    : Math.abs(diff) < 3600 ? Math.round(Math.abs(diff) / 60) + 'm'
+    : Math.abs(diff) < 86400 ? Math.round(Math.abs(diff) / 3600) + 'h'
+    : Math.round(Math.abs(diff) / 86400) + 'd';
+  return `<span title="${esc(d.toLocaleString())}">${diff >= 0 ? rel + ' ago' : 'in ' + rel}</span>`;
+}
+const state = s => `<span class="pill s-${esc(s)}">${esc(s)}</span>`;
+const prio = r => `<span class="prio">${r.queue_position != null ? '<span class="pin" title="pinned to front">▲</span>' : ''}` +
+  `<b>${r.priority}</b><span class="bar"><i style="width:${r.priority}%"></i></span></span>`;
+
+// --- navigation -------------------------------------------------------------
+let current = 'runs';
+function show(v) {
+  current = v;
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  refreshCurrent();
+}
+function refreshCurrent() {
+  loadSummary();
+  // loadPending reads the queue picker that loadQueues populates, so it has to
+  // wait for it rather than race it.
+  ({ runs: loadRuns,
+     queues: async () => { await loadQueues(); await loadPending(); },
+     deployments: loadDeployments, automations: loadAutomations,
+     workers: async () => { await loadWorkers(); await loadFlows(); },
+     events: loadEvents })[current]();
+}
+document.getElementById('nav').innerHTML =
+  VIEWS.map(([v, label]) => `<button data-v="${v}" onclick="show('${v}')">${label}</button>`).join('');
+
+// --- loaders ----------------------------------------------------------------
+async function loadSummary() {
+  try {
+    const s = await api('/summary');
+    const order = ['RUNNING', 'SCHEDULED', 'PENDING', 'COMPLETED', 'FAILED', 'CRASHED'];
+    document.getElementById('cards').innerHTML =
+      order.map(k => `<div class="card"><div class="n">${s.states[k] ?? 0}</div><div class="k">${k.toLowerCase()}</div></div>`).join('') +
+      `<div class="card"><div class="n">${s.workers_online}/${s.workers_total}</div><div class="k">workers online</div></div>`;
+  } catch (e) { /* header is decorative; do not interrupt the page for it */ }
+}
+
+async function loadRuns() {
+  const st = document.getElementById('f-state').value;
+  const q = document.getElementById('f-search').value.trim();
+  const params = new URLSearchParams({ limit: '80' });
+  if (st) params.set('state', st);
+  if (q) params.set('search', q);
+  const { runs } = await api('/runs?' + params);
+  document.getElementById('runs').innerHTML = runs.length ? runs.map(r => `
+    <tr>
+      <td><a href="#" onclick="openRun('${r.id}');return false" class="mono">${esc(r.name)}</a></td>
+      <td>${esc(r.flow_name)}</td>
+      <td>${state(r.state)}</td>
+      <td>${esc(r.work_queue)}</td>
+      <td>${prio(r)}</td>
+      <td>${when(r.scheduled_at)}</td>
+      <td>${r.run_count}${r.retries ? ' / ' + (r.retries + 1) : ''}</td>
+      <td class="row">
+        ${['SCHEDULED', 'RUNNING', 'PENDING'].includes(r.state)
+          ? `<button class="act" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button>` : ''}
+        ${['FAILED', 'CRASHED', 'CANCELLED', 'COMPLETED'].includes(r.state)
+          ? `<button class="act" onclick="act('/runs/${r.id}/retry',{method:'POST'})">Resume</button>` : ''}
+      </td>
+    </tr>`).join('') : '<tr><td colspan="8" class="empty">No runs match.</td></tr>';
+}
+
+async function loadQueues() {
+  const qs = await api('/queues');
+  document.getElementById('queues').innerHTML = qs.map(q => `
+    <tr>
+      <td><strong>${esc(q.name)}</strong><div class="muted">${esc(q.description || '')}</div></td>
+      <td>${q.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
+      <td>${q.concurrency_limit ?? '∞'}</td>
+      <td>${q.ready}</td><td>${q.scheduled}</td><td>${q.running}</td><td>${q.failed_24h}</td>
+      <td class="row">
+        <button class="act" onclick="act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})">
+          ${q.paused ? 'Resume' : 'Pause'}</button>
+        <button class="act" onclick="setLimit('${esc(q.name)}', ${q.concurrency_limit ?? 'null'})">Limit…</button>
+      </td>
+    </tr>`).join('');
+  const pick = document.getElementById('q-pick');
+  const keep = pick.value;
+  pick.innerHTML = qs.map(q => `<option>${esc(q.name)}</option>`).join('');
+  if (keep && qs.some(q => q.name === keep)) {
+    pick.value = keep;
+  } else if (qs.length) {
+    // Open on the lane that actually has work waiting — an empty panel is a
+    // useless first impression on a busy system.
+    const busiest = qs.reduce((a, b) => (b.scheduled > a.scheduled ? b : a), qs[0]);
+    pick.value = busiest.name;
+  }
+}
+
+function setLimit(name, cur) {
+  const v = prompt('Concurrency limit for "' + name + '" (blank = unlimited)', cur ?? '');
+  if (v === null) return;
+  const limit = v.trim() === '' ? null : parseInt(v, 10);
+  if (limit !== null && (isNaN(limit) || limit < 0)) return toast('Limit must be a non-negative number', true);
+  act('/queues', { method: 'POST', body: JSON.stringify({ name, concurrency_limit: limit }) });
+}
+
+async function loadPending() {
+  const q = document.getElementById('q-pick').value;
+  if (!q) { document.getElementById('pending').innerHTML = ''; return; }
+  const runs = await api('/queues/' + encodeURIComponent(q) + '/pending');
+  document.getElementById('pending').innerHTML = runs.length ? runs.map((r, i) => `
+    <tr>
+      <td class="mono">${i + 1}</td>
+      <td><a href="#" onclick="openRun('${r.id}');return false" class="mono">${esc(r.name)}</a></td>
+      <td>${esc(r.flow_name)}</td>
+      <td>${prio(r)}</td>
+      <td>${when(r.scheduled_at)}</td>
+      <td class="row">
+        <button class="act" onclick="act('/runs/${r.id}/front',{method:'POST'})" title="Run this next">▲ Front</button>
+        <button class="act" onclick="bump('${r.id}', 100)">Urgent</button>
+        <button class="act" onclick="bump('${r.id}', 50)">Normal</button>
+        <button class="act" onclick="act('/runs/${r.id}/back',{method:'POST'})">▼ Back</button>
+        ${r.queue_position != null ? `<button class="act" onclick="act('/runs/${r.id}/unpin',{method:'POST'})">Unpin</button>` : ''}
+        <button class="act" onclick="moveQueue('${r.id}')">Move…</button>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">Queue is empty.</td></tr>';
+}
+
+const bump = (id, p) => act('/runs/' + id + '/priority', { method: 'POST', body: JSON.stringify({ priority: p }) });
+function moveQueue(id) {
+  const q = prompt('Move run to which work queue?');
+  if (q) act('/runs/' + id + '/queue', { method: 'POST', body: JSON.stringify({ queue: q }) });
+}
+
+async function loadDeployments() {
+  const ds = await api('/deployments');
+  document.getElementById('deployments').innerHTML = ds.length ? ds.map(d => `
+    <tr>
+      <td><strong>${esc(d.name)}</strong><div class="muted">${esc(d.description || '')}</div></td>
+      <td>${esc(d.flow_name)}</td>
+      <td class="mono">${d.schedule ? esc(d.schedule_kind + ' ' + d.schedule) + ' <span class="muted">' + esc(d.timezone || 'UTC') + '</span>' : '<span class="muted">manual</span>'}</td>
+      <td>${esc(d.work_queue)}</td>
+      <td>${d.priority}</td>
+      <td>${d.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
+      <td class="row">
+        <button class="act primary" onclick="act('/deployments/${d.id}/run',{method:'POST',body:'{}'})">Run now</button>
+        <button class="act" onclick="act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})">${d.paused ? 'Resume' : 'Pause'}</button>
+        <button class="act" onclick="if(confirm('Delete deployment ${esc(d.name)}?'))act('/deployments/${d.id}',{method:'DELETE'})">Delete</button>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">No deployments yet.</td></tr>';
+}
+
+async function loadFlows() {
+  const fs = await api('/flows');
+  document.getElementById('flows').innerHTML = fs.length ? fs.map(f => `
+    <tr><td class="mono">${esc(f.name)}</td><td>${esc(f.version)}</td><td class="muted">${esc(f.description || '')}</td></tr>`).join('')
+    : '<tr><td colspan="3" class="empty">No worker has registered a flow yet.</td></tr>';
+  const sel = document.getElementById('dep-flow');
+  const keep = sel.value;
+  sel.innerHTML = fs.map(f => `<option>${esc(f.name)}</option>`).join('');
+  if (keep) sel.value = keep;
+}
+
+async function saveDeployment(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target), body = {};
+  for (const [k, v] of fd.entries()) if (String(v).trim() !== '') body[k] = v;
+  body.priority = parseInt(body.priority || '50', 10);
+  body.retries = parseInt(body.retries || '0', 10);
+  if (body.parameters) {
+    try { body.parameters = JSON.parse(body.parameters); }
+    catch { return toast('Parameters must be valid JSON', true); }
+  }
+  try {
+    await api('/deployments', { method: 'POST', body: JSON.stringify(body) });
+    toast('Deployment saved');
+    ev.target.reset();
+    loadDeployments();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadAutomations() {
+  const as = await api('/automations');
+  document.getElementById('automations').innerHTML = as.length ? as.map(a => `
+    <tr>
+      <td><strong>${esc(a.name)}</strong> ${a.enabled ? '' : '<span class="pill s-PAUSED">off</span>'}
+          <div class="muted">${esc(a.description || '')}</div></td>
+      <td class="mono">${esc(a.match_event || 'any')}${a.match_flow ? ' · flow=' + esc(a.match_flow) : ''}${a.match_work_queue ? ' · queue=' + esc(a.match_work_queue) : ''}</td>
+      <td>${a.threshold}${a.window ? ' / ' + Math.round(a.window / 1e9) + 's' : ''}</td>
+      <td class="mono">${esc(a.action)}</td>
+      <td>${when(a.last_fired_at)}</td>
+      <td><button class="act" onclick="if(confirm('Delete ${esc(a.name)}?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">No automations yet.</td></tr>';
+}
+
+async function saveAutomation(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target), body = {};
+  for (const [k, v] of fd.entries()) if (String(v).trim() !== '') body[k] = v;
+  body.threshold = parseInt(body.threshold || '1', 10);
+  if (body.action_config) {
+    try { body.action_config = JSON.parse(body.action_config); }
+    catch { return toast('Action config must be valid JSON', true); }
+  }
+  try {
+    await api('/automations', { method: 'POST', body: JSON.stringify(body) });
+    toast('Automation saved');
+    ev.target.reset();
+    loadAutomations();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadWorkers() {
+  const ws = await api('/workers');
+  document.getElementById('workers').innerHTML = ws.length ? ws.map(w => `
+    <tr>
+      <td><strong>${esc(w.name)}</strong><div class="muted mono">${esc(w.id.slice(0, 8))}</div></td>
+      <td>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</td>
+      <td class="mono">${(w.queues || []).map(esc).join(', ')}</td>
+      <td>${w.active_runs}</td><td>${w.concurrency}</td><td>${when(w.last_heartbeat)}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
+}
+
+async function loadEvents() {
+  const evs = await api('/events?limit=120');
+  document.getElementById('events').innerHTML = evs.map(e => `
+    <tr>
+      <td>${when(e.occurred)}</td>
+      <td class="mono">${esc(e.event)}</td>
+      <td class="mono muted">${esc(e.resource_type)}/${esc(String(e.resource_id).slice(0, 8))}</td>
+      <td class="muted">${esc(JSON.stringify(e.payload ?? {}).slice(0, 140))}</td>
+    </tr>`).join('');
+}
+
+// --- run detail -------------------------------------------------------------
+async function openRun(id) {
+  const dlg = document.getElementById('run-dialog');
+  document.getElementById('rd-body').innerHTML = '<div class="empty">Loading…</div>';
+  dlg.showModal();
+  const [run, tasks, logs, arts] = await Promise.all([
+    api('/runs/' + id), api('/runs/' + id + '/tasks'),
+    api('/runs/' + id + '/logs?limit=800'), api('/runs/' + id + '/artifacts'),
+  ]);
+  document.getElementById('rd-title').innerHTML = esc(run.name) + ' ' + state(run.state);
+  document.getElementById('rd-body').innerHTML = `
+    <dl class="kv">
+      <dt>Run id</dt><dd class="mono">${esc(run.id)}</dd>
+      <dt>Flow</dt><dd>${esc(run.flow_name)}</dd>
+      <dt>Queue</dt><dd>${esc(run.work_queue)}</dd>
+      <dt>Priority</dt><dd>${prio(run)}</dd>
+      <dt>Attempt</dt><dd>${run.run_count}${run.retries ? ' of ' + (run.retries + 1) : ''}</dd>
+      <dt>Scheduled</dt><dd>${when(run.scheduled_at)}</dd>
+      <dt>Started</dt><dd>${when(run.started_at)}</dd>
+      <dt>Ended</dt><dd>${when(run.ended_at)}</dd>
+      ${run.state_message ? `<dt>Message</dt><dd class="mono">${esc(run.state_message)}</dd>` : ''}
+      ${run.result ? `<dt>Result</dt><dd class="mono">${esc(JSON.stringify(run.result))}</dd>` : ''}
+    </dl>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Checkpoints (${tasks.length})</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Key</th><th>State</th><th>Attempts</th><th>Duration</th><th>Result</th></tr></thead>
+        <tbody>${tasks.length ? tasks.map(t => `
+          <tr>
+            <td class="mono">${esc(t.task_key)}</td>
+            <td>${state(t.state)}</td>
+            <td>${t.run_count}</td>
+            <td>${t.started_at && t.ended_at
+                  ? Math.max(0, (new Date(t.ended_at) - new Date(t.started_at)) / 1000).toFixed(2) + 's' : '—'}</td>
+            <td class="mono muted">${esc(JSON.stringify(t.result ?? null).slice(0, 90))}</td>
+          </tr>`).join('') : '<tr><td colspan="5" class="empty">No checkpoints recorded.</td></tr>'}
+        </tbody>
+      </table></div>
+    </div>
+    ${arts.length ? `<div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Artifacts</h2>
+      <div class="scroll"><table><tbody>${arts.map(a => `
+        <tr><td class="mono">${esc(a.key)}</td><td>${esc(a.kind)}</td>
+            <td class="mono muted">${esc(JSON.stringify(a.data).slice(0, 200))}</td></tr>`).join('')}
+      </tbody></table></div></div>` : ''}
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Logs (${logs.length})</h2>
+      <pre class="logs">${logs.length ? logs.map(l =>
+        `<span class="lvl-${esc(l.level)}">${new Date(l.timestamp).toLocaleTimeString()} ${esc(l.level.padEnd(5))} ${esc(l.message)}</span>`
+      ).join('\n') : '<span class="muted">No logs.</span>'}</pre>
+    </div>`;
+}
+
+// --- live stream ------------------------------------------------------------
+let pending = null;
+function connect() {
+  const es = new EventSource('/api/v1/stream' + (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : ''));
+  es.onopen = () => {
+    document.getElementById('livedot').classList.add('on');
+    document.getElementById('livetext').textContent = 'live';
+  };
+  es.onerror = () => {
+    document.getElementById('livedot').classList.remove('on');
+    document.getElementById('livetext').textContent = 'reconnecting…';
+  };
+  // Coalesce bursts: a hundred state changes in a second should cost one redraw.
+  es.onmessage = () => {
+    if (pending) return;
+    pending = setTimeout(() => { pending = null; refreshCurrent(); }, 600);
+  };
+}
+
+show('runs');
+loadFlows();
+connect();
+setInterval(refreshCurrent, 15000);
+</script>
+</body>
+</html>

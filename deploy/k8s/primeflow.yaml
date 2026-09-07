@@ -1,0 +1,190 @@
+# PrimeFlow on Kubernetes.
+#
+# Sized for a TKE cluster like primex-dev-mstr: one server Deployment (safe to
+# scale — the scheduler and automation loops elect a single leader through
+# Postgres) and one worker Deployment per work queue, so a slow lane can be
+# scaled or drained without touching the others.
+#
+# Apply with kubectl, or point an ArgoCD Application at this directory.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: primeflow
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: primeflow-secrets
+  namespace: primeflow
+type: Opaque
+stringData:
+  # Replace these before applying, or manage them with your secret store.
+  PRIMEFLOW_DATABASE_URL: postgres://primeflow:CHANGE_ME@postgres.primeflow.svc.cluster.local:5432/primeflow?sslmode=require
+  PRIMEFLOW_REDIS_URL: redis://redis.primeflow.svc.cluster.local:6379
+  PRIMEFLOW_API_TOKEN: CHANGE_ME
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: primeflow-config
+  namespace: primeflow
+data:
+  PRIMEFLOW_HTTP_ADDR: ":8080"
+  PRIMEFLOW_LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: primeflow-server
+  namespace: primeflow
+  labels: {app: primeflow, component: server}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: primeflow, component: server}
+  template:
+    metadata:
+      labels: {app: primeflow, component: server}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: server
+          image: registry.example.com/primex/primeflow:latest
+          args: ["server"]
+          ports: [{name: http, containerPort: 8080}]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
+          # The health endpoint is intentionally unauthenticated so probes need
+          # no token; it checks the database round trip, not just the process.
+          readinessProbe:
+            httpGet: {path: /api/v1/health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /api/v1/health, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: primeflow
+  namespace: primeflow
+spec:
+  selector: {app: primeflow, component: server}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+# One worker Deployment per lane. Duplicate this block per queue and give each
+# its own replica count and resource profile.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: primeflow-worker-vcd
+  namespace: primeflow
+  labels: {app: primeflow, component: worker, queue: vcd}
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: primeflow, component: worker, queue: vcd}
+  template:
+    metadata:
+      labels: {app: primeflow, component: worker, queue: vcd}
+    spec:
+      # Long enough for an in-flight flow to reach its next checkpoint and
+      # settle. A worker killed past this deadline is not lost: its lease
+      # expires and another worker resumes the run from its last checkpoint.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: registry.example.com/primex/primeflow:latest
+          command: ["/usr/local/bin/primex-worker"]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+          env:
+            - name: PRIMEFLOW_QUEUES
+              value: "vcd"
+            - name: PRIMEFLOW_CONCURRENCY
+              value: "4"
+            - name: PRIMEFLOW_WORKER_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: primeflow-worker-metering
+  namespace: primeflow
+  labels: {app: primeflow, component: worker, queue: metering}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: primeflow, component: worker, queue: metering}
+  template:
+    metadata:
+      labels: {app: primeflow, component: worker, queue: metering}
+    spec:
+      terminationGracePeriodSeconds: 300
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: worker
+          image: registry.example.com/primex/primeflow:latest
+          command: ["/usr/local/bin/primex-worker"]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+          env:
+            - name: PRIMEFLOW_QUEUES
+              value: "metering"
+            - name: PRIMEFLOW_CONCURRENCY
+              value: "2"
+            - name: PRIMEFLOW_WORKER_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+# Scale workers on queue depth rather than CPU: a lane backing up is the signal
+# that matters, and CPU stays flat while flows wait on vCD.
+# Requires a metrics adapter that can expose primeflow_queue_ready.
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: primeflow-worker-vcd
+#   namespace: primeflow
+# spec:
+#   scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: primeflow-worker-vcd}
+#   minReplicas: 2
+#   maxReplicas: 20
+#   metrics:
+#     - type: External
+#       external:
+#         metric:
+#           name: primeflow_queue_ready
+#           selector: {matchLabels: {queue: vcd}}
+#         target: {type: AverageValue, averageValue: "5"}
