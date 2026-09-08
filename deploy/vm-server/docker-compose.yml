@@ -1,0 +1,97 @@
+# PrimeFlow control plane on one VM: Postgres, the server (API + console) and
+# an nginx edge holding 443 with a self-signed certificate.
+#
+# Only nginx publishes a port. Postgres and the server are reachable on the
+# compose network and nowhere else, so the VM's public surface is 443 alone.
+#
+#   cp server.env.example server.env && chmod 600 server.env   # then edit it
+#   SERVER_HOST=mainvm.example.com docker compose up -d
+#   docker compose logs -f server
+#
+# SERVER_HOST must be the name vm2 will use in PRIMEFLOW_API_URL: it goes into
+# the certificate's SAN, and a worker that reaches the server by any other name
+# will reject it.
+
+name: primeflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: primeflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the shell or an .env file}
+      POSTGRES_DB: primeflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U primeflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [pf]
+    restart: unless-stopped
+    # No ports: nothing outside this network needs the database. Publish
+    # 127.0.0.1:5432:5432 temporarily if you want psql from the VM itself.
+
+  # One-shot: a self-signed certificate for SERVER_HOST, generated on first run
+  # and left alone afterwards. Replace the volume's contents with a real
+  # certificate and this service becomes a no-op.
+  certs:
+    image: alpine/openssl
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      SERVER_HOST: ${SERVER_HOST:?set SERVER_HOST to the name workers will dial}
+    command:
+      - |
+        set -e
+        cd /certs
+        if [ ! -s server.crt ]; then
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -days 3650 -subj "/CN=$${SERVER_HOST}" \
+            -addext "subjectAltName=DNS:$${SERVER_HOST}" \
+            -keyout server.key -out server.crt
+          echo "issued a certificate for $${SERVER_HOST}"
+        else
+          echo "certificate already present; leaving it alone"
+        fi
+        chmod 644 server.crt
+        chmod 600 server.key
+    volumes:
+      - certs:/certs
+
+  server:
+    image: ${PRIMEFLOW_IMAGE:-primex/primeflow:latest}
+    env_file: [./server.env]
+    networks: [pf]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: unless-stopped
+    # No ports: nginx is the only thing that talks to it.
+
+  edge:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - certs:/certs:ro
+    networks: [pf]
+    depends_on:
+      certs: {condition: service_completed_successfully}
+      server: {condition: service_started}
+    restart: unless-stopped
+
+networks:
+  pf:
+    # Pinned so PRIMEFLOW_TRUSTED_PROXY_CIDRS in server.env can name it, and
+    # kept to a /24 because a /16 collides with something on a busy Docker host
+    # more often than not. `docker compose up` fails loudly on an overlap —
+    # pick another and change server.env to match.
+    ipam:
+      config:
+        - subnet: 172.31.240.0/24
+
+volumes:
+  pgdata:
+  certs:

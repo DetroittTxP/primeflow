@@ -1,0 +1,35 @@
+# A PrimeFlow worker on its own VM. Same image as the control plane, with the
+# entrypoint pointed at the worker binary.
+#
+#   cp worker.env.example worker.env && chmod 600 worker.env   # then edit it
+#   scp mainvm:/path/to/server.crt ./server.crt                # see deploy/README.md
+#   docker compose up -d && docker compose logs -f worker
+#
+# Nothing is published. A worker dials out and holds one long-lived GET open for
+# wake-ups; it never accepts a connection.
+
+name: primeflow-worker
+
+services:
+  worker:
+    image: ${PRIMEFLOW_IMAGE:-primex/primeflow:latest}
+    entrypoint: ["/usr/local/bin/primex-worker"]
+    env_file: [./worker.env]
+    volumes:
+      # The control plane's self-signed certificate, trusted through
+      # SSL_CERT_FILE in worker.env. Drop both when the server presents a
+      # certificate from a CA the system already trusts.
+      - ./server.crt:/certs/server.crt:ro
+    restart: unless-stopped
+    # Long enough to reach the next checkpoint before SIGKILL. The same knob as
+    # systemd's TimeoutStopSec and Kubernetes' terminationGracePeriodSeconds:
+    # past it a killed run's lease simply lapses and another worker resumes it
+    # from its last checkpoint, so this is an optimisation, not a correctness
+    # requirement.
+    stop_grace_period: 120s
+
+    # Uncomment if vm2 cannot resolve the control plane by name. The name must
+    # match the certificate's SAN, so add a hosts entry rather than dialling
+    # the IP directly.
+    # extra_hosts:
+    #   - "mainvm.example.com:10.0.0.10"
