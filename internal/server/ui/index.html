@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PrimeFlow</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h6' stroke='white' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="/primeflow.png">
 <style>
   :root {
     --bg: #fbfbfc; --panel: #ffffff; --ink: #1c1f27; --muted: #697086;
@@ -213,6 +213,10 @@
   form.inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; padding: 14px; }
   form.inline label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   form.inline .full { grid-column: 1 / -1; }
+  .wk-chk { flex-direction: row !important; align-items: flex-start; gap: 7px; color: var(--ink); font-size: 13px; line-height: 1.4; }
+  .wk-chk input { margin-top: 2px; }
+  .wk-pools { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+  .wk-reqlist { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
   textarea {
     font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel);
     color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 7px; min-height: 70px;
@@ -331,7 +335,7 @@
   <section id="v-queues">
     <div class="view-head"><h1>Work pools</h1></div>
     <div class="panel">
-      <h2>Pools<span class="grow"></span><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <h2>Pools<span class="grow"></span><button class="act primary" onclick="openCreatePool()">Create pool…</button><button class="act" onclick="loadQueues()">Refresh</button></h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
         A pool is a named lane of work. <b>Desired</b> is the worker count PrimeFlow publishes as
         <code>primeflow_queue_desired_workers</code> for a KEDA <code>ScaledObject</code> or an HPA to act on —
@@ -431,7 +435,7 @@
   <section id="v-workers">
     <div class="view-head"><h1>Workers</h1></div>
     <div class="panel">
-      <h2>Workers<span class="grow"></span><button class="act" onclick="loadWorkers()">Refresh</button></h2>
+      <h2>Workers<span class="grow"></span><button class="act primary" onclick="openAddWorker()">Add worker…</button><button class="act" onclick="loadWorkers()">Refresh</button></h2>
       <div class="scroll"><table>
         <thead><tr><th>Name</th><th>Status</th><th>Pools</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
         <tbody id="workers"></tbody>
@@ -565,6 +569,47 @@
     <button class="act" onclick="document.getElementById('flow-dialog').close()">Close</button>
   </div>
   <div class="dlg-body" id="fd-body"></div>
+</dialog>
+
+<dialog id="worker-dialog">
+  <div class="dlg-head">
+    <strong>Add worker</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('worker-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="wd-body"></div>
+</dialog>
+
+<dialog id="pool-dialog">
+  <div class="dlg-head">
+    <strong>Create work pool</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('pool-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body">
+    <form class="inline" id="pool-form" onsubmit="createPool(event)">
+      <label>Name *<input name="name" required placeholder="e.g. gpu-builds" pattern="[A-Za-z0-9._-]+" title="letters, digits, . _ - only"></label>
+      <label>Pool type
+        <select name="pool_type" onchange="poolTypeToggle()">
+          <option value="pull">pull — workers lease from the queue</option>
+          <option value="push">push — server POSTs each ready run to an endpoint</option>
+        </select>
+      </label>
+      <label class="full">Description<input name="description" placeholder="what runs here"></label>
+      <label>Concurrency limit<input name="concurrency_limit" type="number" min="0" placeholder="∞  (blank = unlimited)"></label>
+      <label>Owner / team<input name="owner" placeholder="blank = none"></label>
+      <div class="full" id="pool-pull" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <label>Min workers<input name="min_workers" type="number" min="0" value="0"></label>
+        <label>Max workers<input name="max_workers" type="number" min="0" placeholder="∞  (blank = unbounded)"></label>
+        <label>Target ready / worker<input name="target_ready_per_worker" type="number" min="1" value="5"></label>
+        <p class="muted full" style="margin:0;grid-column:1/-1">min / max / target feed the <code>desired_workers</code> signal KEDA or an HPA scales on. PrimeFlow never starts workers itself.</p>
+      </div>
+      <div class="full" id="pool-push" style="display:none;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
+        <label>Push endpoint URL *<input name="push_endpoint" type="url" placeholder="http://push-worker:8090/run"></label>
+        <label>Shared secret (HMAC)<input name="push_secret" placeholder="signs each dispatch"></label>
+      </div>
+      <label class="wk-chk full"><input type="checkbox" name="paused">Start paused (hold dispatch until resumed)</label>
+      <div class="full row"><button class="act primary" type="submit">Create pool</button></div>
+    </form>
+  </div>
 </dialog>
 
 <script>
@@ -916,6 +961,61 @@ function setPushEndpoint(q) {
   act('/queues', { method: 'POST', body: JSON.stringify(body) });
 }
 
+// --- create work pool -------------------------------------------------
+function openCreatePool() {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const f = document.getElementById('pool-form');
+  f.reset();
+  poolTypeToggle();
+  document.getElementById('pool-dialog').showModal();
+}
+
+function poolTypeToggle() {
+  const el = document.getElementById('pool-form').elements;
+  const push = el.pool_type.value === 'push';
+  document.getElementById('pool-pull').style.display = push ? 'none' : 'grid';
+  document.getElementById('pool-push').style.display = push ? 'grid' : 'none';
+  el.push_endpoint.required = push;
+}
+
+async function createPool(ev) {
+  ev.preventDefault();
+  const el = ev.target.elements;
+  const push = el.pool_type.value === 'push';
+  const body = {
+    name: el.name.value.trim(),
+    description: el.description.value.trim(),
+    pool_type: el.pool_type.value,
+    owner: el.owner.value.trim(),
+    paused: el.paused.checked,
+  };
+  if (el.concurrency_limit.value.trim() !== '') {
+    const n = parseInt(el.concurrency_limit.value, 10);
+    if (isNaN(n) || n < 0) return toast('Concurrency limit must be a non-negative number', true);
+    body.concurrency_limit = n;
+  }
+  if (push) {
+    body.push_endpoint = el.push_endpoint.value.trim();
+    if (!body.push_endpoint) return toast('A push pool needs an endpoint URL', true);
+    if (el.push_secret.value.trim() !== '') body.push_secret = el.push_secret.value.trim();
+  } else {
+    body.min_workers = parseInt(el.min_workers.value, 10) || 0;
+    body.target_ready_per_worker = parseInt(el.target_ready_per_worker.value, 10) || 5;
+    if (el.max_workers.value.trim() !== '') {
+      const mx = parseInt(el.max_workers.value, 10);
+      if (isNaN(mx) || mx < body.min_workers) return toast('Max workers must be ≥ min workers', true);
+      body.max_workers = mx;
+    }
+  }
+  try {
+    await api('/queues', { method: 'POST', body: JSON.stringify(body) });
+    toast('Pool "' + body.name + '" created');
+    document.getElementById('pool-dialog').close();
+    show('queues');
+    loadQueues();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function loadPending() {
   const q = document.getElementById('q-pick').value;
   if (!q) { document.getElementById('pending').innerHTML = ''; return; }
@@ -1121,6 +1221,153 @@ async function loadWorkers() {
       <td class="mono">${(w.queues || []).map(esc).join(', ')}</td>
       <td>${w.active_runs}</td><td>${w.concurrency}</td><td>${when(w.last_heartbeat)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
+}
+
+// --- add worker wizard --------------------------------------------------
+// PrimeFlow never launches workers itself. This wizard captures the config,
+// makes the operator confirm the host-side package/component requirements,
+// then emits a copy-paste bootstrap package for the new worker host.
+const WK_COMPONENTS = {
+  base: [
+    'primex-worker binary on the host (or Go 1.25+ to build ./examples/primex-worker)',
+    'ca-certificates — TLS trust store for the flow\'s outbound calls',
+    'Outbound network to PostgreSQL :5432 and the notification bus (NATS :4222 / Redis :6379)',
+  ],
+  vcd: [
+    'VMware Cloud Director API reachable + a service account with vApp/VM rights',
+    'The vCD client library / govc the flow imports, installed on the host',
+  ],
+  metering: [
+    'Billing API endpoint reachable + an API token for usage submission',
+  ],
+  provisioning: [
+    'Guest OS templates published in the target vDC catalog',
+  ],
+  fleet: [
+    'Deployment "provision-vm-standard" exists (the sub-flow target this flow calls)',
+  ],
+};
+
+function wkReqComponents() {
+  const tags = window.__wkTags || [];
+  const out = [...WK_COMPONENTS.base];
+  for (const t of tags) if (WK_COMPONENTS[t]) out.push(...WK_COMPONENTS[t]);
+  return out;
+}
+
+async function openAddWorker() {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const dlg = document.getElementById('worker-dialog');
+  const body = document.getElementById('wd-body');
+  body.innerHTML = '<div class="empty">Loading…</div>';
+  dlg.showModal();
+  const [qs, flows] = await Promise.all([
+    api('/queues').catch(() => []),
+    api('/flows').catch(() => []),
+  ]);
+  const pull = (qs || []).filter(q => (q.pool_type || 'pull') === 'pull');
+  window.__wkTags = [...new Set((flows || []).flatMap(f => f.tags || []))];
+  const n = document.querySelectorAll('#workers tr').length + 1;
+  body.innerHTML = `
+    <form class="inline" id="wk-form" onsubmit="return false">
+      <label>Worker name<input name="name" value="primex-worker-${n}" required></label>
+      <label>Concurrency<input name="concurrency" type="number" min="1" value="4"></label>
+      <label>Runtime target
+        <select name="target" onchange="wkGen()">
+          <option value="docker">Docker</option>
+          <option value="systemd">systemd (bare host)</option>
+          <option value="k8s">Kubernetes</option>
+        </select>
+      </label>
+      <label class="full">Work pools this worker serves
+        <span class="wk-pools" onchange="wkGen()">${pull.length
+          ? pull.map(q => `<label class="wk-chk"><input type="checkbox" name="pool" value="${esc(q.name)}"${q.name === 'default' ? ' checked' : ''}>${esc(q.name)}</label>`).join('')
+          : '<span class="muted">No pull pools yet — the worker will create the pools it subscribes to on first check-in.</span>'}</span>
+      </label>
+    </form>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Host requirements <span class="muted">— confirm each is satisfied on the new host</span></h2>
+      <div id="wk-reqs"></div>
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Bootstrap package</h2>
+      <p class="muted" style="padding:0 16px 8px">
+        PrimeFlow does not start workers itself. Provision the host, satisfy the requirements above,
+        then run this. Credentials are placeholders — fill them from your server's configuration.
+      </p>
+      <pre class="logs" id="wk-out" style="margin:0 16px"></pre>
+      <div class="row" style="padding:12px 16px;gap:8px">
+        <button class="act primary" id="wk-gen" disabled onclick="wkGen()">Generate bootstrap</button>
+        <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wk-out').textContent).then(()=>toast('Copied'))">Copy</button>
+      </div>
+    </div>`;
+  wkReqs();
+}
+
+function wkReqs() {
+  const el = document.getElementById('wk-reqs');
+  if (!el) return;
+  el.innerHTML = `<div class="wk-reqlist">${wkReqComponents().map(c =>
+    `<label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">${esc(c)}</label>`).join('')}
+    <label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">All flow-specific SDKs / CLIs the registered flows import are installed and on PATH</label>
+  </div>`;
+  wkReqGate();
+}
+
+function wkReqGate() {
+  const boxes = [...document.querySelectorAll('.wk-req')];
+  const ok = boxes.length > 0 && boxes.every(b => b.checked);
+  const gen = document.getElementById('wk-gen');
+  if (gen) gen.disabled = !ok;
+  const out = document.getElementById('wk-out');
+  if (!out) return;
+  if (ok) wkGen();
+  else out.textContent = '# Confirm every host requirement above to generate the bootstrap package.';
+}
+
+function wkGen() {
+  const gen = document.getElementById('wk-gen');
+  if (!gen || gen.disabled) return;
+  const f = document.getElementById('wk-form');
+  const name = (f.elements.name.value || 'primex-worker').trim();
+  const conc = parseInt(f.elements.concurrency.value, 10) || 4;
+  const target = f.elements.target.value;
+  const pools = [...f.querySelectorAll('input[name=pool]:checked')].map(b => b.value);
+  const queues = pools.length ? pools.join(',') : 'default';
+  const env = [
+    ['PRIMEFLOW_DATABASE_URL', 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
+    ['PRIMEFLOW_NATS_URL', 'nats://NATS_HOST:4222'],
+    ['PRIMEFLOW_QUEUES', queues],
+    ['PRIMEFLOW_CONCURRENCY', String(conc)],
+    ['PRIMEFLOW_WORKER_NAME', name],
+  ];
+  const envLines = env.map(([k, v]) => `${k}=${v}`).join('\n');
+  let out = '#!/bin/sh\n';
+  out += '# Host requirements confirmed by ' + esc(ME.email) + ':\n';
+  out += wkReqComponents().map(c => '#   [x] ' + c).join('\n') + '\n\n';
+  out += '# ---- worker.env ----\n' + envLines + '\n\n';
+  if (target === 'docker') {
+    out += '# ---- run (Docker) ----\n' +
+      'docker run -d --name ' + name + ' --env-file worker.env --restart unless-stopped \\\n' +
+      '  primex/primeflow:latest /usr/local/bin/primex-worker\n';
+  } else if (target === 'systemd') {
+    out += '# ---- /etc/systemd/system/' + name + '.service ----\n' +
+      '[Unit]\nDescription=PrimeFlow worker ' + name + '\nAfter=network-online.target\n\n' +
+      '[Service]\nEnvironmentFile=/etc/' + name + '.env\nExecStart=/usr/local/bin/primex-worker\n' +
+      'Restart=always\nRestartSec=3\nUser=primeflow\n\n' +
+      '[Install]\nWantedBy=multi-user.target\n\n' +
+      '# then:\nsudo install -m600 worker.env /etc/' + name + '.env\n' +
+      'sudo systemctl daemon-reload && sudo systemctl enable --now ' + name + '\n';
+  } else {
+    out += '# ---- k8s ----\n' +
+      'kubectl create secret generic ' + name + '-env --from-env-file=worker.env\n\n' +
+      'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ' + name + '\nspec:\n  replicas: 1\n' +
+      '  selector: { matchLabels: { app: ' + name + ' } }\n  template:\n    metadata: { labels: { app: ' + name + ' } }\n' +
+      '    spec:\n      containers:\n        - name: worker\n          image: primex/primeflow:latest\n' +
+      '          command: ["/usr/local/bin/primex-worker"]\n          envFrom:\n            - secretRef: { name: ' + name + '-env }\n';
+  }
+  out += '\n# The worker registers on start and appears on this page as "' + name + '".';
+  document.getElementById('wk-out').textContent = out;
 }
 
 // --- event timeline -------------------------------------------------------
