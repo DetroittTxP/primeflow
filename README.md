@@ -1,12 +1,11 @@
 # PrimeFlow
 
-Durable workflow orchestration in Go, built for PrimeX.
+การจัดคิวและเรียงลำดับเวิร์กโฟลว์แบบทนทาน (durable workflow orchestration) เขียนด้วยภาษา Go สร้างมาเพื่อ PrimeX
 
-PrimeFlow takes the ideas that make Prefect's open-source core good — flows as
-ordinary code, automatic state tracking, retries, work pools, event-driven
-automations — and rebuilds them as a single static Go binary backed by
-PostgreSQL. Flows are Go functions. There is no DAG to declare, no Python
-runtime to ship, and no broker to babysit.
+PrimeFlow หยิบแนวคิดที่ทำให้ Prefect เวอร์ชันโอเพนซอร์สทำงานได้ดี — flow เป็นโค้ดธรรมดา,
+ติดตามสถานะอัตโนมัติ, retry, work pool, automation ที่ขับด้วยเหตุการณ์ — แล้วสร้างใหม่ให้อยู่ในรูป
+ไบนารี Go แบบ static ไฟล์เดียว โดยมี PostgreSQL เป็นเบื้องหลัง flow คือฟังก์ชัน Go
+ไม่มี DAG ให้ประกาศ ไม่มี Python runtime ให้แพ็กไปด้วย และไม่มี broker ให้คอยดูแล
 
 ```go
 sdk.Flow("provision-vm", func(c *sdk.Context) (any, error) {
@@ -22,7 +21,7 @@ sdk.Flow("provision-vm", func(c *sdk.Context) (any, error) {
         return nil, err
     }
 
-    // Releases the worker slot; the run resumes here in two minutes.
+    // คืน worker slot; งานจะกลับมาทำงานต่อที่จุดนี้ในอีกสองนาที
     if err := sdk.Sleep(c, "settle", 2*time.Minute); err != nil {
         return nil, err
     }
@@ -35,133 +34,124 @@ sdk.Flow("provision-vm", func(c *sdk.Context) (any, error) {
 
 ---
 
-## What durability actually means here
+## "ทนทาน" ในที่นี้หมายความว่าอย่างไร
 
-If a worker is killed halfway through that flow, the run's lease expires, the
-janitor marks it crashed, and another worker picks it up. The function runs
-again **from the top** — but `create-vm` returns its stored result instead of
-building a second VM, and execution continues from where it left off.
+ถ้า worker ถูกฆ่ากลางคัน lease ของงานจะหมดอายุ janitor จะทำเครื่องหมายว่า crashed
+แล้ว worker อีกตัวจะรับงานไปทำต่อ ฟังก์ชันจะถูกเรียกใหม่ **ตั้งแต่ต้น** — แต่ `create-vm`
+จะคืนผลลัพธ์ที่เก็บไว้แทนการสร้าง VM ตัวที่สอง และการทำงานจะไปต่อจากจุดที่ค้างไว้
 
-That is checkpoint-and-replay, the same model Prefect uses. It costs you one
-authoring rule:
+นี่คือรูปแบบ checkpoint-and-replay ซึ่งเป็นโมเดลเดียวกับที่ Prefect ใช้ มันมีต้นทุนเพียงกฎการเขียนโค้ดข้อเดียว:
 
-> **Side effects go inside a `Task`. Code between tasks may run more than once.**
+> **side effect ต้องอยู่ภายใน `Task` โค้ดที่อยู่ระหว่าง task อาจถูกรันมากกว่าหนึ่งครั้ง**
 
-In exchange you write ordinary Go — loops, conditionals, early returns,
-`time.Now()`, goroutines — with none of the determinism restrictions a
-replay-based engine like Temporal imposes.
+แลกกับสิ่งนั้น คุณเขียน Go แบบปกติได้ — loop, เงื่อนไข, early return, `time.Now()`,
+goroutine — โดยไม่มีข้อจำกัดเรื่อง determinism ที่เอนจินแบบ replay อย่าง Temporal บังคับ
 
 ---
 
-## Feature map
+## ตารางเทียบฟีเจอร์
 
 | Prefect OSS | PrimeFlow |
 |---|---|
-| `@flow` / `@task` decorators | `sdk.Flow` / `sdk.Task[T]`, generic and type-safe |
-| Durable execution, result persistence | Task checkpoints in Postgres, replayed on resume |
-| State tracking | 9 states with an enforced transition table |
-| Automatic retries | Per-task and per-flow, with exponential backoff |
-| Task result caching | Cross-run cache keys with TTL |
-| Deployments & schedules | Cron (5/6-field, timezone-aware) and interval, with catch-up control |
-| Work pools / work queues | Named queues with concurrency limits and pause switches |
-| Workers | Leased, heartbeating, gracefully draining |
-| Artifacts | Markdown, table, link and JSON, attached to runs |
-| Observability | Structured logs, run timeline, event feed, live SSE stream |
-| Events & automations | Event log plus threshold rules with six action types |
-| Self-hosted UI | Bundled single-file console, no build step |
-| — | **Operator queue control: priority bands, pin-to-front, live reordering** |
+| decorator `@flow` / `@task` | `sdk.Flow` / `sdk.Task[T]` เป็น generic และ type-safe |
+| การทำงานแบบทนทาน, การเก็บผลลัพธ์ | task checkpoint ใน Postgres เล่นซ้ำตอน resume |
+| การติดตามสถานะ | 9 สถานะ พร้อมตารางเปลี่ยนสถานะที่บังคับใช้ |
+| retry อัตโนมัติ | ต่อ task และต่อ flow พร้อม exponential backoff |
+| cache ผลลัพธ์ของ task | cache key ข้ามการรัน มี TTL |
+| deployment และตารางเวลา | cron (5/6 ฟิลด์ รู้ timezone) และ interval พร้อมคุมการ catch-up |
+| work pool / work queue | คิวที่มีชื่อ พร้อม concurrency limit และสวิตช์ pause |
+| worker | ใช้ lease, ส่ง heartbeat, drain อย่างนุ่มนวล |
+| artifact | Markdown, ตาราง, ลิงก์ และ JSON แนบกับงาน |
+| observability | log แบบมีโครงสร้าง, timeline ของงาน, feed เหตุการณ์, สตรีม SSE สด |
+| เหตุการณ์และ automation | event log พร้อมกฎแบบ threshold ที่มี action หกชนิด |
+| UI แบบ self-hosted | console ไฟล์เดียวรวมมาในตัว ไม่ต้อง build |
+| — | **การคุมคิวโดยผู้ดูแล: แถบลำดับความสำคัญ, ปักหมุดขึ้นหน้าสุด, จัดลำดับใหม่สด ๆ** |
+| — | **GitOps worker delivery: เรนเดอร์ + commit แมนิเฟสต์ของ worker เข้ารีโปฝั่ง server** |
 
-The last row is the part Prefect does not have, and it is the reason this exists
-rather than a Prefect deployment.
+สองแถวสุดท้ายคือส่วนที่ Prefect ไม่มี และเป็นเหตุผลว่าทำไมโปรเจกต์นี้จึงมีอยู่ แทนที่จะใช้ Prefect
 
 ---
 
-## Queue control
+## การคุมคิว
 
-Every run carries a **priority** (0–100, default 50) and an optional
-**pin**. Dispatch order is exactly:
+ทุกงานมี **priority** (0–100 ค่าเริ่มต้น 50) และ **pin** ที่ใส่หรือไม่ก็ได้
+ลำดับการ dispatch เป็นดังนี้เป๊ะ ๆ:
 
-1. pinned runs first, in pin order
-2. then descending priority
-3. then oldest scheduled first
+1. งานที่ถูก pin มาก่อน เรียงตามลำดับการ pin
+2. จากนั้นเรียง priority จากมากไปน้อย
+3. จากนั้นงานที่ถูก schedule ก่อนมาก่อน
 
-Operators change all of it at runtime, from the console or the API, and the
-change takes effect on the next lease — never disturbing work already running:
+ผู้ดูแลเปลี่ยนได้ทั้งหมดขณะรันจริง ผ่าน console หรือ API และการเปลี่ยนมีผลใน lease ถัดไป —
+โดยไม่รบกวนงานที่กำลังรันอยู่:
 
 ```bash
-primeflow queue                                  # depth per lane
-primeflow queue show vcd                         # the exact dispatch order
-primeflow queue front  <run-id>                  # run this one next
-primeflow queue priority <run-id> 100            # promote to urgent
-primeflow queue pause  vcd                       # stop the lane, keep the work
+primeflow queue                                  # ความลึกของแต่ละเลน
+primeflow queue show vcd                         # ลำดับการ dispatch ที่แน่นอน
+primeflow queue front  <run-id>                  # ให้งานนี้ทำเป็นลำดับถัดไป
+primeflow queue priority <run-id> 100            # เลื่อนขึ้นเป็นด่วน
+primeflow queue pause  vcd                       # หยุดเลน แต่เก็บงานไว้
 ```
 
-`GET /api/v1/queues/{name}/pending` returns the same ordering the leasing query
-uses, so what an operator sees on screen is what will actually happen.
+`GET /api/v1/queues/{name}/pending` คืนลำดับเดียวกับที่เควรีการ lease ใช้ ดังนั้นสิ่งที่ผู้ดูแลเห็นบนจอ
+คือสิ่งที่จะเกิดขึ้นจริง
 
-Queues also carry a **concurrency limit** — the way you stop forty parallel
-provisioning flows from overwhelming a vCD endpoint, without changing a line of
-flow code.
+คิวยังมี **concurrency limit** — วิธีที่คุณหยุดไม่ให้ flow provisioning สี่สิบตัวที่รันขนานกันถล่ม
+endpoint ของ vCD โดยไม่ต้องแก้โค้ด flow แม้แต่บรรทัดเดียว
 
 ---
 
-## Architecture
+## สถาปัตยกรรม
 
 ```
    PrimeX backend ─┐
-   Web console ────┼──► PrimeFlow server ──► PostgreSQL   (state + queue, source of truth)
+   Web console ────┼──► PrimeFlow server ──► PostgreSQL   (สถานะ + คิว, แหล่งความจริงเดียว)
    CLI / webhooks ─┘      │  scheduler + janitor      │
                           │  automations              │
                           │  REST + SSE + /metrics    ▼
-                          └──────────────────────►  NATS / Redis   (wake-ups + live fan-out)
+                          └──────────────────────►  NATS / Redis   (ปลุก + กระจายสด)
                                                        ▲
                               Workers  ─────────────────┘
-                              (your binary + pkg/sdk)
+                              (ไบนารีของคุณ + pkg/sdk)
 ```
 
-**Postgres is the only source of truth**, including queue order. Dispatch is a
-single `SELECT … FOR UPDATE SKIP LOCKED` statement, so any number of workers
-pull from the same lane without a broker and without double execution. That
-statement takes and releases one row lock; there is no lock ordering, no
-cross-row wait, and no advisory lock held across calls — workers cannot deadlock
-each other. The only place a cycle could form is sub-flow recursion, which is
-depth-bounded (see below).
+**Postgres คือแหล่งความจริงเดียว** รวมถึงลำดับคิว การ dispatch เป็นคำสั่งเดียว
+`SELECT … FOR UPDATE SKIP LOCKED` ดังนั้น worker จำนวนเท่าไรก็ดึงจากเลนเดียวกันได้โดยไม่ต้องมี broker
+และไม่มีการทำงานซ้ำซ้อน คำสั่งนั้นจับและปล่อย row lock หนึ่งแถว ไม่มีลำดับ lock ไม่มีการรอข้ามแถว
+และไม่มี advisory lock ที่ถือค้างข้ามการเรียก — worker ทำ deadlock ใส่กันไม่ได้ จุดเดียวที่วงจร (cycle)
+อาจก่อตัวได้คือการเรียก sub-flow ซ้อนกัน ซึ่งถูกจำกัดความลึกไว้ (ดูด้านล่าง)
 
-**The bus is an accelerator, never a dependency.** It carries "new work on queue
-X", cancellation signals, and the UI's live stream. Lose it and everything still
-works, just with polling latency instead of instant wake-ups. Choose the
-transport with `PRIMEFLOW_NATS_URL` or `PRIMEFLOW_REDIS_URL` (NATS wins if both
-are set); with neither, an in-process bus runs the whole system on one binary
-plus Postgres.
+**bus เป็นตัวเร่ง ไม่ใช่สิ่งที่ต้องพึ่ง** มันส่ง "มีงานใหม่ในคิว X", สัญญาณยกเลิก และสตรีมสดของ UI
+ถ้ามันล่ม ทุกอย่างยังทำงานได้ แค่มี latency แบบ polling แทนการปลุกทันที เลือก transport ด้วย
+`PRIMEFLOW_NATS_URL` หรือ `PRIMEFLOW_REDIS_URL` (NATS ชนะถ้าตั้งทั้งคู่) ถ้าไม่ตั้งเลย
+bus แบบ in-process จะรันทั้งระบบบนไบนารีเดียวบวก Postgres
 
-**The server scales horizontally.** The scheduler, janitor and automation
-evaluator are leader-elected through a lease row, so N replicas produce one set
-of scheduled runs, not N. Worker pools scale on the workload signal PrimeFlow
-publishes at `/metrics` — a KEDA `ScaledObject` or HPA acts on
-`primeflow_queue_desired_workers`; PrimeFlow never launches workers itself.
+**server สเกลออกด้านข้างได้** scheduler, janitor และตัวประเมิน automation ถูกเลือกเป็น leader
+ผ่านแถว lease ดังนั้น replica N ตัวสร้างชุดงานตามตารางหนึ่งชุด ไม่ใช่ N ชุด worker pool สเกลตามสัญญาณ
+ปริมาณงานที่ PrimeFlow เผยแพร่ที่ `/metrics` — KEDA `ScaledObject` หรือ HPA ทำงานบน
+`primeflow_queue_desired_workers` PrimeFlow ไม่เคยสั่งรัน worker เอง
 
-Full design notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+บันทึกการออกแบบฉบับเต็ม: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ---
 
-## Quick start
+## เริ่มต้นอย่างรวดเร็ว
 
 ```bash
-docker compose up --build     # Postgres, NATS, server, 2 workers
-open http://localhost:8080     # log in as admin@primeflow.local / primeflow-admin
+docker compose up --build     # Postgres, NATS, server, worker 2 ตัว
+open http://localhost:8080     # ล็อกอินด้วย admin@primeflow.local / primeflow-admin
 ```
 
-Or run it directly:
+หรือรันตรง ๆ:
 
 ```bash
 export PRIMEFLOW_DATABASE_URL="postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable"
 export PRIMEFLOW_REDIS_URL="redis://localhost:6379"
 
 go run ./cmd/primeflow server           # API + UI + scheduler + automations
-go run ./examples/primex-worker         # a worker with two example flows
+go run ./examples/primex-worker         # worker ที่มี flow ตัวอย่างสองตัว
 ```
 
-Then create a deployment and run it:
+จากนั้นสร้าง deployment แล้วรัน:
 
 ```bash
 curl -X POST localhost:8080/api/v1/deployments -d '{
@@ -179,9 +169,9 @@ primeflow run provision-vm-standard -param org_name=acme -param name=web-01
 
 ---
 
-## Writing a worker
+## การเขียน worker
 
-A worker is your own binary. Register flows, then hand over:
+worker คือไบนารีของคุณเอง ลงทะเบียน flow แล้วส่งต่อการควบคุม:
 
 ```go
 package main
@@ -202,41 +192,41 @@ func main() {
 }
 ```
 
-Configuration comes from the environment, so the same image runs everywhere:
+การตั้งค่ามาจาก environment ดังนั้น image เดียวกันรันได้ทุกที่:
 
-| Variable | Meaning | Default |
+| ตัวแปร | ความหมาย | ค่าเริ่มต้น |
 |---|---|---|
-| `PRIMEFLOW_DATABASE_URL` | Postgres DSN | required |
-| `PRIMEFLOW_NATS_URL` | NATS URL for live updates (wins over Redis) | optional |
-| `PRIMEFLOW_REDIS_URL` | Redis URL for live updates | optional |
-| `PRIMEFLOW_QUEUES` | comma-separated lanes to poll | `default` |
-| `PRIMEFLOW_CONCURRENCY` | runs executed in parallel | `4` |
-| `PRIMEFLOW_LEASE` | lease duration | `60s` |
-| `PRIMEFLOW_POLL` | fallback poll interval | `2s` |
-| `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | how deep `RunDeployment` may nest | `8` |
-| `PRIMEFLOW_LOG_RETENTION` | prune `pf_logs` older than this (Go duration) | `720h` |
-| `PRIMEFLOW_METRICS_ADDR` | worker's own `/metrics` listener (flow/task timings) | `:9090` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | send traces here; unset = tracing off, zero cost | none |
-| `PRIMEFLOW_HTTP_ADDR` | server listen address | `:8080` |
-| `PRIMEFLOW_API_TOKEN` | bearer token for machine clients (workers, CLI) on `/api/v1` | none |
-| `PRIMEFLOW_CORS_ORIGIN` | allow the PrimeX console to call the API | none |
-| `PRIMEFLOW_ADMIN_EMAIL` / `PRIMEFLOW_ADMIN_PASSWORD` | seed the first operator account on an empty database | none |
-| `PRIMEFLOW_SESSION_TTL` | operator login lifetime (slides on use) | `168h` |
-| `PRIMEFLOW_COOKIE_SECURE` | mark session cookies `Secure` | auto (on when a proxy is trusted) |
-| `PRIMEFLOW_TRUSTED_PROXY_CIDRS` | networks whose `X-Forwarded-For` / client-cert headers are believed | none |
-| `PRIMEFLOW_PUSH_ADDR` / `PRIMEFLOW_PUSH_SECRET` | push-pool receiver: listen address and dispatch HMAC secret | `:8090` / none |
-| `PRIMEFLOW_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | enable OIDC SSO (issuer + client id required) | none |
-| `PRIMEFLOW_OIDC_REDIRECT_URL` | OIDC callback (else derived from the request) | derived |
-| `PRIMEFLOW_OIDC_DEFAULT_ROLE` / `_ROLE_CLAIM` / `_ROLE_MAP` | JIT role: fallback, claim name, `group=role,…` map | `viewer` / — / — |
-| `PRIMEFLOW_RESET_TTL` | admin-issued password-reset link lifetime | `1h` |
+| `PRIMEFLOW_DATABASE_URL` | Postgres DSN | จำเป็น |
+| `PRIMEFLOW_NATS_URL` | NATS URL สำหรับอัปเดตสด (ชนะ Redis) | ไม่บังคับ |
+| `PRIMEFLOW_REDIS_URL` | Redis URL สำหรับอัปเดตสด | ไม่บังคับ |
+| `PRIMEFLOW_QUEUES` | เลนที่จะ poll คั่นด้วยจุลภาค | `default` |
+| `PRIMEFLOW_CONCURRENCY` | จำนวนงานที่รันขนานกัน | `4` |
+| `PRIMEFLOW_LEASE` | ระยะเวลา lease | `60s` |
+| `PRIMEFLOW_POLL` | ช่วงเวลา poll สำรอง | `2s` |
+| `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | `RunDeployment` ซ้อนได้ลึกแค่ไหน | `8` |
+| `PRIMEFLOW_LOG_RETENTION` | ตัด `pf_logs` ที่เก่ากว่านี้ (Go duration) | `720h` |
+| `PRIMEFLOW_GITSYNC_INTERVAL` | ทุกกี่ครั้งที่ตัว reconciler push worker spec ที่ตั้ง auto-sync แล้ว drift | `2m` |
+| `PRIMEFLOW_METRICS_ADDR` | listener `/metrics` ของ worker เอง (เวลาของ flow/task) | `:9090` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ส่ง trace ไปที่นี่ ไม่ตั้ง = ปิด tracing ไม่มีต้นทุน | ไม่มี |
+| `PRIMEFLOW_HTTP_ADDR` | address ที่ server ฟัง | `:8080` |
+| `PRIMEFLOW_API_TOKEN` | bearer token สำหรับ client ที่เป็นเครื่อง (worker, CLI) บน `/api/v1` | ไม่มี |
+| `PRIMEFLOW_CORS_ORIGIN` | อนุญาตให้ console ของ PrimeX เรียก API | ไม่มี |
+| `PRIMEFLOW_ADMIN_EMAIL` / `PRIMEFLOW_ADMIN_PASSWORD` | seed บัญชีผู้ดูแลคนแรกบนฐานข้อมูลว่าง | ไม่มี |
+| `PRIMEFLOW_SESSION_TTL` | อายุการล็อกอินของผู้ดูแล (เลื่อนออกเมื่อใช้งาน) | `168h` |
+| `PRIMEFLOW_COOKIE_SECURE` | ทำเครื่องหมาย cookie ของ session เป็น `Secure` | อัตโนมัติ (เปิดเมื่อ proxy ถูก trust) |
+| `PRIMEFLOW_TRUSTED_PROXY_CIDRS` | เครือข่ายที่เชื่อ header `X-Forwarded-For` / client-cert | ไม่มี |
+| `PRIMEFLOW_PUSH_ADDR` / `PRIMEFLOW_PUSH_SECRET` | ตัวรับ push-pool: address ที่ฟัง และ secret HMAC ของการ dispatch | `:8090` / ไม่มี |
+| `PRIMEFLOW_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | เปิด OIDC SSO (ต้องมี issuer + client id) | ไม่มี |
+| `PRIMEFLOW_OIDC_REDIRECT_URL` | callback ของ OIDC (ไม่ตั้งจะ derive จาก request) | derive |
+| `PRIMEFLOW_OIDC_DEFAULT_ROLE` / `_ROLE_CLAIM` / `_ROLE_MAP` | บทบาทแบบ JIT: ค่า fallback, ชื่อ claim, map `group=role,…` | `viewer` / — / — |
+| `PRIMEFLOW_RESET_TTL` | อายุลิงก์รีเซ็ตรหัสผ่านที่ผู้ดูแลออกให้ | `1h` |
 
-When `PRIMEFLOW_REDIS_URL` is set — even with NATS as the bus — the login
-throttle and per-API-key rate limiter use a **shared Redis token bucket**, so
-limits hold across server replicas; otherwise they are per-process.
+เมื่อตั้ง `PRIMEFLOW_REDIS_URL` — แม้จะใช้ NATS เป็น bus — ตัว throttle การล็อกอินและ rate limiter
+ต่อ API key จะใช้ **token bucket ร่วมบน Redis** ดังนั้นลิมิตคงอยู่ข้าม replica ของ server มิฉะนั้นจะเป็นแบบต่อ process
 
-### SDK reference
+### เอกสารอ้างอิง SDK
 
-**Flows**
+**Flow**
 
 ```go
 sdk.Flow(name, fn, sdk.Retries(2), sdk.RetryDelay(30*time.Second),
@@ -245,25 +235,24 @@ sdk.Flow(name, fn, sdk.Retries(2), sdk.RetryDelay(30*time.Second),
 sdk.Flow("resize", sdk.Typed(func(c *sdk.Context, p ResizeParams) (any, error) { … }))
 ```
 
-**Tasks**
+**Task**
 
 ```go
 v, err := sdk.Task(c, "name", fn,
-    sdk.TaskKey("stable-key"),          // pin the checkpoint key (see below)
+    sdk.TaskKey("stable-key"),          // ตรึง checkpoint key (ดูด้านล่าง)
     sdk.TaskRetries(3),
-    sdk.TaskRetryDelay(5*time.Second),  // exponential, capped
+    sdk.TaskRetryDelay(5*time.Second),  // exponential มีเพดาน
     sdk.TaskTimeout(2*time.Minute),
-    sdk.TaskCache("vcd:org:acme", time.Hour), // share the result across runs
-    sdk.TaskEphemeral(),                // never persist; always execute
+    sdk.TaskCache("vcd:org:acme", time.Hour), // แชร์ผลลัพธ์ข้ามการรัน
+    sdk.TaskEphemeral(),                // ไม่เก็บถาวร รันทุกครั้ง
 )
 
-err := sdk.Do(c, "name", fn)            // for steps with no return value
+err := sdk.Do(c, "name", fn)            // สำหรับขั้นตอนที่ไม่มีค่าคืน
 ```
 
-Checkpoint keys default to `<task name>-<n>` in reach order. **Inside a loop
-over data that can change between attempts, supply an explicit key derived from
-the data** — otherwise adding an item shifts every subsequent key and re-runs
-work that already succeeded:
+checkpoint key มีค่าเริ่มต้นเป็น `<ชื่อ task>-<n>` ตามลำดับที่ไปถึง **ภายใน loop ที่วนบนข้อมูล
+ซึ่งอาจเปลี่ยนระหว่างครั้ง ให้ระบุ key ที่ derive จากข้อมูลเอง** — มิฉะนั้นการเพิ่มรายการจะทำให้ key
+ที่ตามมาทั้งหมดเลื่อน และรันงานที่สำเร็จไปแล้วซ้ำ:
 
 ```go
 for _, org := range orgs {
@@ -271,34 +260,34 @@ for _, org := range orgs {
 }
 ```
 
-**Waiting**
+**การรอ**
 
 ```go
-sdk.Sleep(c, "settle", 2*time.Minute)   // >30s releases the worker slot
+sdk.Sleep(c, "settle", 2*time.Minute)   // เกิน 30 วินาที จะคืน worker slot
 sdk.WaitUntil(c, "window", startOfDay)
-sdk.Suspend(until, "waiting for approval")
+sdk.Suspend(until, "รออนุมัติ")
 ```
 
-**Errors**
+**ข้อผิดพลาด**
 
 ```go
-return sdk.Permanent(err)               // skip the retry budget entirely
+return sdk.Permanent(err)               // ข้าม retry budget ทั้งหมด
 ```
 
-**Logs, artifacts, fan-out**
+**Log, artifact, fan-out**
 
 ```go
 c.Info("provisioning", "org", p.OrgName)
 c.Markdown("summary", "### VM created…")
 c.Table("usage", rows)
-c.Link("console", vm.Href, "Open in Cloud Director")
-c.RunDeployment("notify-oncall", payload, sdk.TriggerPriority(100)) // fire and forget
-child, err := c.RunDeploymentAndWait("provision-vm-standard", params) // durable wait — see Sub-flows
+c.Link("console", vm.Href, "เปิดใน Cloud Director")
+c.RunDeployment("notify-oncall", payload, sdk.TriggerPriority(100)) // ยิงแล้วลืม
+child, err := c.RunDeploymentAndWait("provision-vm-standard", params) // รอแบบทนทาน — ดู Sub-flows
 ```
 
 ---
 
-## Scheduling
+## การตั้งตารางเวลา
 
 ```json
 {
@@ -312,20 +301,19 @@ child, err := c.RunDeploymentAndWait("provision-vm-standard", params) // durable
 }
 ```
 
-- `cron` accepts 5-field and 6-field (leading seconds) expressions and `@hourly`-style descriptors.
-- `interval` accepts a Go duration such as `15m`, phase-anchored to the deployment's creation time so restarts do not cause drift.
-- `catchup: false` (the default) materialises one run after downtime rather than every missed window.
-- Schedules are validated when the deployment is saved, not silently every cycle afterwards.
+- `cron` รับนิพจน์ 5 ฟิลด์และ 6 ฟิลด์ (มีวินาทีนำหน้า) และ descriptor แบบ `@hourly`
+- `interval` รับ Go duration เช่น `15m` ยึด phase กับเวลาที่สร้าง deployment เพื่อไม่ให้ restart ทำให้เพี้ยน
+- `catchup: false` (ค่าเริ่มต้น) สร้างงานหนึ่งครั้งหลังหยุดทำงาน แทนที่จะสร้างทุกช่วงที่พลาดไป
+- ตารางเวลาถูกตรวจตอนบันทึก deployment ไม่ใช่แอบตรวจทุกรอบหลังจากนั้น
 
-Runs are materialised an hour ahead, which is what lets you see, reprioritise
-or cancel tomorrow's work today.
+งานถูกสร้างล่วงหน้าหนึ่งชั่วโมง ซึ่งเป็นสิ่งที่ทำให้คุณเห็น จัดลำดับใหม่ หรือยกเลิกงานของพรุ่งนี้ได้ตั้งแต่วันนี้
 
 ---
 
-## Events and automations
+## เหตุการณ์และ automation
 
-Every state change writes an event (`flow-run.FAILED`, `flow-run.COMPLETED`, …).
-Automations match events — with optional thresholds and time windows — and act:
+ทุกการเปลี่ยนสถานะเขียน event (`flow-run.FAILED`, `flow-run.COMPLETED`, …)
+automation จับคู่ event — พร้อม threshold และช่วงเวลาที่ใส่หรือไม่ก็ได้ — แล้วลงมือ:
 
 ```json
 {
@@ -339,285 +327,262 @@ Automations match events — with optional thresholds and time windows — and a
 }
 ```
 
-Actions: `run-deployment`, `cancel-run`, `set-priority`, `pause-queue`,
-`resume-queue`, `webhook`.
+action: `run-deployment`, `cancel-run`, `set-priority`, `pause-queue`,
+`resume-queue`, `webhook`
 
-External systems trigger flows the other way through
-`POST /api/v1/webhooks/{deployment}` — the request body becomes the run's
-parameters, which is all it takes to wire vCD or a billing system straight into
-a flow.
+ระบบภายนอกกระตุ้น flow ในทางกลับกันผ่าน `POST /api/v1/webhooks/{deployment}` —
+body ของ request กลายเป็น parameter ของงาน ซึ่งเพียงพอที่จะต่อ vCD หรือระบบ billing เข้ากับ flow ได้ตรง ๆ
 
 ---
 
-## Authentication
+## การยืนยันตัวตน
 
-Two independent surfaces, detailed in [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md):
+สองพื้นผิวที่แยกจากกัน รายละเอียดอยู่ใน [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md):
 
-- **Operator API & console** (`/api/v1`). Humans log in (`POST /api/v1/auth/login`)
-  and get a session cookie carrying one of three roles — `viewer` (read-only),
-  `operator` (day-to-day run/queue/deployment control), `admin` (adds user, API-key
-  and settings management). Browser writes carry a double-submit CSRF token. Workers
-  and the CLI keep using `PRIMEFLOW_API_TOKEN` as a bearer token, treated as `admin`.
-  Seed the first admin with `PRIMEFLOW_ADMIN_*` or `primeflow user add`.
-  - **SSO.** Set `PRIMEFLOW_OIDC_ISSUER` + `_CLIENT_ID` (+ `_CLIENT_SECRET`) and the
-    login page gains a **Sign in with SSO** button. First login JIT-provisions an
-    `oidc` account; its role comes from `_ROLE_MAP` on `_ROLE_CLAIM`, else
-    `_DEFAULT_ROLE`. Local accounts and SSO accounts coexist.
-  - **Password reset.** No SMTP. An admin issues a one-time link — console
-    **Settings → Users → Reset link**, or `primeflow user reset-link -email …` —
-    and the user sets a new password at `/reset.html`.
-- **External API** (`/api/external/v1`). A role-gated, key-authenticated projection
-  of runs, deployments, queues and events for external integrations. Managed from
-  **Settings → External API** in the console: a global master switch, issued keys
-  each with a role (scope bundle) plus per-key IP allowlist, rate limit, mutual-TLS
-  requirement and PII redaction, and a per-key audit trail. A key whose role lacks a
-  route's scope gets `403`; a bad or disabled key gets `401`.
+- **Operator API และ console** (`/api/v1`) มนุษย์ล็อกอิน (`POST /api/v1/auth/login`)
+  แล้วได้ session cookie ที่ถือหนึ่งในสามบทบาท — `viewer` (อ่านอย่างเดียว),
+  `operator` (คุมการรัน/คิว/deployment ประจำวัน), `admin` (เพิ่มการจัดการผู้ใช้, API key
+  และการตั้งค่า) การเขียนจาก browser ต้องมี CSRF token แบบ double-submit worker
+  และ CLI ยังใช้ `PRIMEFLOW_API_TOKEN` เป็น bearer token ซึ่งถือเป็น `admin`
+  seed admin คนแรกด้วย `PRIMEFLOW_ADMIN_*` หรือ `primeflow user add`
+  - **SSO** ตั้ง `PRIMEFLOW_OIDC_ISSUER` + `_CLIENT_ID` (+ `_CLIENT_SECRET`) แล้วหน้าล็อกอิน
+    จะมีปุ่ม **Sign in with SSO** การล็อกอินครั้งแรกจะ provision บัญชี `oidc` แบบ JIT
+    บทบาทมาจาก `_ROLE_MAP` บน `_ROLE_CLAIM` มิฉะนั้นใช้ `_DEFAULT_ROLE`
+    บัญชีท้องถิ่นและบัญชี SSO อยู่ร่วมกันได้
+  - **รีเซ็ตรหัสผ่าน** ไม่มี SMTP ผู้ดูแลออกลิงก์ใช้ครั้งเดียว — console
+    **Settings → Users → Reset link** หรือ `primeflow user reset-link -email …` —
+    แล้วผู้ใช้ตั้งรหัสผ่านใหม่ที่ `/reset.html`
+- **External API** (`/api/external/v1`) เป็น projection ของ run, deployment, queue, event
+  ที่ป้องกันด้วยบทบาทและยืนยันด้วย key สำหรับการเชื่อมต่อภายนอก จัดการจาก
+  **Settings → External API** ใน console: สวิตช์หลักระดับ global, key ที่ออกให้แต่ละอันมีบทบาท
+  (ชุด scope) พร้อม IP allowlist ต่อ key, rate limit, ข้อกำหนด mutual-TLS และการกลบข้อมูล PII
+  และ audit trail ต่อ key key ที่บทบาทไม่มี scope ของ route จะได้ `403` key ที่เสียหรือปิดอยู่จะได้ `401`
 
 ## API
 
-All operator routes are under `/api/v1`. `GET /api/v1/health` is always
-unauthenticated so probes need no credential.
+route ของผู้ดูแลทั้งหมดอยู่ใต้ `/api/v1` `GET /api/v1/health` ไม่ต้องยืนยันตัวตนเสมอ เพื่อให้ probe ไม่ต้องมี credential
 
 | | |
 |---|---|
-| `GET /summary` | dashboard counters in one round trip |
-| `GET /flows`, `GET /workers` | catalogue and worker liveness |
-| `GET/POST /deployments`, `POST /deployments/{id}/run` | manage and trigger |
-| `POST /deployments/{id}/pause` · `/resume` | stop or start scheduling |
-| `GET/POST /runs`, `GET /runs/{id}` | list, create, inspect |
-| `GET /runs/{id}/tasks` · `/logs` · `/artifacts` | the run timeline |
-| `POST /runs/{id}/cancel` · `/retry` · `/reschedule` | lifecycle |
-| `POST /runs/{id}/priority` · `/front` · `/back` · `/unpin` · `/queue` | **queue control** |
-| `GET/POST /queues`, `GET /queues/{name}/pending` | lanes and dispatch order |
-| `POST /queues/{name}/pause` · `/resume` | throttle a lane |
-| `GET /events`, `GET/POST /automations` | event feed and rules |
-| `POST /webhooks/{deployment}` | external trigger |
-| `GET /stream` | Server-Sent Events, live |
-| `POST /auth/login` · `/auth/logout` · `GET /auth/me` · `GET /auth/config` | operator login |
-| `GET /auth/oidc/login` · `/auth/oidc/callback` | OIDC SSO (when configured) |
-| `POST /auth/reset` · `POST /users/{id}/reset-link` | password-reset links |
-| `GET/POST /users`, `PATCH/DELETE /users/{id}` | operator accounts (admin) |
-| `GET/PUT /settings/external-api` | External API master switch (admin) |
-| `GET/POST /api-keys`, `PATCH/DELETE /api-keys/{id}`, `POST /api-keys/{id}/rotate`, `GET /api-keys/{id}/history` | External API keys (admin) |
-| `GET /api-roles` | role / scope / route catalogue (admin) |
-| `GET /flows/{name}` | one flow: versions, param schema, recent runs |
-| `GET /queues/{name}` | one work pool: workers + computed `desired_workers` |
-| `GET /runs/{id}/children` | sub-flow runs a run started |
-| `GET/PUT /settings/log-retention` | `pf_logs` cleanup policy (admin) |
-| `GET/PUT /settings/git` | GitOps target repo for worker delivery — repo URL, branch, base path, PAT (write-only), auto-sync flag (admin) |
-| `GET /stats?window=8h` | time-bucketed activity for the Dashboard |
-| `GET /metrics` | Prometheus (unauthenticated) |
+| `GET /summary` | ตัวนับของ dashboard ในการเรียกครั้งเดียว |
+| `GET /flows`, `GET /workers` | แคตาล็อกและความมีชีวิตของ worker |
+| `GET/POST /deployments`, `POST /deployments/{id}/run` | จัดการและกระตุ้น |
+| `POST /deployments/{id}/pause` · `/resume` | หยุดหรือเริ่มการตั้งตารางเวลา |
+| `GET/POST /runs`, `GET /runs/{id}` | ลิสต์ สร้าง ตรวจ |
+| `GET /runs/{id}/tasks` · `/logs` · `/artifacts` | timeline ของงาน |
+| `POST /runs/{id}/cancel` · `/retry` · `/reschedule` | วงจรชีวิต |
+| `POST /runs/{id}/priority` · `/front` · `/back` · `/unpin` · `/queue` | **การคุมคิว** |
+| `GET/POST /queues`, `GET /queues/{name}/pending` | เลนและลำดับการ dispatch |
+| `POST /queues/{name}/pause` · `/resume` | throttle เลน |
+| `GET/POST /worker-specs`, `GET/POST/DELETE /worker-specs/{id}`, `POST /worker-specs/{id}/sync` | worker spec สำหรับ GitOps delivery |
+| `GET /events`, `GET/POST /automations` | feed เหตุการณ์และกฎ |
+| `POST /webhooks/{deployment}` | trigger จากภายนอก |
+| `GET /stream` | Server-Sent Events สด |
+| `POST /auth/login` · `/auth/logout` · `GET /auth/me` · `GET /auth/config` | ล็อกอินผู้ดูแล |
+| `GET /auth/oidc/login` · `/auth/oidc/callback` | OIDC SSO (เมื่อกำหนดค่าไว้) |
+| `POST /auth/reset` · `POST /users/{id}/reset-link` | ลิงก์รีเซ็ตรหัสผ่าน |
+| `GET/POST /users`, `PATCH/DELETE /users/{id}` | บัญชีผู้ดูแล (admin) |
+| `GET/PUT /settings/external-api` | สวิตช์หลัก External API (admin) |
+| `GET/POST /api-keys`, `PATCH/DELETE /api-keys/{id}`, `POST /api-keys/{id}/rotate`, `GET /api-keys/{id}/history` | External API key (admin) |
+| `GET /api-roles` | แคตาล็อกบทบาท / scope / route (admin) |
+| `GET /flows/{name}` | flow หนึ่งตัว: เวอร์ชัน, param schema, run ล่าสุด |
+| `GET /queues/{name}` | work pool หนึ่งตัว: worker + `desired_workers` ที่คำนวณ |
+| `GET /runs/{id}/children` | sub-flow run ที่งานนี้เริ่ม |
+| `GET/PUT /settings/log-retention` | นโยบายเคลียร์ `pf_logs` (admin) |
+| `GET/PUT /settings/git` | รีโป GitOps ปลายทางสำหรับ worker delivery — repo URL, branch, base path, PAT (เขียนอย่างเดียว), ธง auto-sync (admin) |
+| `GET /stats?window=8h` | กิจกรรมแบ่งช่วงเวลาสำหรับ Dashboard |
+| `GET /metrics` | Prometheus (ไม่ต้องยืนยันตัวตน) |
 
-The External API lives under `/api/external/v1` and is documented in
-[`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md). It is a
-key-authenticated, scope-gated projection:
+External API อยู่ใต้ `/api/external/v1` และมีเอกสารใน
+[`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md) เป็น projection
+ที่ยืนยันด้วย key และกั้นด้วย scope:
 
 | | scope |
 |---|---|
 | `GET /runs`, `POST /runs`, `GET /runs/{id}` (+ `/tasks` `/logs` `/artifacts`) | `read:runs` / `write:runs` |
 | `GET /deployments`, `GET /deployments/{id}`, `POST /deployments/{id}/run` | `read:deployments` / `write:runs` |
 | `GET /queues`, `GET /queues/{name}/pending` | `read:queues` |
-| `POST /queues` — **create / update a work pool** (IaC & GitOps callers) | `write:queues` |
-| `GET /workers` — live worker heartbeat table (read-only; workers self-register) | `read:workers` |
+| `POST /queues` — **สร้าง / อัปเดต work pool** (ผู้เรียกแบบ IaC และ GitOps) | `write:queues` |
+| `GET /workers` — ตาราง heartbeat ของ worker สด (อ่านอย่างเดียว; worker ลงทะเบียนเอง) | `read:workers` |
+| `GET /worker-specs` · `GET/POST/DELETE /worker-specs/{id}` · `POST /worker-specs/{id}/sync` | `read:worker-specs` / `write:worker-specs` |
 | `GET /events` | `read:events` |
 
 ---
 
-## Deployment
+## การ deploy
 
-**Kubernetes** — [`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) has a
-server Deployment (safe to scale: leader election handles the singleton loops)
-and one worker Deployment per queue, so a slow lane scales independently.
+**Kubernetes** — [`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) มี Deployment ของ server
+(สเกลได้อย่างปลอดภัย: การเลือก leader จัดการ loop แบบ singleton) และ Deployment ของ worker หนึ่งตัวต่อคิว
+เพื่อให้เลนที่ช้าสเกลได้อิสระ
 
-Give workers a `terminationGracePeriodSeconds` long enough to reach the next
-checkpoint. Past it nothing is lost either — the lease expires and another
-worker resumes the run.
+ให้ worker มี `terminationGracePeriodSeconds` ยาวพอที่จะไปถึง checkpoint ถัดไป เกินจากนั้นก็ไม่มีอะไรหาย —
+lease หมดอายุแล้ว worker อีกตัวรับงานไปทำต่อ
 
-**Sizing.** The dispatch query is a single indexed statement per queue per poll.
-One Postgres instance comfortably handles tens of thousands of runs a day; the
-`pf_logs` table is the one that grows, so add a retention job when you turn this
-on for real.
+**การกำหนดขนาด** เควรีการ dispatch เป็นคำสั่งเดียวที่มี index ต่อคิวต่อการ poll
+Postgres หนึ่งตัวรับงานหลายหมื่นครั้งต่อวันได้สบาย ตาราง `pf_logs` คือตัวที่โต ดังนั้นเพิ่มงาน retention
+เมื่อเปิดใช้จริง
 
 ---
 
-## Testing
+## การทดสอบ
 
 ```bash
-make test-unit          # no database needed
-make test-integration   # everything, against a real Postgres
+make test-unit          # ไม่ต้องใช้ฐานข้อมูล
+make test-integration   # ทั้งหมด กับ Postgres จริง
 ```
 
-The integration packages each reset the same database, so they must not run
-concurrently — `make test-integration` passes `-p 1` for that reason.
+แพ็กเกจ integration แต่ละตัวรีเซ็ตฐานข้อมูลเดียวกัน จึงรันพร้อมกันไม่ได้ — `make test-integration`
+ใส่ `-p 1` ด้วยเหตุนี้
 
-The suite covers the guarantees that matter: durable resume skipping completed
-tasks, retry budgets, permanent errors bypassing retries, durable sleep
-releasing the worker, cancellation of a running flow, priority and pin
-ordering, concurrency limits, no double-leasing under concurrent workers, lease
-expiry and recovery, transition-rule enforcement, and idempotent schedule
-materialisation.
+ชุดทดสอบครอบคลุมการรับประกันที่สำคัญ: การ resume แบบทนทานที่ข้าม task ที่เสร็จแล้ว, retry budget,
+permanent error ที่ข้าม retry, durable sleep ที่คืน worker, การยกเลิก flow ที่กำลังรัน, ลำดับ priority
+และ pin, concurrency limit, ไม่มีการ lease ซ้ำภายใต้ worker ที่รันพร้อมกัน, การหมดอายุ lease และการกู้คืน,
+การบังคับใช้กฎการเปลี่ยนสถานะ และการสร้างงานตามตารางแบบ idempotent
 
 ---
 
-## Repository layout
+## โครงสร้างของ repository
 
 ```
-cmd/primeflow/          server, migrator and admin CLI
-pkg/sdk/                the authoring surface — flows, tasks, waits, artifacts
-pkg/primeflow/          wiring, so a worker's main() is five lines
-internal/core/          domain model and the state transition table
-internal/store/         persistence interface + PostgreSQL implementation
-internal/engine/        durable execution: checkpoints, retries, cancellation
-internal/worker/        leasing, heartbeats, graceful drain
-internal/server/        REST API, SSE stream, embedded console
-internal/scheduler/     schedule materialisation and the lease janitor
-internal/automations/   event-driven rules
-internal/bus/           NATS and Redis pub/sub, with an in-process fallback
-internal/metrics/       Prometheus registry + scrape-time queue collector
-internal/otelinit/      OTLP tracing setup (no-op unless an endpoint is set)
-examples/primex-worker/ VM provisioning, metering, and a sub-flow fleet demo
-deploy/k8s/             manifests + KEDA/HPA autoscaling examples
+cmd/primeflow/          server, ตัว migrate และ CLI สำหรับผู้ดูแล
+pkg/sdk/                พื้นผิวการเขียน — flow, task, การรอ, artifact
+pkg/primeflow/          การต่อสายไฟ ให้ main() ของ worker เหลือห้าบรรทัด
+internal/core/          โมเดลโดเมนและตารางการเปลี่ยนสถานะ
+internal/store/         interface การเก็บข้อมูล + การ implement บน PostgreSQL
+internal/engine/        การรันแบบทนทาน: checkpoint, retry, การยกเลิก
+internal/worker/        การ lease, heartbeat, การ drain อย่างนุ่มนวล
+internal/server/        REST API, สตรีม SSE, console ที่ฝังมา
+internal/scheduler/     การสร้างงานตามตารางและ janitor ของ lease
+internal/automations/   กฎที่ขับด้วยเหตุการณ์
+internal/bus/           NATS และ Redis pub/sub พร้อม fallback แบบ in-process
+internal/gitsync/       การเรนเดอร์ worker spec + เอนจิน git (go-git) + reconciler
+internal/metrics/       Prometheus registry + ตัวเก็บคิว ณ เวลา scrape
+internal/otelinit/      การตั้งค่า OTLP tracing (ไม่ทำงานถ้าไม่ตั้ง endpoint)
+examples/primex-worker/ เดโม provisioning VM, metering และ sub-flow fleet
+deploy/k8s/             แมนิเฟสต์ + ตัวอย่าง autoscaling KEDA/HPA
 ```
 
 ---
 
-## For new developers
+## สำหรับนักพัฒนาใหม่
 
-**Get it running.** `docker compose up --build` brings up Postgres, NATS, Redis,
-the server (`:8080`), two workers and a push receiver. Log in with
-`admin@primeflow.local` / `primeflow-admin` (compose defaults). `make build`
-produces `bin/primeflow` (server + CLI) and `bin/primex-worker` for running
-against the compose Postgres/NATS directly — a worker only needs
-`PRIMEFLOW_DATABASE_URL` + `PRIMEFLOW_NATS_URL`, it does not have to be a
-container.
+**ทำให้มันรัน** `docker compose up --build` เรียก Postgres, NATS, Redis, server (`:8080`),
+worker สองตัว และตัวรับ push ล็อกอินด้วย `admin@primeflow.local` / `primeflow-admin`
+(ค่าเริ่มต้นของ compose) `make build` สร้าง `bin/primeflow` (server + CLI) และ `bin/primex-worker`
+สำหรับรันกับ Postgres/NATS ของ compose ตรง ๆ — worker ต้องการแค่ `PRIMEFLOW_DATABASE_URL` +
+`PRIMEFLOW_NATS_URL` ไม่จำเป็นต้องเป็น container
 
-**The console is embedded, no build step.** `internal/server/ui/*.html` is
-compiled into the binary via `//go:embed` ([`internal/server/ui.go`](internal/server/ui.go)).
-`index.html` is the whole SPA — one `<style>`, one `<script>`, view sections
-`#v-<name>` toggled by `show(name)`, data via `api('/path')`. Edit it, rebuild
-the server image (`docker compose up -d --build server`), hard-refresh (favicons
-and the bundle cache hard).
+**console ฝังมาในตัว ไม่ต้อง build** `internal/server/ui/*.html` ถูกคอมไพล์เข้าไบนารีผ่าน `//go:embed`
+([`internal/server/ui.go`](internal/server/ui.go)) `index.html` คือ SPA ทั้งตัว — `<style>` หนึ่งอัน,
+`<script>` หนึ่งอัน, section มุมมอง `#v-<name>` สลับด้วย `show(name)`, ข้อมูลผ่าน `api('/path')`
+แก้ไขแล้ว rebuild image ของ server (`docker compose up -d --build server`) แล้ว hard-refresh
+(favicon และ cache ของ bundle ดื้อ)
 
-**Add an endpoint.**
-1. Handler in `internal/server/*.go` (`handlers.go`, `flows.go`, `apikeys.go`, …).
-   Use `decode(r, &body)`, `writeJSON`, `writeErr`, `fail`.
-2. Route in `internal/server/server.go` (`mux.HandleFunc("METHOD /api/v1/…", s.h)`).
-   `/api/v1/settings/*`, `/api/v1/users*`, `/api/v1/api-keys*` are admin-gated by
-   `adminOperatorPath`.
-3. External twin (optional): handler in `internal/server/external.go`, route in
-   `externalMux()`, and add it to `apiauth.Routes` with a `Scope` — that slice is
-   the single source of truth the router, the auth middleware and the API
-   Explorer all read.
+**เพิ่ม endpoint**
+1. handler ใน `internal/server/*.go` (`handlers.go`, `flows.go`, `apikeys.go`, …)
+   ใช้ `decode(r, &body)`, `writeJSON`, `writeErr`, `fail`
+2. route ใน `internal/server/server.go` (`mux.HandleFunc("METHOD /api/v1/…", s.h)`)
+   `/api/v1/settings/*`, `/api/v1/users*`, `/api/v1/api-keys*` ถูกกั้นเป็น admin โดย `adminOperatorPath`
+3. คู่แฝดฝั่ง External (ถ้าต้องการ): handler ใน `internal/server/external.go`, route ใน
+   `externalMux()` และเพิ่มลง `apiauth.Routes` พร้อม `Scope` — slice นั้นคือแหล่งความจริงเดียว
+   ที่ router, auth middleware และ API Explorer อ่านตรงกัน
 
-**Add a store method + setting.** Persistence is an interface
-([`internal/store/store.go`](internal/store/store.go)) with one implementation
-(`internal/store/postgres`). Instance settings are JSON rows in `pf_settings`
-keyed by a string — copy `GetGitConnection` / `PutGitConnection`
-([`internal/store/postgres/gitconn.go`](internal/store/postgres/gitconn.go)): no
-migration, `INSERT … ON CONFLICT (key) DO UPDATE`, and keep secrets out of the
-read path.
+**เพิ่ม store method + setting** การเก็บข้อมูลเป็น interface
+([`internal/store/store.go`](internal/store/store.go)) ที่มีการ implement เดียว
+(`internal/store/postgres`) instance setting เป็นแถว JSON ใน `pf_settings` โดยมี key เป็น string —
+ลอก `GetGitConnection` / `PutGitConnection`
+([`internal/store/postgres/gitconn.go`](internal/store/postgres/gitconn.go)): ไม่ต้อง migrate,
+`INSERT … ON CONFLICT (key) DO UPDATE` และเก็บ secret ให้พ้นเส้นทางการอ่าน
 
-**Add a schema migration.** Drop
-`internal/store/postgres/migrations/000N_name.sql` — additive and idempotent
-(`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), embedded and applied
-in order on server start unless `-no-migrate`.
+**เพิ่ม schema migration** วางไฟล์ `internal/store/postgres/migrations/000N_name.sql` —
+เป็น additive และ idempotent (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`)
+ฝังมาและรันตามลำดับตอน server เริ่ม เว้นแต่ใส่ `-no-migrate`
 
-**Tests.** `make test-unit` (no DB) and `make test-integration`
-(`PRIMEFLOW_TEST_DATABASE_URL`, `-p 1` because the packages share one DB). Note:
-`TestLogPartitionMaintenance` is calendar-sensitive and can fail near month
-boundaries independent of your change.
+**การทดสอบ** `make test-unit` (ไม่ต้องมี DB) และ `make test-integration`
+(`PRIMEFLOW_TEST_DATABASE_URL`, `-p 1` เพราะแพ็กเกจใช้ DB ร่วมกัน) หมายเหตุ:
+`TestLogPartitionMaintenance` ไวต่อปฏิทินและอาจ fail ใกล้รอยต่อของเดือนโดยไม่เกี่ยวกับการแก้ของคุณ
 
 ---
 
-## Transports
+## Transport
 
-The notification bus has three implementations behind one interface
-(`internal/bus`). Precedence: **NATS → Redis → in-process**.
+bus การแจ้งเตือนมีสามการ implement เบื้องหลัง interface เดียว (`internal/bus`)
+ลำดับความสำคัญ: **NATS → Redis → in-process**
 
-| Set | Transport | Notes |
+| ตั้ง | Transport | หมายเหตุ |
 |---|---|---|
-| `PRIMEFLOW_NATS_URL` | core NATS pub/sub | cluster-friendly; `nats://host:4222` |
-| `PRIMEFLOW_REDIS_URL` | Redis pub/sub | also fine for the UI stream |
-| neither | in-process | single binary + Postgres; workers fall back to `PRIMEFLOW_POLL` |
+| `PRIMEFLOW_NATS_URL` | core NATS pub/sub | เหมาะกับ cluster; `nats://host:4222` |
+| `PRIMEFLOW_REDIS_URL` | Redis pub/sub | ใช้กับสตรีม UI ได้เช่นกัน |
+| ไม่ตั้งทั้งคู่ | in-process | ไบนารีเดียว + Postgres; worker ถอยไปใช้ `PRIMEFLOW_POLL` |
 
-A dial failure at start-up logs a warning and degrades to polling — the bus is
-never load-bearing.
+การ dial ล้มเหลวตอนเริ่มจะ log คำเตือนและถอยไป polling — bus ไม่เคยเป็นตัวแบกน้ำหนัก
 
 ## Observability
 
-**Metrics.** `GET /metrics` (unauthenticated, like `/api/v1/health`) exposes:
+**Metric** `GET /metrics` (ไม่ต้องยืนยันตัวตน เหมือน `/api/v1/health`) เปิดเผย:
 
-| Metric | Type | Meaning |
+| Metric | ชนิด | ความหมาย |
 |---|---|---|
-| `primeflow_queue_ready{queue}` | gauge | scheduled runs whose time has come |
-| `primeflow_queue_scheduled{queue}` · `_running{queue}` | gauge | backlog and in-flight |
-| `primeflow_queue_desired_workers{queue}` | gauge | `clamp(ceil(ready/target), min, max)` — the autoscale target |
-| `primeflow_workers_online` · `_total` | gauge | fleet liveness |
-| `primeflow_flow_run_transitions_total{to_state}` | counter | state changes |
-| `primeflow_flow_run_duration_seconds` · `primeflow_task_run_duration_seconds{outcome}` | histogram | execution timings |
-| `primeflow_http_requests_total{route,method,code}` · `_duration_seconds{route}` | counter/histogram | API RED |
+| `primeflow_queue_ready{queue}` | gauge | งานที่ถูก schedule และถึงเวลาแล้ว |
+| `primeflow_queue_scheduled{queue}` · `_running{queue}` | gauge | backlog และงานที่กำลังทำ |
+| `primeflow_queue_desired_workers{queue}` | gauge | `clamp(ceil(ready/target), min, max)` — เป้า autoscale |
+| `primeflow_workers_online` · `_total` | gauge | ความมีชีวิตของกองเรือ |
+| `primeflow_flow_run_transitions_total{to_state}` | counter | การเปลี่ยนสถานะ |
+| `primeflow_flow_run_duration_seconds` · `primeflow_task_run_duration_seconds{outcome}` | histogram | เวลาการรัน |
+| `primeflow_http_requests_total{route,method,code}` · `_duration_seconds{route}` | counter/histogram | RED ของ API |
 
-**Traces.** Set `OTEL_EXPORTER_OTLP_ENDPOINT` (standard OTEL env) and PrimeFlow
-emits `flow_run` → `task_run` spans over OTLP/HTTP, with trace context propagated
-from HTTP callers and across `RunDeployment` into child runs. Unset, the tracer
-is a no-op and costs nothing.
+**Trace** ตั้ง `OTEL_EXPORTER_OTLP_ENDPOINT` (env มาตรฐานของ OTEL) แล้ว PrimeFlow จะปล่อย span
+`flow_run` → `task_run` ผ่าน OTLP/HTTP โดย trace context ถูกส่งต่อจากผู้เรียก HTTP และข้าม
+`RunDeployment` เข้าไปยัง child run ถ้าไม่ตั้ง tracer จะเป็น no-op และไม่มีต้นทุน
 
-## Sub-flows
+## Sub-flow
 
-`RunDeployment(name, params)` fans out and returns immediately. To wait:
+`RunDeployment(name, params)` fan out แล้วคืนค่าทันที ถ้าจะรอ:
 
 ```go
 child, err := c.RunDeploymentAndWait("provision-vm-standard", params)
-if err != nil { return nil, err }      // a failed child is a permanent error
+if err != nil { return nil, err }      // child ที่ล้มเหลวคือ permanent error
 var vm VM
 _ = child.Into(&vm)
 ```
 
-It is a durable checkpoint: the child is triggered exactly once no matter how
-often the parent replays, the parent releases its worker slot while the child
-runs, and it resumes the instant the last child settles (or re-polls every 30s
-as a backstop). Every child records its `parent_run_id`, so the console shows the
-tree. Recursion is bounded by `PRIMEFLOW_MAX_SUBFLOW_DEPTH` (default 8) and a
-child whose deployment already appears in the ancestor chain is refused.
+มันเป็น checkpoint แบบทนทาน: child ถูก trigger เพียงครั้งเดียวไม่ว่า parent จะ replay กี่ครั้ง,
+parent คืน worker slot ระหว่างที่ child รัน และ resume ทันทีที่ child ตัวสุดท้ายจบ
+(หรือ poll ซ้ำทุก 30 วินาทีเป็น backstop) child ทุกตัวบันทึก `parent_run_id` ดังนั้น console แสดงเป็นต้นไม้
+การเรียกซ้อนถูกจำกัดด้วย `PRIMEFLOW_MAX_SUBFLOW_DEPTH` (ค่าเริ่มต้น 8) และ child ที่ deployment
+ปรากฏอยู่ในสายบรรพบุรุษแล้วจะถูกปฏิเสธ
 
-## Work pools & autoscaling
+## Work pool และ autoscaling
 
-A work queue doubles as a **work pool**: give it `min_workers`, `max_workers`,
-`target_ready_per_worker` and an `owner` (`POST /api/v1/queues`, or the console's
-**Work Pools → Autoscale…**). The server then publishes
-`primeflow_queue_desired_workers{queue}` and a KEDA `ScaledObject` or HPA scales
-the matching worker Deployment. PrimeFlow **never launches workers itself** — it
-publishes the target, Kubernetes acts. See
-[`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) for both.
+work queue ทำหน้าที่เป็น **work pool** ด้วย: กำหนด `min_workers`, `max_workers`,
+`target_ready_per_worker` และ `owner` (`POST /api/v1/queues` หรือ **Work Pools → Autoscale…**
+ของ console) จากนั้น server เผยแพร่ `primeflow_queue_desired_workers{queue}` และ KEDA `ScaledObject`
+หรือ HPA สเกล Deployment ของ worker ที่ตรงกัน PrimeFlow **ไม่เคยสั่งรัน worker เอง** — มันเผยแพร่เป้า
+Kubernetes ลงมือ ดูทั้งสองอย่างใน [`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml)
 
-**External teams run their own workers**: point `primex-worker` at your pool with
-`PRIMEFLOW_QUEUES=<pool>`; the `owner` field groups it in the console. Workers
-never block each other — dispatch is one `SKIP LOCKED` statement per poll.
+**ทีมภายนอกรัน worker ของตัวเอง**: ชี้ `primex-worker` ไปที่ pool ของคุณด้วย
+`PRIMEFLOW_QUEUES=<pool>` ฟิลด์ `owner` จัดกลุ่มมันใน console worker ไม่บล็อกกัน — การ dispatch
+เป็นคำสั่ง `SKIP LOCKED` เดียวต่อการ poll
 
-### Push pools
+### Push pool
 
-Set `pool_type: "push"` and a `push_endpoint` (console **Work Pools → Push
-endpoint…**, or `POST /api/v1/queues`) and the pool has no polling workers.
-Instead the leader `POST`s each ready run — `{run_id, flow_name, …}`, HMAC-signed
-with the pool's `push_secret` as `X-PrimeFlow-Signature: sha256=…` — to the
-endpoint. The receiver is your PrimeFlow binary run as
-`primeflow.RunPushWorker` (or `primex-worker -push`): it verifies the signature,
-claims that one run, executes it with the engine, and reports normally. A
-dispatch that is never claimed lapses and is retried, then reclaimed as
-`CRASHED` by the janitor like any abandoned run. Point `push_endpoint` at a
-Knative `Service` / Cloud Run URL for scale-to-zero — the server pings only when
-there is work.
+ตั้ง `pool_type: "push"` และ `push_endpoint` (console **Work Pools → Push endpoint…**
+หรือ `POST /api/v1/queues`) แล้ว pool จะไม่มี worker ที่ poll แทนที่ด้วย leader จะ `POST`
+งานที่พร้อมทุกงาน — `{run_id, flow_name, …}` เซ็นด้วย HMAC โดยใช้ `push_secret` ของ pool เป็น
+`X-PrimeFlow-Signature: sha256=…` — ไปที่ endpoint ตัวรับคือไบนารี PrimeFlow ของคุณที่รันเป็น
+`primeflow.RunPushWorker` (หรือ `primex-worker -push`): มันตรวจลายเซ็น, claim งานนั้นหนึ่งงาน,
+รันด้วยเอนจิน และรายงานตามปกติ การ dispatch ที่ไม่มีใคร claim จะหมดอายุและถูก retry แล้วถูก reclaim
+เป็น `CRASHED` โดย janitor เหมือนงานที่ถูกทิ้งอื่น ๆ ชี้ `push_endpoint` ไปที่ Knative `Service` /
+Cloud Run URL เพื่อ scale-to-zero — server ping ก็ต่อเมื่อมีงาน
 
 ## Console
 
-Single embedded page, no build step. It opens on a **Dashboard** — time-bucketed
-flow-run / task-run / event charts over 8h · 24h · 1w (`GET /api/v1/stats`,
-Postgres 14+ for `date_bin`; without it the dashboard shows bare totals), plus
-recent-flow and work-pool cards. **Runs** has a timeline strip and segmented
-filters; open any run for a Temporal-style execution **Timeline** (a lane per
-checkpoint and sub-flow on a shared time axis). **Event feed** is a rail
-timeline. **Flows** lists every registered flow with its param schema and a typed
-quick-run form — declare a schema so the form is typed:
+หน้าเดียวฝังมาในตัว ไม่ต้อง build เปิดมาที่ **Dashboard** — กราฟ flow-run / task-run / event
+แบ่งช่วงเวลา 8 ชม. · 24 ชม. · 1 สัปดาห์ (`GET /api/v1/stats`, ต้อง Postgres 14+ สำหรับ `date_bin`
+ถ้าไม่มี dashboard จะแสดงยอดรวมเปล่า ๆ) พร้อมการ์ด flow ล่าสุดและ work pool **Runs** มีแถบ timeline
+และตัวกรองแบบ segment เปิด run ไหนก็ได้เพื่อดู **Timeline** การรันสไตล์ Temporal (หนึ่งเลนต่อ
+checkpoint และ sub-flow บนแกนเวลาร่วมกัน) **Event feed** เป็น timeline แบบราง **Flows** ลิสต์
+flow ที่ลงทะเบียนทุกตัวพร้อม param schema และฟอร์ม quick-run แบบมีชนิด — ประกาศ schema เพื่อให้ฟอร์มมีชนิด:
 
 ```go
 sdk.Flow("provision-vm", provisionVM,
@@ -626,90 +591,90 @@ sdk.Flow("provision-vm", provisionVM,
 
 ### Work Pools
 
-**Create pool…** opens a form (name, `pull`/`push` type, concurrency limit,
-owner, and — for pull pools — the `min` / `max` / `target-ready-per-worker`
-autoscaling envelope; for push pools — the endpoint URL and HMAC secret). Rows
-carry **Pause/Resume**, **Limit…**, **Autoscale…** and **Make push…**.
+**Create pool…** เปิดฟอร์ม (name, ชนิด `pull`/`push`, concurrency limit, owner และ —
+สำหรับ pull pool — envelope autoscaling `min` / `max` / `target-ready-per-worker` สำหรับ push pool —
+URL ของ endpoint และ secret HMAC) แต่ละแถวมี **Pause/Resume**, **Limit…**, **Autoscale…** และ
+**Make push…**
 
 ### Workers
 
-The table lists the live heartbeat rows (workers self-register on start). **Click
-a row** for a detail dialog: parameters (id, pools, concurrency, active runs,
-heartbeat), the resolved `PRIMEFLOW_*` env, the **Deployment + Secret YAML**
-rendered from that worker's live config, and the **package list** the host needs
-(base components plus flow-specific ones inferred from the registered flows'
-tags — e.g. a `vcd` tag adds "VMware Cloud Director API + client library").
+ตารางลิสต์แถว heartbeat สด (worker ลงทะเบียนเองตอนเริ่ม) **คลิกที่แถว** เพื่อดู dialog รายละเอียด:
+พารามิเตอร์ (id, pool, concurrency, งานที่กำลังทำ, heartbeat), env `PRIMEFLOW_*` ที่ resolve แล้ว,
+**Deployment + Secret YAML** ที่เรนเดอร์จากคอนฟิกสดของ worker ตัวนั้น และ **รายการแพ็กเกจ** ที่ host
+ต้องมี (ส่วนประกอบพื้นฐานบวกส่วนที่เจาะจง flow ซึ่งอนุมานจาก tag ของ flow ที่ลงทะเบียน — เช่น tag `vcd`
+เพิ่ม "VMware Cloud Director API + client library") เมื่อมี worker spec หนุนอยู่ dialog จะมีแผง
+**GitOps delivery** พร้อมสถานะการ sync ปุ่ม **Sync now** และสวิตช์ **Auto-sync**
 
-**Add worker…** is a full page, not a modal. It captures name / concurrency /
-image, the pools it serves (**+ Create pool…** inline), a **host-requirements
-checklist that gates generation**, and a **Delivery** method:
+**Add worker…** เป็นหน้าเต็ม ไม่ใช่ modal มันเก็บ name / concurrency / image, pool ที่มันให้บริการ
+(**+ Create pool…** แบบ inline), **checklist ข้อกำหนดของ host ที่กั้นการสร้าง** และวิธี **Delivery**:
 
-- **Git commit + PR/MR** (default) — renders `secret.yaml`, `deployment.yaml`,
-  `kustomization.yaml`, then `git clone → checkout -b → add → commit → push` and
-  a host-aware `gh pr create` / `glab mr create`.
-- **Argo CD Application** — plus an `argoproj.io/v1alpha1 Application` CR and
-  `argocd app create`.
-- **Flux Kustomization** — plus a `kustomize.toolkit.fluxcd.io/v1 Kustomization`.
-- **Script** — Docker `run` / systemd unit / `kubectl apply`.
+- **Git commit + PR/MR** (ค่าเริ่มต้น) — เรนเดอร์ `secret.yaml`, `deployment.yaml`,
+  `kustomization.yaml`
+- **Argo CD Application** — บวก CR `argoproj.io/v1alpha1 Application`
+- **Flux Kustomization** — บวก `kustomize.toolkit.fluxcd.io/v1 Kustomization`
+- **Script** — Docker `run` / systemd unit / `kubectl apply` (คัดลอกไปวางเท่านั้น ไม่มี spec ฝั่ง server)
 
-An **Auto-sync** toggle threads through every GitOps mode: on ⇒
-`syncPolicy.automated` (Argo) / no `suspend` (Flux); off ⇒ manual, and the
-output appends the exact **sync command** (`argocd app sync` /
-`flux reconcile kustomization … --with-source`). The git fields pre-fill from
-**Settings → Git connection**.
+สำหรับวิธีที่ไม่ใช่ script ปุ่ม **Save spec** เก็บ deployment ของ worker เป็นแถว `pf_worker_specs`
+และ **Save & sync** ยัง commit แมนิเฟสต์เข้ารีโปทันที สวิตช์ **Auto-sync** ต่อ spec ให้ตัว reconciler
+push drift โดยไม่ต้อง sync มือ ฟิลด์ git เติมล่วงหน้าจาก **Settings → Git connection**
 
 ### Settings → Git connection
 
-Stores the GitOps target repo (`GET/PUT /api/v1/settings/git`): repo URL, branch,
-base path, commit author, and a **write-only PAT** (stored, never returned; a
-read reports only `has_token`). The provider (`github` / `gitlab` / `other`) is
-derived from the URL. Today this connection pre-fills the Add-worker git fields;
-**server-side clone/commit/push and an auto-sync reconciler are the next
-iteration** (see Known gaps).
+เก็บรีโป GitOps ปลายทาง (`GET/PUT /api/v1/settings/git`): repo URL, branch, base path, ผู้ commit
+และ **PAT แบบเขียนอย่างเดียว** (เก็บไว้ ไม่เคยคืน การอ่านรายงานแค่ `has_token`) provider
+(`github` / `gitlab` / `other`) derive จาก URL การ **Sync commit ลง branch ตรง ๆ** ไม่มี pull request
+ดังนั้นชี้ไปที่รีโปที่คาดหวังพฤติกรรมนั้น (รีโป config แบบ GitOps) ค่า secret ในแมนิเฟสต์ที่เรนเดอร์เป็น
+placeholder แทนที่ด้วย SealedSecret / SOPS ในรีโป
 
 ---
 
 ## GitOps worker delivery
 
-PrimeFlow does not deploy workers itself — it renders the manifests and hands you
-the apply path. The current flow:
+PrimeFlow ไม่ deploy worker เอง แต่มันจะเขียนแมนิเฟสต์ให้ แถว `pf_worker_specs` คือ input
+ที่ตัวช่วย Add-worker เก็บ (name, image, pool, concurrency, replica, ชนิด delivery, namespace)
+แพ็กเกจ `internal/gitsync` เรนเดอร์แถวนั้นเป็น Kubernetes YAML — เป็นโค้ด Go ชุดเดียวกับที่
+พรีวิวใน console, ปุ่ม "Sync now" และ reconciler เรียก จึงมี renderer เพียงตัวเดียว
 
-1. Configure **Settings → Git connection** once.
-2. **Workers → Add worker…**, pick pools + delivery method + auto-sync, confirm
-   the host-requirements checklist.
-3. Copy the generated bundle (manifests + Argo/Flux CR + git/sync commands) into
-   your GitOps repo. Your CD controller reconciles it; the worker registers on
-   start and appears in the Workers table, where its live config round-trips back
-   to the same YAML.
+เอนจิน git (`internal/gitsync/git.go`, [go-git] แบบ pure-Go) clone รีโปจาก
+**Settings → Git connection** **เข้าหน่วยความจำ** (credential และแมนิเฟสต์ไม่แตะดิสก์),
+เขียนไฟล์ที่เรนเดอร์ใต้ path ของ spec, commit ด้วยผู้เขียนที่กำหนด แล้ว push **ลง branch ตรง ๆ** —
+ไม่มี pull request รีโปใหม่ที่ยังไม่มี commit จะถูก bootstrap ให้ ถ้า worktree ไม่เปลี่ยนหลังเขียนไฟล์
+การ sync จะเป็น no-op ที่ยังรายงาน HEAD ปัจจุบัน
 
-**External / IaC callers** get the write half of pool management with
-`POST /api/external/v1/queues` (scope `write:queues`) and read the fleet with
-`GET /api/external/v1/workers` (scope `read:workers`).
+spec ที่ตั้ง `auto_sync` ถูกขับด้วย reconciler ที่เลือกเป็น leader (บทบาท `gitsync`,
+`PRIMEFLOW_GITSYNC_INTERVAL` ค่าเริ่มต้น 2 นาที): แต่ละรอบมันเรนเดอร์ spec auto-sync ทุกตัวใหม่,
+เทียบ tree hash กับ `last_synced_hash` แล้ว push เฉพาะตัวที่ drift การ push ที่ล้มเหลวบันทึก
+`sync_state='error'` และ `last_error` แล้ว retry รอบถัดไป — ไม่เคยบล็อก server image แบบ distroless
+ไม่เปลี่ยน: go-git เป็น pure Go จึงยังไม่มีไบนารี `git` หรือ shell ใน runtime
+
+**ผู้เรียกแบบ External / IaC** ได้ครึ่งเขียนของการจัดการ pool ด้วย
+`POST /api/external/v1/queues` (scope `write:queues`), จัดการ worker spec ด้วย
+`GET/POST/DELETE /api/external/v1/worker-specs` (+ `/sync`, scope `write:worker-specs`)
+และอ่านกองเรือด้วย `GET /api/external/v1/workers` (scope `read:workers`)
+
+[go-git]: https://github.com/go-git/go-git
+
+ขั้นตอนทั่วไป:
+
+1. ตั้งค่า **Settings → Git connection** ครั้งเดียว (repo URL, branch, ผู้ commit, PAT)
+2. **Workers → Add worker…** เลือก pool + วิธี delivery + auto-sync ยืนยัน checklist ข้อกำหนดของ host
+3. กด **Save & sync** — server เรนเดอร์แมนิเฟสต์และ commit เข้ารีโป CD controller ของคุณ reconcile
+   worker ลงทะเบียนตอนเริ่มและปรากฏในตาราง Workers ซึ่งคอนฟิกสดของมัน round-trip กลับเป็น YAML เดิม
+4. สำหรับ drift ต่อเนื่อง เปิด **Auto-sync** บน spec แล้ว reconciler push ให้เอง
 
 ---
 
-## Known gaps
+## สิ่งที่ยังไม่ได้ทำ
 
-Honest list of what is not built yet:
+รายการตามตรงว่าอะไรยังไม่มี:
 
-- **`pf_logs` partitioning migration on a large table.** New installs and small
-  ones convert instantly; converting a `pf_logs` that already holds millions of
-  rows does one validation scan on the `ATTACH` — run it in a maintenance window.
-  After that the janitor `DROP`s whole aged-out monthly partitions.
-- **SMTP.** Password reset is admin-issued one-time links, not a self-service
-  "forgot my password" email flow.
-- **Per-user API keys.** External-API keys belong to the instance and are
-  created by admins.
-- **NATS-backed rate limiting.** Shared limits use Redis or fall back to
-  in-process; there is no NATS/JetStream limiter.
-- **Push pools don't build or ship your code.** The receiver is still your
-  PrimeFlow binary with database access; there is no code-upload step.
-- **Single OTLP exporter.** Traces only; no metrics-over-OTLP, no log export.
-- **GitOps worker delivery is generate-only so far.** *Settings → Git
-  connection* is stored and the Add-worker page renders every artifact, but the
-  server does not yet clone/commit/push. Next iteration: a `pf_worker_specs`
-  table with full CRUD (operator + `/api/external/v1/worker-specs`), a
-  server-side `git` engine, an auto-sync reconciler, and `git` in the (currently
-  distroless) image. Until then the Workers detail dialog shows *Sync now* /
-  *Auto-sync* as disabled placeholders and the Add-worker page emits the sync
-  commands for you to run.
+- **migration การแบ่ง partition `pf_logs` บนตารางใหญ่** การติดตั้งใหม่และเล็กแปลงทันที
+  การแปลง `pf_logs` ที่มีข้อมูลหลายล้านแถวจะทำ validation scan หนึ่งครั้งตอน `ATTACH` — รันในช่วง
+  maintenance window หลังจากนั้น janitor จะ `DROP` partition รายเดือนที่หมดอายุทั้งก้อน
+- **SMTP** การรีเซ็ตรหัสผ่านเป็นลิงก์ใช้ครั้งเดียวที่ผู้ดูแลออกให้ ไม่ใช่ flow "ลืมรหัสผ่าน" แบบ self-service ทางอีเมล
+- **API key ต่อผู้ใช้** key ของ External API เป็นของ instance และสร้างโดยผู้ดูแล
+- **rate limiting ผ่าน NATS** ลิมิตร่วมใช้ Redis หรือถอยไป in-process ไม่มี limiter บน NATS/JetStream
+- **push pool ไม่ build หรือส่งโค้ดให้** ตัวรับยังเป็นไบนารี PrimeFlow ของคุณที่เข้าถึงฐานข้อมูล ไม่มีขั้นตอน upload โค้ด
+- **OTLP exporter ตัวเดียว** trace เท่านั้น ไม่มี metric-over-OTLP ไม่มีการ export log
+- **GitOps delivery ไม่ครอบคลุมการลบ** การลบ worker spec ไม่แตะรีโป แมนิเฟสต์ที่ push ไปแล้ว
+  ยังอยู่จนกว่าผู้ดูแลจะ prune เอง และ push commit ลง branch ตรง ๆ (ไม่มีโหมด PR)
