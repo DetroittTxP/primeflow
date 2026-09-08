@@ -181,13 +181,16 @@ type TaskRun struct {
 
 // LogRecord is a structured log line attached to a run.
 type LogRecord struct {
-	ID        int64     `json:"id"`
-	FlowRunID string    `json:"flow_run_id"`
-	TaskRunID *string   `json:"task_run_id,omitempty"`
-	Level     string    `json:"level"`
-	Message   string    `json:"message"`
-	Fields    []byte    `json:"fields,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	ID        int64           `json:"id"`
+	FlowRunID string          `json:"flow_run_id"`
+	TaskRunID *string         `json:"task_run_id,omitempty"`
+	Level     string          `json:"level"`
+	Message   string          `json:"message"`
+	// RawMessage, not []byte: the column is JSONB and this struct is both the
+	// API response and the worker->server wire type, so the structured fields
+	// have to travel as JSON rather than as a base64 string.
+	Fields    json.RawMessage `json:"fields,omitempty"`
+	Timestamp time.Time       `json:"timestamp"`
 }
 
 // ArtifactKind describes how the UI should render an artifact.

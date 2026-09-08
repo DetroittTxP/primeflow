@@ -130,7 +130,7 @@ func (s *Store) AppendLogs(ctx context.Context, recs []core.LogRecord) error {
 		fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d)", b+1, b+2, b+3, b+4, b+5, b+6)
 		var fields any
 		if len(r.Fields) > 0 {
-			fields = r.Fields
+			fields = []byte(r.Fields)
 		}
 		ts := r.Timestamp
 		if ts.IsZero() {
