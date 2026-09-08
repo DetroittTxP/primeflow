@@ -41,6 +41,8 @@ func main() {
 		err = cmdMigrate(ctx, args)
 	case "user":
 		err = cmdUser(ctx, args)
+	case "seed":
+		err = cmdSeed(ctx, args)
 	case "run":
 		err = cmdRun(ctx, args)
 	case "runs":
@@ -74,6 +76,10 @@ Operator accounts (talk straight to the database, like migrate):
   primeflow user role   -email a@x -role operator
   primeflow user deactivate -email a@x
   primeflow user reset-link -email a@x        print a one-time password-reset URL
+
+Development fixtures (also straight to the database):
+  primeflow seed [-runs 4] [-password s] [-no-users] [-no-migrate]
+                                              queues, deployments and demo accounts
 
 Admin (talks to a running server over the API):
   primeflow deploy -f deployments.json        create or update deployments

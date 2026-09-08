@@ -6,7 +6,14 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 # A local Postgres for the integration tests. Override to point at your own.
 TEST_DB ?= postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable
 
-.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker docker clean tidy
+# Test-data seeding. SEED_RUNS queues that many demo runs, which only go
+# anywhere if a worker is up; the queues, deployments and accounts land either
+# way. SEED_ARGS is the escape hatch: SEED_ARGS=-no-users, and so on.
+SEED_PASSWORD ?= primeflow-demo
+SEED_RUNS     ?= 0
+SEED_ARGS     ?=
+
+.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker seed seed-compose docker clean tidy
 
 all: build
 
@@ -42,6 +49,18 @@ run-server: build ## Run the API, UI, scheduler and automations
 
 run-worker: build ## Run the example worker
 	PRIMEFLOW_DATABASE_URL="$(TEST_DB)" PRIMEFLOW_QUEUES=default,vcd,metering $(BIN)/primex-worker
+
+seed: build ## Seed queues, deployments and demo accounts into $(TEST_DB)
+	PRIMEFLOW_DATABASE_URL="$(TEST_DB)" $(BIN)/primeflow seed \
+		-password "$(SEED_PASSWORD)" -runs $(SEED_RUNS) $(SEED_ARGS)
+
+# The compose image already carries the binary and the in-network DSN, so this
+# needs no Go toolchain on the host. --build is what keeps a stack that was
+# started before this command existed from failing on "unknown command seed";
+# it is a cached no-op once the image is current.
+seed-compose: ## Seed the docker-compose stack's database
+	docker compose run --rm --build server seed \
+		-password "$(SEED_PASSWORD)" -runs $(SEED_RUNS) $(SEED_ARGS)
 
 docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) -t detroitttttxp/primeflow:$(VERSION) -t detroitttttxp/primeflow:latest .
