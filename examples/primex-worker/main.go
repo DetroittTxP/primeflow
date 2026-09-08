@@ -1249,6 +1249,15 @@ func main() {
 		sdk.Timeout(time.Minute),
 	)
 
+	sdk.Flow("hello-world", helloWorld,
+		sdk.Description("Greet a name N times -- the flow to deploy first on a new pool"),
+		sdk.Tags("demo", "smoke"),
+		sdk.ParamsSchema(HelloParams{Name: "world", Times: 3}),
+		sdk.Retries(1),
+		sdk.RetryDelay(5*time.Second),
+		sdk.Timeout(time.Minute),
+	)
+
 	sdk.Flow("onboard-tenant", onboardTenant,
 		sdk.Description("Six checkpointed stages -- the worked example of per-task tracking"),
 		sdk.Tags("demo", "pipeline"),
