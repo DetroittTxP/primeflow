@@ -6,6 +6,7 @@ import (
 	"fmt"
 	iofs "io/fs"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -35,8 +36,20 @@ func (s *Server) uiHandler() http.Handler {
 		}
 		data, err := iofs.ReadFile(sub, name)
 		if err != nil {
-			http.NotFound(w, r)
-			return
+			// The console keeps its current view in the path, so a path with
+			// no file extension is a console route rather than a missing
+			// asset: hand back the app and let it route on the client. This
+			// handler is the mux's catch-all, so the server's own routes stay
+			// a 404 when they are unmatched or switched off.
+			if path.Ext(name) != "" || strings.HasPrefix(name, "api/") || name == "metrics" {
+				http.NotFound(w, r)
+				return
+			}
+			name = "index.html"
+			if data, err = iofs.ReadFile(sub, name); err != nil {
+				http.NotFound(w, r)
+				return
+			}
 		}
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeContent(w, r, name, modTime, bytes.NewReader(data))

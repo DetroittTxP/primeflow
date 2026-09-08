@@ -807,9 +807,46 @@ function line(values, color = 'var(--accent)', h = 60) {
 const spark = (values, color) => line(values, color || 'var(--accent)', 34);
 
 // --- navigation ----------------------------------------------------------
+// Every view owns a path, so the address bar names what is on screen: a view
+// can be linked to, reloaded, and walked back through with the back button.
+// The query string rides along untouched — it carries the API token.
+const VIEW_PATHS = VIEWS.map(([v]) => v).concat('newworker');
+const SETTINGS_TABS = ['external', 'git', 'users'];
+const EXT_TABS = ['keys', 'explorer'];
+// Settings spells out its open pane rather than just the view around it: the
+// tab is the second segment, and External API's own switch is the third.
+const settingsPath = () =>
+  '/settings/' + settingsTab + (settingsTab === 'external' ? '/' + extTab : '');
+const pathOf = v =>
+  v === 'settings' ? settingsPath() : v === 'dashboard' ? '/' : '/' + v;
+function routeFromPath() {
+  const [v, sub, ext] = location.pathname.replace(/^\/+|\/+$/g, '').split('/');
+  if (!VIEW_PATHS.includes(v)) return { v: 'dashboard' };
+  if (v !== 'settings' || !SETTINGS_TABS.includes(sub)) return { v };
+  return { v, tab: sub, ext: sub === 'external' && EXT_TABS.includes(ext) ? ext : undefined };
+}
+// Open whatever the address bar asks for. The tabs land before show(), which
+// reads them back out when it writes the path — otherwise a link to one tab
+// would be rewritten to whichever tab was open last.
+function showPath(replace) {
+  const r = routeFromPath();
+  if (r.tab) settingsTab = r.tab;
+  if (r.ext) extTab = r.ext;
+  show(r.v, replace);
+}
+function syncURL(v, replace) {
+  const url = pathOf(v) + location.search;
+  if (!replace && url === location.pathname + location.search) return;
+  history[replace ? 'replaceState' : 'pushState'](null, '', url);
+}
+addEventListener('popstate', () => showPath(true));
+
 let current = 'dashboard';
-function show(v) {
+// replace: rewrite the current history entry instead of adding one — for the
+// initial view and for a redirect the operator never chose.
+function show(v, replace) {
   current = v;
+  syncURL(v, replace);
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
   document.getElementById('win-switch').hidden = v !== 'dashboard';
@@ -2096,16 +2133,17 @@ let settingsTab = 'external', extTab = 'keys', apiRoles = null;
 const keyCache = {};
 
 function loadSettings() {
-  if (!isAdmin()) { show('dashboard'); return; }
+  if (!isAdmin()) { show('dashboard', true); return; }
   showSettings(settingsTab);
 }
 function showSettings(s) {
   settingsTab = s;
+  syncURL('settings');
   document.querySelectorAll('#settings-subnav button').forEach(b => b.classList.toggle('active', b.dataset.s === s));
   document.getElementById('settings-external').hidden = s !== 'external';
   document.getElementById('settings-git').hidden = s !== 'git';
   document.getElementById('settings-users').hidden = s !== 'users';
-  if (s === 'external') { loadExternalSettings(); loadRoles().then(() => { loadKeys(); renderExplorer(); }); }
+  if (s === 'external') { showExtTab(extTab); loadExternalSettings(); loadRoles().then(() => { loadKeys(); renderExplorer(); }); }
   else if (s === 'git') loadGitConnection();
   else loadUsers();
 }
@@ -2148,6 +2186,7 @@ async function saveGitConnection(ev) {
 }
 function showExtTab(t) {
   extTab = t;
+  syncURL('settings');
   document.querySelectorAll('#settings-external .subnav button[data-t]').forEach(b => b.classList.toggle('active', b.dataset.t === t));
   document.getElementById('ext-keys').hidden = t !== 'keys';
   document.getElementById('ext-explorer').hidden = t !== 'explorer';
@@ -2408,7 +2447,7 @@ async function bootstrap() {
     if (b) b.remove();
   }
 
-  show('dashboard');
+  showPath(true);
   loadFlows();
   connect();
   setInterval(refreshCurrent, 15000);
