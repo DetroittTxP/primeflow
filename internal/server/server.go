@@ -348,6 +348,13 @@ func openOperatorPath(method, path string) bool {
 		return true
 	case strings.HasPrefix(path, "/api/v1/auth/oidc/"):
 		return true
+	// The worker API carries its own enforcement chain (see worker.go): it
+	// accepts a pool-scoped api-worker key as well as an operator credential,
+	// and neither the CSRF rule nor the read-only role check makes sense for a
+	// worker reporting on the run it holds. Nothing there is reachable without
+	// passing wk first.
+	case strings.HasPrefix(path, "/api/v1/worker/"):
+		return true
 	case path == "/login.html" || path == "/reset.html" || path == "/primeflow.png" || path == "/favicon.ico":
 		return true
 	}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/primex/primeflow/internal/apiauth"
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/events"
@@ -347,5 +348,164 @@ func TestWorkerAPIRespectsQueuePauseAndServerClock(t *testing.T) {
 	a.ok(http.MethodGet, "/api/v1/worker/cache/nothing-cached-here", nil, &miss)
 	if miss.Hit {
 		t.Fatal("cache reported a hit for a key that was never written")
+	}
+}
+
+// --- phase 2: pool-scoped worker credentials ---
+
+// issueWorkerKey mints an api-worker key bound to the given pools and returns
+// the secret, the way the console would hand it to a site operator.
+func (a *api) issueWorkerKey(name string, pools []string) (secret, id string) {
+	a.t.Helper()
+	full, prefix, hash := apiauth.NewSecret()
+	k := &core.APIKey{
+		ID: "key-" + name, Name: name, Prefix: prefix, SecretHash: hash,
+		Role: "api-worker", Active: true, Pools: pools,
+	}
+	if err := a.store.CreateAPIKey(context.Background(), k); err != nil {
+		a.t.Fatalf("issue key: %v", err)
+	}
+	return full, k.ID
+}
+
+// callKey drives a request authenticated by an API key rather than the shared
+// operator token.
+func (a *api) callKey(method, path string, body any, secret, worker string) *httptest.ResponseRecorder {
+	a.t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			a.t.Fatalf("marshal body: %v", err)
+		}
+		rdr = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, rdr)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", secret)
+	req.Header.Set("X-PrimeFlow-Worker-ID", worker)
+	rec := httptest.NewRecorder()
+	a.h.ServeHTTP(rec, req)
+	return rec
+}
+
+// The phase-2 guarantee: a key bound to one site cannot lease from another's
+// lane, and the refusal is visible to an operator in that key's audit trail.
+func TestWorkerKeyIsBoundToItsPools(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	for _, q := range []string{"site-a", "site-b"} {
+		if err := a.store.EnsureWorkQueue(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.mkRun("site-a")
+	runB := a.mkRun("site-b")
+	secret, keyID := a.issueWorkerKey("site-a-worker", []string{"site-a"})
+
+	// Its own lane works.
+	rec := a.callKey(http.MethodPost, "/api/v1/worker/lease",
+		map[string]any{"queues": []string{"site-a"}, "max": 4}, secret, "a-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("own lane refused: %d %s", rec.Code, rec.Body.String())
+	}
+	var mine []core.FlowRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &mine); err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 1 || mine[0].WorkQueue != "site-a" {
+		t.Fatalf("expected one run from site-a, got %d", len(mine))
+	}
+
+	// Another site's lane hands back nothing, however it is asked for.
+	rec = a.callKey(http.MethodPost, "/api/v1/worker/lease",
+		map[string]any{"queues": []string{"site-b"}, "max": 4}, secret, "a-1")
+	var other []core.FlowRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &other); err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("key leased %d runs from a lane outside its pools", len(other))
+	}
+	// Including when it is smuggled in beside a permitted one.
+	rec = a.callKey(http.MethodPost, "/api/v1/worker/lease",
+		map[string]any{"queues": []string{"site-a", "site-b"}, "max": 4}, secret, "a-1")
+	var mixed []core.FlowRun
+	if err := json.Unmarshal(rec.Body.Bytes(), &mixed); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range mixed {
+		if r.WorkQueue != "site-a" {
+			t.Fatalf("a mixed request leaked a run from %q", r.WorkQueue)
+		}
+	}
+
+	// Knowing another site's run id is not enough either.
+	rec = a.callKey(http.MethodPost, "/api/v1/worker/runs/"+runB.ID+"/state",
+		map[string]any{"state": "RUNNING"}, secret, "a-1")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site state write returned %d %s", rec.Code, rec.Body.String())
+	}
+
+	// And the operator can see it happen.
+	evs, err := a.store.ListAPIKeyEvents(ctx, keyID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var denied bool
+	for _, e := range evs {
+		if e.Action == "auth-denied" && bytes.Contains(e.Detail, []byte("pool-denied:site-b")) {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Fatalf("the refusal is not in the key's audit trail: %+v", evs)
+	}
+}
+
+// A key whose role is not api-worker has none of the worker scopes, so it is
+// refused before it can reach any handler.
+func TestNonWorkerKeyCannotUseTheWorkerAPI(t *testing.T) {
+	a := newAPI(t)
+	full, prefix, hash := apiauth.NewSecret()
+	if err := a.store.CreateAPIKey(context.Background(), &core.APIKey{
+		ID: "key-readonly", Name: "reporting", Prefix: prefix, SecretHash: hash,
+		Role: "api-readonly", Active: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec := a.callKey(http.MethodPost, "/api/v1/worker/lease",
+		map[string]any{"queues": []string{"default"}, "max": 1}, full, "impostor")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a read-only key leased work: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A deactivated key stops working immediately — the revocation story that a
+// shared database credential cannot offer.
+func TestDeactivatedWorkerKeyIsRefused(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	secret, keyID := a.issueWorkerKey("retired", []string{"default"})
+
+	rec := a.callKey(http.MethodPost, "/api/v1/worker/heartbeat",
+		map[string]any{"name": "w", "queues": []string{"default"}}, secret, "w-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("active key refused: %d %s", rec.Code, rec.Body.String())
+	}
+
+	k, err := a.store.GetAPIKey(ctx, keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.Active = false
+	if err := a.store.UpdateAPIKey(ctx, k); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = a.callKey(http.MethodPost, "/api/v1/worker/heartbeat",
+		map[string]any{"name": "w", "queues": []string{"default"}}, secret, "w-1")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("deactivated key still worked: %d %s", rec.Code, rec.Body.String())
 	}
 }

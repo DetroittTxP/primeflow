@@ -27,39 +27,45 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/primex/primeflow/internal/apiauth"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/store"
 )
 
-// workerIDHeader carries the caller's worker identity.
+// workerIDHeader names which worker in a pool is calling.
 //
-// Resolving it from a header is the interim: the operator API's machine
-// credential is a single shared admin token, so there is nothing better to bind
-// to yet. Pool-scoped worker credentials replace this, and when they do only
-// workerIdentity changes — every enforcement point below already reads from it
-// rather than from the request body.
+// It is a label, not authority. Authority comes from the credential: a
+// pool-scoped API key with the api-worker role. A key is a site's credential,
+// so the workers sharing one are a single trust domain and the id only has to
+// tell them apart in lease records and the console.
 const workerIDHeader = "X-PrimeFlow-Worker-ID"
 
-// workerIdentity is who the server believes is calling.
+// workerIdentity is who the server believes is calling, and what it may touch.
 type workerIdentity struct {
-	// WorkerID is used for leases and lease renewal. It is never read from a
-	// body: a worker must not be able to claim work as another worker.
+	// WorkerID is recorded on leases and checked by the ownership precondition.
+	// It is never read from a body: a worker must not be able to claim work as
+	// another worker.
 	WorkerID string
-	// Pools bounds which lanes this caller may touch. A nil slice means
-	// unrestricted, which is what a shared admin token gets today; a
-	// pool-scoped credential will populate it.
+	// Pools bounds which lanes this caller may act on. Empty means
+	// unrestricted, which is what an operator session or the shared admin
+	// bearer gets — those are already trusted with everything.
 	Pools []string
+	// KeyID, when set, is the API key behind the call, for the audit trail.
+	KeyID string
 }
 
 // mayUse reports whether this caller is allowed to act on a lane.
 func (id workerIdentity) mayUse(queue string) bool {
-	if id.Pools == nil {
+	if len(id.Pools) == 0 {
 		return true
 	}
 	for _, p := range id.Pools {
@@ -72,7 +78,7 @@ func (id workerIdentity) mayUse(queue string) bool {
 
 // allowed narrows a requested queue list to the lanes this caller may poll.
 func (id workerIdentity) allowed(queues []string) []string {
-	if id.Pools == nil {
+	if len(id.Pools) == 0 {
 		return queues
 	}
 	out := make([]string, 0, len(queues))
@@ -84,22 +90,142 @@ func (id workerIdentity) allowed(queues []string) []string {
 	return out
 }
 
-func (s *Server) workerIdentity(r *http.Request) (workerIdentity, error) {
-	wid := r.Header.Get(workerIDHeader)
-	if wid == "" {
-		return workerIdentity{}, fmt.Errorf("%s is required", workerIDHeader)
-	}
-	return workerIdentity{WorkerID: wid}, nil
+type workerIdentityKey struct{}
+
+// workerFrom returns the identity wk resolved for this request.
+func workerFrom(r *http.Request) workerIdentity {
+	id, _ := r.Context().Value(workerIdentityKey{}).(workerIdentity)
+	return id
 }
 
-// workerAuth resolves the caller and writes the 400 itself when it cannot.
-func (s *Server) workerAuth(w http.ResponseWriter, r *http.Request) (workerIdentity, bool) {
-	id, err := s.workerIdentity(r)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err)
+// wk is the enforcement chain for one worker route: resolve the caller, check
+// the scope its credential carries, and hand the identity down in the context.
+//
+// Two credentials are accepted. A pool-scoped api-worker key is the one a
+// remote site uses, and it goes through the same controls the External API
+// applies — active, unexpired, IP allow-list, mutual TLS, rate limit, audit.
+// An operator session or the shared admin bearer is also accepted and is
+// unrestricted, which is what keeps a locally connected worker and the console
+// working exactly as before.
+func (s *Server) wk(scope apiauth.Scope, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := s.resolveWorker(w, r, scope)
+		if !ok {
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), workerIdentityKey{}, id)))
+	}
+}
+
+// wkRun additionally refuses a run that sits on a lane outside the caller's
+// pools. Without it a key scoped to one site could drive a run belonging to
+// another simply by knowing its id. Callers with no pool restriction skip the
+// lookup entirely, so the common path costs nothing.
+func (s *Server) wkRun(scope apiauth.Scope, next http.HandlerFunc) http.HandlerFunc {
+	return s.wk(scope, func(w http.ResponseWriter, r *http.Request) {
+		id := workerFrom(r)
+		if len(id.Pools) > 0 {
+			run, err := s.store.GetFlowRun(r.Context(), r.PathValue("id"))
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			if !id.mayUse(run.WorkQueue) {
+				s.denyWorker(r, id, "pool-denied:"+run.WorkQueue)
+				writeErr(w, http.StatusForbidden,
+					fmt.Errorf("run %s is on queue %q, which is out of scope for this key", run.ID, run.WorkQueue))
+				return
+			}
+		}
+		next(w, r)
+	})
+}
+
+// resolveWorker identifies the caller and writes the failure itself when it
+// cannot. It returns false once anything has been written.
+func (s *Server) resolveWorker(w http.ResponseWriter, r *http.Request, scope apiauth.Scope) (workerIdentity, bool) {
+	wid := strings.TrimSpace(r.Header.Get(workerIDHeader))
+	if wid == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("%s is required", workerIDHeader))
 		return workerIdentity{}, false
 	}
-	return id, true
+
+	secret := bearerOrHeader(r)
+	if !strings.HasPrefix(secret, apiauth.SecretPrefixLabel) {
+		// No worker key presented. withAuth has already established an
+		// operator session or the admin bearer, both unrestricted.
+		return workerIdentity{WorkerID: wid}, true
+	}
+
+	prefix := apiauth.PrefixOf(secret)
+	key, err := s.store.GetAPIKeyByPrefix(r.Context(), prefix)
+	if err != nil || !apiauth.SecretMatches(key.SecretHash, secret) {
+		writeErr(w, http.StatusUnauthorized, errors.New("invalid API key"))
+		return workerIdentity{}, false
+	}
+	now := time.Now().UTC()
+	if !key.Active || key.Expired(now) {
+		writeErr(w, http.StatusUnauthorized, errors.New("API key is inactive or expired"))
+		return workerIdentity{}, false
+	}
+
+	clientIP := s.clientIPAddr(r)
+	if len(key.IPAllowlist) > 0 {
+		nets := apiauth.ParseCIDRs(strings.Join(key.IPAllowlist, ","))
+		if clientIP == nil || !apiauth.IPInAny(clientIP, nets) {
+			s.denyKey(r, key.ID, "ip-not-allowlisted", ipString(clientIP))
+			writeErr(w, http.StatusUnauthorized, errors.New("client address is not allow-listed for this key"))
+			return workerIdentity{}, false
+		}
+	}
+	if key.RequireMTLS {
+		verified := apiauth.ViaTrustedProxy(r, s.cfg.TrustedProxyCIDRs) &&
+			strings.EqualFold(r.Header.Get("X-SSL-Client-Verify"), "SUCCESS")
+		if !verified {
+			s.denyKey(r, key.ID, "mtls-not-verified", ipString(clientIP))
+			writeErr(w, http.StatusUnauthorized, errors.New("this key requires a verified client certificate"))
+			return workerIdentity{}, false
+		}
+	}
+
+	role, _ := apiauth.LookupRole(key.Role)
+	if scope != "" && !role.Has(scope) {
+		s.denyKey(r, key.ID, "scope-denied:"+string(scope), ipString(clientIP))
+		writeErr(w, http.StatusForbidden,
+			errors.New("this key's role ("+role.Label+") lacks the "+string(scope)+" scope"))
+		return workerIdentity{}, false
+	}
+
+	if cfg, err := s.store.GetExternalAPISettings(r.Context()); err == nil {
+		limit := cfg.DefaultRateLimitPerMin
+		if key.RateLimitPerMin != nil {
+			limit = *key.RateLimitPerMin
+		}
+		if ok, retry := s.rateLimiter.Allow(key.ID, limit); !ok {
+			w.Header().Set("Retry-After", secondsString(retry))
+			writeErr(w, http.StatusTooManyRequests, errors.New("rate limit exceeded"))
+			return workerIdentity{}, false
+		}
+	}
+
+	_ = s.store.TouchAPIKey(r.Context(), key.ID, now)
+	return workerIdentity{WorkerID: wid, Pools: key.Pools, KeyID: key.ID}, true
+}
+
+// denyWorker records a pool refusal against the key that made it, so an
+// operator can see a site reaching outside its lanes.
+func (s *Server) denyWorker(r *http.Request, id workerIdentity, reason string) {
+	if id.KeyID == "" {
+		return
+	}
+	s.denyKey(r, id.KeyID, reason, ipString(s.clientIPAddr(r)))
+}
+
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -120,10 +246,7 @@ type workerLeaseBody struct {
 }
 
 func (s *Server) workerLease(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerLeaseBody
 	if !decodeBody(w, r, &b) {
 		return
@@ -165,10 +288,7 @@ type workerHeartbeatBody struct {
 }
 
 func (s *Server) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerHeartbeatBody
 	if !decodeBody(w, r, &b) {
 		return
@@ -190,10 +310,7 @@ type workerLeaseRenewBody struct {
 }
 
 func (s *Server) workerRenewLease(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerLeaseRenewBody
 	if !decodeBody(w, r, &b) {
 		return
@@ -233,10 +350,7 @@ type workerStateBody struct {
 }
 
 func (s *Server) workerSetRunState(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerStateBody
 	if !decodeBody(w, r, &b) {
 		return
@@ -277,9 +391,6 @@ func (s *Server) workerSetRunState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) workerGetRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	run, err := s.store.GetFlowRun(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
@@ -309,10 +420,7 @@ type workerCreateRunBody struct {
 // workerCreateRun is how a flow fans out to a sub-flow. It mirrors what the
 // engine's runtime bridge does locally, including the event and the wake-up.
 func (s *Server) workerCreateRun(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerCreateRunBody
 	if !decodeBody(w, r, &b) {
 		return
@@ -362,10 +470,7 @@ func (s *Server) workerCreateRun(w http.ResponseWriter, r *http.Request) {
 
 // workerResumeRun wakes a suspended parent whose children have all settled.
 func (s *Server) workerResumeRun(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b struct {
 		At *time.Time `json:"at,omitempty"`
 	}
@@ -389,10 +494,7 @@ func (s *Server) workerResumeRun(w http.ResponseWriter, r *http.Request) {
 // workerClaimPushRun takes one dispatched run SCHEDULED -> PENDING for a push
 // receiver, which then drives it exactly as a leased run.
 func (s *Server) workerClaimPushRun(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	var b workerLeaseRenewBody
 	if r.ContentLength > 0 && !decodeBody(w, r, &b) {
 		return
@@ -416,9 +518,6 @@ func (s *Server) workerClaimPushRun(w http.ResponseWriter, r *http.Request) {
 // ----------------------------------------------------- durable checkpoints ---
 
 func (s *Server) workerGetTaskRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	tr, err := s.store.GetTaskRun(r.Context(), r.PathValue("id"), r.PathValue("key"))
 	if err != nil {
 		fail(w, err)
@@ -428,9 +527,6 @@ func (s *Server) workerGetTaskRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) workerPutTaskRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	var tr core.TaskRun
 	if !decodeBody(w, r, &tr) {
 		return
@@ -450,9 +546,6 @@ func (s *Server) workerPutTaskRun(w http.ResponseWriter, r *http.Request) {
 // server time: a worker must not be able to revive an expired entry by claiming
 // an earlier "now".
 func (s *Server) workerCachedResult(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	raw, hit, err := s.store.FindCachedResult(r.Context(), r.PathValue("key"), time.Now().UTC())
 	if err != nil {
 		fail(w, err)
@@ -467,9 +560,6 @@ func (s *Server) workerCachedResult(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------- what a running flow writes ---
 
 func (s *Server) workerAppendLogs(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	var b struct {
 		Records []core.LogRecord `json:"records"`
 	}
@@ -488,9 +578,6 @@ func (s *Server) workerAppendLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) workerCreateArtifact(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	var a core.Artifact
 	if !decodeBody(w, r, &a) {
 		return
@@ -507,9 +594,6 @@ func (s *Server) workerCreateArtifact(w http.ResponseWriter, r *http.Request) {
 // ------------------------------------------------- catalogue and lookups ---
 
 func (s *Server) workerUpsertFlow(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	var f core.Flow
 	if !decodeBody(w, r, &f) {
 		return
@@ -529,10 +613,7 @@ func (s *Server) workerUpsertFlow(w http.ResponseWriter, r *http.Request) {
 // exactly as it is — never an upsert, which would reset the operator's
 // concurrency limit, pause switch and autoscaling envelope on every restart.
 func (s *Server) workerEnsureQueue(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.workerAuth(w, r)
-	if !ok {
-		return
-	}
+	id := workerFrom(r)
 	name := r.PathValue("name")
 	if !id.mayUse(name) {
 		writeErr(w, http.StatusForbidden, fmt.Errorf("queue %q is out of scope for this worker", name))
@@ -546,9 +627,6 @@ func (s *Server) workerEnsureQueue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) workerDeploymentByName(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	d, err := s.store.GetDeploymentByName(r.Context(), r.PathValue("name"))
 	if err != nil {
 		fail(w, err)
@@ -559,9 +637,6 @@ func (s *Server) workerDeploymentByName(w http.ResponseWriter, r *http.Request) 
 
 // workerAncestors backs the sub-flow recursion guard.
 func (s *Server) workerAncestors(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	depth := 8
 	if v := r.URL.Query().Get("max_depth"); v != "" {
 		if _, err := fmt.Sscanf(v, "%d", &depth); err != nil || depth <= 0 {
@@ -581,9 +656,6 @@ func (s *Server) workerAncestors(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) workerUnfinishedChildren(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.workerAuth(w, r); !ok {
-		return
-	}
 	n, err := s.store.CountUnfinishedChildren(r.Context(), r.PathValue("id"))
 	if err != nil {
 		fail(w, err)
@@ -599,27 +671,33 @@ func (s *Server) workerUnfinishedChildren(w http.ResponseWriter, r *http.Request
 // it is obvious that AppendEvent is not on it.
 func (s *Server) registerWorkerRoutes(mux *http.ServeMux) {
 	const p = "/api/v1/worker"
+	const (
+		lease  = apiauth.ScopeWorkerLease
+		report = apiauth.ScopeWorkerReport
+		reads  = apiauth.ScopeReadRuns
+		deps   = apiauth.ScopeReadDeployments
+	)
 
-	mux.HandleFunc("POST "+p+"/lease", s.workerLease)
-	mux.HandleFunc("POST "+p+"/heartbeat", s.workerHeartbeat)
-	mux.HandleFunc("POST "+p+"/runs/{id}/renew", s.workerRenewLease)
+	mux.HandleFunc("POST "+p+"/lease", s.wk(lease, s.workerLease))
+	mux.HandleFunc("POST "+p+"/heartbeat", s.wk(report, s.workerHeartbeat))
+	mux.HandleFunc("POST "+p+"/runs/{id}/renew", s.wkRun(report, s.workerRenewLease))
 
-	mux.HandleFunc("GET "+p+"/runs/{id}", s.workerGetRun)
-	mux.HandleFunc("POST "+p+"/runs", s.workerCreateRun)
-	mux.HandleFunc("POST "+p+"/runs/{id}/state", s.workerSetRunState)
-	mux.HandleFunc("POST "+p+"/runs/{id}/resume", s.workerResumeRun)
-	mux.HandleFunc("POST "+p+"/runs/{id}/claim", s.workerClaimPushRun)
+	mux.HandleFunc("GET "+p+"/runs/{id}", s.wkRun(reads, s.workerGetRun))
+	mux.HandleFunc("POST "+p+"/runs", s.wk(report, s.workerCreateRun))
+	mux.HandleFunc("POST "+p+"/runs/{id}/state", s.wkRun(report, s.workerSetRunState))
+	mux.HandleFunc("POST "+p+"/runs/{id}/resume", s.wkRun(report, s.workerResumeRun))
+	mux.HandleFunc("POST "+p+"/runs/{id}/claim", s.wkRun(report, s.workerClaimPushRun))
 
-	mux.HandleFunc("GET "+p+"/runs/{id}/tasks/{key}", s.workerGetTaskRun)
-	mux.HandleFunc("PUT "+p+"/runs/{id}/tasks/{key}", s.workerPutTaskRun)
-	mux.HandleFunc("GET "+p+"/cache/{key}", s.workerCachedResult)
+	mux.HandleFunc("GET "+p+"/runs/{id}/tasks/{key}", s.wkRun(reads, s.workerGetTaskRun))
+	mux.HandleFunc("PUT "+p+"/runs/{id}/tasks/{key}", s.wkRun(report, s.workerPutTaskRun))
+	mux.HandleFunc("GET "+p+"/cache/{key}", s.wk(reads, s.workerCachedResult))
 
-	mux.HandleFunc("POST "+p+"/runs/{id}/logs", s.workerAppendLogs)
-	mux.HandleFunc("POST "+p+"/runs/{id}/artifacts", s.workerCreateArtifact)
+	mux.HandleFunc("POST "+p+"/runs/{id}/logs", s.wkRun(report, s.workerAppendLogs))
+	mux.HandleFunc("POST "+p+"/runs/{id}/artifacts", s.wkRun(report, s.workerCreateArtifact))
 
-	mux.HandleFunc("POST "+p+"/flows", s.workerUpsertFlow)
-	mux.HandleFunc("POST "+p+"/queues/{name}", s.workerEnsureQueue)
-	mux.HandleFunc("GET "+p+"/deployments/by-name/{name}", s.workerDeploymentByName)
-	mux.HandleFunc("GET "+p+"/runs/{id}/ancestors", s.workerAncestors)
-	mux.HandleFunc("GET "+p+"/runs/{id}/children/unfinished", s.workerUnfinishedChildren)
+	mux.HandleFunc("POST "+p+"/flows", s.wk(report, s.workerUpsertFlow))
+	mux.HandleFunc("POST "+p+"/queues/{name}", s.wk(report, s.workerEnsureQueue))
+	mux.HandleFunc("GET "+p+"/deployments/by-name/{name}", s.wk(deps, s.workerDeploymentByName))
+	mux.HandleFunc("GET "+p+"/runs/{id}/ancestors", s.wkRun(reads, s.workerAncestors))
+	mux.HandleFunc("GET "+p+"/runs/{id}/children/unfinished", s.wkRun(reads, s.workerUnfinishedChildren))
 }

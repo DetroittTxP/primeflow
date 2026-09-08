@@ -34,6 +34,14 @@ const (
 	ScopeWriteRuns        Scope = "write:runs"
 	ScopeWriteDeployments Scope = "write:deployments"
 	ScopeWriteQueues      Scope = "write:queues"
+
+	// Worker scopes. A worker claims work and reports on what it claimed; it
+	// never manages deployments, never edits a queue's settings, and — most
+	// importantly — never writes an event. Automations act on the event log, so
+	// a worker able to append to it could trip an automation against a lane it
+	// has no other authority over.
+	ScopeWorkerLease  Scope = "worker:lease"
+	ScopeWorkerReport Scope = "worker:report"
 )
 
 // Role is a named, fixed bundle of scopes. Roles are defined in code, not the
@@ -69,6 +77,13 @@ var roles = map[string]Role{
 		ID: "api-trigger", Label: "API Trigger",
 		Description: "Trigger deployments and read the runs they produce. For upstream systems that kick off work.",
 		Scopes:      []Scope{ScopeReadDeployments, ScopeReadRuns, ScopeWriteRuns},
+	},
+	"api-worker": {
+		ID: "api-worker", Label: "Worker",
+		Description: "Claims work from its own pools and reports on it. For workers that reach the API instead of the database — a remote site, or anywhere a database credential should not go.",
+		Scopes: []Scope{
+			ScopeWorkerLease, ScopeWorkerReport, ScopeReadRuns, ScopeReadDeployments,
+		},
 	},
 	"api-readonly": {
 		ID: "api-readonly", Label: "API Read-Only",

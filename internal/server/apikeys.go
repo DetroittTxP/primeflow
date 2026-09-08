@@ -78,8 +78,11 @@ type apiKeyBody struct {
 	ExpiresAt       *string   `json:"expires_at,omitempty"` // RFC3339 or "" to clear
 	RateLimitPerMin *int      `json:"rate_limit_per_min,omitempty"`
 	IPAllowlist     *[]string `json:"ip_allowlist,omitempty"`
-	RequireMTLS     *bool     `json:"require_mtls,omitempty"`
-	RedactPII       *bool     `json:"redact_pii,omitempty"`
+	// Pools bounds an api-worker key to named work queues. Empty is
+	// unrestricted, which is what every other role wants.
+	Pools       *[]string `json:"pools,omitempty"`
+	RequireMTLS *bool     `json:"require_mtls,omitempty"`
+	RedactPII   *bool     `json:"redact_pii,omitempty"`
 }
 
 func parseExpiry(v string) (*time.Time, error) {
@@ -95,6 +98,16 @@ func parseExpiry(v string) (*time.Time, error) {
 		}
 	}
 	return nil, fmt.Errorf("expires_at %q is not a date or RFC3339 timestamp", v)
+}
+
+// validPools guards the one combination that would be a lie: pools on a role
+// that has no pool-aware route to enforce them on. An operator who sets them
+// there would believe a key was bounded when nothing checks it.
+func validPools(role string, pools []string) error {
+	if len(pools) == 0 || role == "api-worker" {
+		return nil
+	}
+	return fmt.Errorf("pools apply to the api-worker role; %s keys are not pool-scoped", role)
 }
 
 func validIPAllowlist(entries []string) error {
@@ -188,12 +201,20 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, errors.New("rate_limit_per_min must be >= 0"))
 		return
 	}
+	pools := []string{}
+	if b.Pools != nil {
+		pools = nonEmpty(*b.Pools)
+	}
+	if err := validPools(b.Role, pools); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
 
 	full, prefix, hash := apiauth.NewSecret()
 	k := &core.APIKey{
 		ID: newID(), Name: b.Name, Prefix: prefix, SecretHash: hash, Role: b.Role,
 		Active: true, ExpiresAt: expiry, RateLimitPerMin: b.RateLimitPerMin,
-		IPAllowlist: allow, CreatedBy: principalEmail(r),
+		IPAllowlist: allow, Pools: pools, CreatedBy: principalEmail(r),
 	}
 	if b.Description != nil {
 		k.Description = strings.TrimSpace(*b.Description)
@@ -277,6 +298,13 @@ func (s *Server) updateAPIKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		k.IPAllowlist = allow
+	}
+	if b.Pools != nil {
+		k.Pools = nonEmpty(*b.Pools)
+	}
+	if err := validPools(k.Role, k.Pools); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
 	}
 	if b.RequireMTLS != nil {
 		k.RequireMTLS = *b.RequireMTLS

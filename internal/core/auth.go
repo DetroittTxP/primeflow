@@ -51,8 +51,13 @@ type APIKey struct {
 	// RateLimitPerMin nil means "use the role / global default".
 	RateLimitPerMin *int     `json:"rate_limit_per_min,omitempty"`
 	IPAllowlist     []string `json:"ip_allowlist,omitempty"`
-	RequireMTLS     bool     `json:"require_mtls"`
-	RedactPII       bool     `json:"redact_pii"`
+	// Pools bounds the work queues a worker key may touch. Empty means
+	// unrestricted, which is what every non-worker key is: a site's credential
+	// should name its own lanes so a compromise there cannot reach another
+	// site's runs.
+	Pools       []string `json:"pools,omitempty"`
+	RequireMTLS bool     `json:"require_mtls"`
+	RedactPII   bool     `json:"redact_pii"`
 
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	CreatedBy  string     `json:"created_by,omitempty"`
@@ -63,6 +68,20 @@ type APIKey struct {
 // Expired reports whether the key has an expiry that has passed.
 func (k APIKey) Expired(now time.Time) bool {
 	return k.ExpiresAt != nil && now.After(*k.ExpiresAt)
+}
+
+// MayUsePool reports whether the key is allowed to act on a work queue. A key
+// with no pools listed is unrestricted.
+func (k APIKey) MayUsePool(queue string) bool {
+	if len(k.Pools) == 0 {
+		return true
+	}
+	for _, p := range k.Pools {
+		if p == queue {
+			return true
+		}
+	}
+	return false
 }
 
 // APIKeyEvent is one row of a key's audit trail.

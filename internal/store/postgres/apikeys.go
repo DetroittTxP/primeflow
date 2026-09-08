@@ -44,14 +44,14 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, raw
 // ------------------------------------------------------------- api keys ---
 
 const apiKeyCols = `id, name, description, owner_email, prefix, secret_hash, role, active,
-	expires_at, rate_limit_per_min, ip_allowlist, require_mtls, redact_pii,
+	expires_at, rate_limit_per_min, ip_allowlist, require_mtls, redact_pii, pools,
 	last_used_at, created_by, created_at, updated_at`
 
 func scanAPIKey(sc interface{ Scan(...any) error }) (*core.APIKey, error) {
 	var k core.APIKey
 	if err := sc.Scan(&k.ID, &k.Name, &k.Description, &k.OwnerEmail, &k.Prefix, &k.SecretHash,
 		&k.Role, &k.Active, &k.ExpiresAt, &k.RateLimitPerMin, pq.Array(&k.IPAllowlist),
-		&k.RequireMTLS, &k.RedactPII, &k.LastUsedAt, &k.CreatedBy,
+		&k.RequireMTLS, &k.RedactPII, pq.Array(&k.Pools), &k.LastUsedAt, &k.CreatedBy,
 		&k.CreatedAt, &k.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -64,13 +64,13 @@ func (s *Store) CreateAPIKey(ctx context.Context, k *core.APIKey) error {
 	const q = `
 INSERT INTO pf_api_keys
   (id, name, description, owner_email, prefix, secret_hash, role, active, expires_at,
-   rate_limit_per_min, ip_allowlist, require_mtls, redact_pii, created_by)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+   rate_limit_per_min, ip_allowlist, require_mtls, redact_pii, pools, created_by)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 RETURNING created_at, updated_at`
 	return mapErr(s.db.QueryRowContext(ctx, q,
 		k.ID, k.Name, k.Description, k.OwnerEmail, k.Prefix, k.SecretHash, k.Role, k.Active,
 		nullTime(k.ExpiresAt), k.RateLimitPerMin, textArray(k.IPAllowlist), k.RequireMTLS,
-		k.RedactPII, k.CreatedBy).Scan(&k.CreatedAt, &k.UpdatedAt))
+		k.RedactPII, textArray(k.Pools), k.CreatedBy).Scan(&k.CreatedAt, &k.UpdatedAt))
 }
 
 // GetAPIKey loads a key by id.
@@ -137,12 +137,12 @@ func (s *Store) UpdateAPIKey(ctx context.Context, k *core.APIKey) error {
 UPDATE pf_api_keys SET
    name = $2, description = $3, owner_email = $4, role = $5, active = $6, expires_at = $7,
    rate_limit_per_min = $8, ip_allowlist = $9, require_mtls = $10, redact_pii = $11,
-   updated_at = now()
+   pools = $12, updated_at = now()
 WHERE id = $1
 RETURNING updated_at`
 	err := s.db.QueryRowContext(ctx, q, k.ID, k.Name, k.Description, k.OwnerEmail, k.Role,
 		k.Active, nullTime(k.ExpiresAt), k.RateLimitPerMin, textArray(k.IPAllowlist),
-		k.RequireMTLS, k.RedactPII).Scan(&k.UpdatedAt)
+		k.RequireMTLS, k.RedactPII, textArray(k.Pools)).Scan(&k.UpdatedAt)
 	return mapErr(err)
 }
 
