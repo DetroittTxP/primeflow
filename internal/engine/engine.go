@@ -50,7 +50,7 @@ type Config struct {
 }
 
 func (c *Config) applyDefaults() {
-	if c.CancelPollInterval <= 0 {
+	if c.CancelPollInterval == 0 {
 		c.CancelPollInterval = 5 * time.Second
 	}
 	if c.SuspendThreshold <= 0 {
@@ -365,6 +365,12 @@ func (e *Engine) flushLoop(ctx context.Context, b *runtimeBridge, stop <-chan st
 
 // cancelWatch polls for an operator cancellation and cancels the run's context.
 func (e *Engine) cancelWatch(ctx context.Context, runID string, cancel context.CancelFunc, stop <-chan struct{}) {
+	if e.cfg.CancelPollInterval < 0 {
+		// Turned off: the caller has a better channel. A worker on the API
+		// learns about cancellation from its heartbeat, which is one call for
+		// the whole worker rather than one read per running flow.
+		return
+	}
 	t := time.NewTicker(e.cfg.CancelPollInterval)
 	defer t.Stop()
 	for {

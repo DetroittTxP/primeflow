@@ -49,6 +49,12 @@ type Config struct {
 	MetricsAddr string
 	// MaxSubflowDepth bounds RunDeployment recursion (0 = engine default of 8).
 	MaxSubflowDepth int
+	// CancelPollInterval is how often a running flow re-reads its own run to
+	// notice a cancellation. Zero takes the engine's default. Negative turns it
+	// off, which is what a worker reaching the orchestrator over its API wants:
+	// the heartbeat already carries cancellations, and one read per running
+	// flow every few seconds is the WAN cost the heartbeat exists to remove.
+	CancelPollInterval time.Duration
 }
 
 func (c *Config) applyDefaults() {
@@ -104,6 +110,7 @@ func New(s store.WorkerStore, b bus.Bus, reg *sdk.Registry, em *events.Emitter, 
 	id := uuid.NewString()
 	eng := engine.New(s, reg, em, log, engine.Config{
 		WorkerID: id, Metrics: cfg.Metrics, MaxSubflowDepth: cfg.MaxSubflowDepth,
+		CancelPollInterval: cfg.CancelPollInterval,
 	})
 	return &Worker{
 		id: id, cfg: cfg, store: s, bus: b, engine: eng, reg: reg, log: log,
@@ -128,9 +135,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.serveMetrics(ctx)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
+	// One periodic conversation, not three: liveness, lease renewal and
+	// cancellation all ride the same call.
 	go func() { defer wg.Done(); w.heartbeatLoop(ctx) }()
-	go func() { defer wg.Done(); w.leaseRenewLoop(ctx) }()
 
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
@@ -297,17 +305,63 @@ func (w *Worker) publishCatalogue(ctx context.Context) {
 	}
 }
 
+// heartbeatLoop is the whole of a worker's periodic conversation with the
+// orchestrator: it says this worker is alive, renews every lease it holds, and
+// learns which of those runs an operator has asked to stop — in one call.
+//
+// It used to be three: a heartbeat, a renewal per held run, and, inside the
+// engine, a cancellation poll per running run. Beside a database that is
+// cheap. Across a WAN it is a worker's request rate scaling with how much work
+// it is doing, which is exactly backwards — a busy site should not be the one
+// that floods the link.
+//
+// A lease that comes back lost was reclaimed elsewhere, so the local copy is
+// cancelled rather than allowed to finish work another worker has taken over.
 func (w *Worker) heartbeatLoop(ctx context.Context) {
 	t := time.NewTicker(w.cfg.HeartbeatInterval)
 	defer t.Stop()
 	beat := func() {
+		ctx := context.WithoutCancel(ctx)
 		info := &core.WorkerInfo{
 			ID: w.id, Name: w.cfg.Name, Queues: w.cfg.Queues,
 			Concurrency: w.cfg.Concurrency, ActiveRuns: int(w.active.Load()),
 			StartedAt: w.started,
 		}
-		if err := w.store.HeartbeatWorker(context.WithoutCancel(ctx), info); err != nil {
+		if err := w.store.HeartbeatWorker(ctx, info); err != nil {
 			w.log.Debug("heartbeat failed", "err", err)
+		}
+
+		w.leaseMu.Lock()
+		held := make([]string, 0, len(w.leases))
+		for id := range w.leases {
+			held = append(held, id)
+		}
+		w.leaseMu.Unlock()
+		if len(held) == 0 {
+			return
+		}
+
+		renewed, cancelling, err := w.store.RenewLeases(ctx, w.id, held, w.cfg.LeaseDuration)
+		if err != nil {
+			// Nothing is assumed lost on a transport failure: the lease still
+			// has its full period to run, and the next beat re-asks.
+			w.log.Warn("lease renewal failed; will retry", "held", len(held), "err", err)
+			return
+		}
+		keep := make(map[string]bool, len(renewed))
+		for _, id := range renewed {
+			keep[id] = true
+		}
+		for _, id := range held {
+			if !keep[id] {
+				w.log.Warn("lost lease; abandoning run", "run", id)
+				w.engine.Cancel(id)
+			}
+		}
+		for _, id := range cancelling {
+			if w.engine.Cancel(id) {
+				w.log.Info("cancelling run on request", "run", id)
+			}
 		}
 	}
 	beat()
@@ -317,35 +371,6 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			beat()
-		}
-	}
-}
-
-// leaseRenewLoop keeps this worker's claims alive. A renewal that fails means
-// the run was reclaimed elsewhere, so we cancel our copy rather than let two
-// workers execute the same run.
-func (w *Worker) leaseRenewLoop(ctx context.Context) {
-	t := time.NewTicker(w.cfg.HeartbeatInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			w.leaseMu.Lock()
-			ids := make([]string, 0, len(w.leases))
-			for id := range w.leases {
-				ids = append(ids, id)
-			}
-			w.leaseMu.Unlock()
-
-			for _, id := range ids {
-				err := w.store.RenewLease(context.WithoutCancel(ctx), id, w.id, w.cfg.LeaseDuration)
-				if err != nil {
-					w.log.Warn("lost lease; abandoning run", "run", id, "err", err)
-					w.engine.Cancel(id)
-				}
-			}
 		}
 	}
 }

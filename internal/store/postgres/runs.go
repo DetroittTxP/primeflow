@@ -594,6 +594,40 @@ func prefixCols(prefix, cols string) string {
 
 // RenewLease extends a worker's claim. It fails if the worker no longer owns
 // the run, which is how a worker learns it was reclaimed after a network split.
+// RenewLeases is the batched form: one statement renews everything this worker
+// still holds and, from the same rows, says which of them an operator has asked
+// to stop. Cancellation rides back on the heartbeat because it is the same
+// question — a worker that can still renew a lease is a worker that can still
+// be told to stop.
+func (s *Store) RenewLeases(ctx context.Context, workerID string, runIDs []string, d time.Duration) ([]string, []string, error) {
+	if len(runIDs) == 0 {
+		return nil, nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+UPDATE pf_flow_runs
+   SET lease_expires_at = now() + $3::interval, updated_at = now()
+ WHERE id = ANY($1) AND worker_id = $2 AND state IN ('RUNNING','PENDING','CANCELLING')
+RETURNING id, (cancel_requested OR state IN ('CANCELLING','CANCELLED'))`,
+		pq.Array(runIDs), workerID, fmt.Sprintf("%d milliseconds", d.Milliseconds()))
+	if err != nil {
+		return nil, nil, mapErr(err)
+	}
+	defer rows.Close()
+	var renewed, cancelling []string
+	for rows.Next() {
+		var id string
+		var stop bool
+		if err := rows.Scan(&id, &stop); err != nil {
+			return nil, nil, err
+		}
+		renewed = append(renewed, id)
+		if stop {
+			cancelling = append(cancelling, id)
+		}
+	}
+	return renewed, cancelling, rows.Err()
+}
+
 func (s *Store) RenewLease(ctx context.Context, runID, workerID string, d time.Duration) error {
 	res, err := s.db.ExecContext(ctx, `
 UPDATE pf_flow_runs

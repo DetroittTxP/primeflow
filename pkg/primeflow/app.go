@@ -572,6 +572,11 @@ func (a *App) ServeWorker(ctx context.Context) error {
 		Metrics:         a.Metrics,
 		MetricsAddr:     a.Options.WorkerMetricsAddr,
 		MaxSubflowDepth: a.Options.MaxSubflowDepth,
+		// A worker on the API hears about cancellation twice already — on the
+		// wake-up stream and in every heartbeat — so the engine's per-run
+		// backstop poll would only add WAN traffic proportional to how busy
+		// the site is.
+		CancelPollInterval: cancelPollFor(a.Options),
 	})
 	return w.Run(ctx)
 }
@@ -751,4 +756,13 @@ func WithSignals(ctx context.Context) context.Context {
 		stop()
 	}()
 	return ctx
+}
+
+// cancelPollFor turns the engine's per-run cancellation poll off at a site and
+// leaves it at its default beside a database.
+func cancelPollFor(o Options) time.Duration {
+	if o.Remote() {
+		return -1
+	}
+	return 0
 }

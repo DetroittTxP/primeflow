@@ -87,6 +87,12 @@ type WorkerStore interface {
 	// ordering. This is the heart of dispatch.
 	LeaseFlowRuns(ctx context.Context, req LeaseRequest) ([]core.FlowRun, error)
 	RenewLease(ctx context.Context, runID, workerID string, d time.Duration) error
+	// RenewLeases extends every lease this worker still holds and reports, in
+	// the same round trip, which of those runs an operator has asked to stop.
+	// A worker holding N runs then costs one call per interval rather than N —
+	// which matters when the call crosses a WAN. Ids missing from renewed were
+	// reclaimed and must be abandoned.
+	RenewLeases(ctx context.Context, workerID string, runIDs []string, d time.Duration) (renewed, cancelling []string, err error)
 	HeartbeatWorker(ctx context.Context, w *core.WorkerInfo) error
 
 	// --- catalogue published on boot ---

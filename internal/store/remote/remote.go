@@ -254,6 +254,27 @@ func (s *Store) HeartbeatWorker(ctx context.Context, w *core.WorkerInfo) error {
 	}, nil)
 }
 
+// RenewLeases folds renewal and cancellation into the heartbeat, which is the
+// difference between one WAN round trip per interval and one per running flow.
+// The worker information is left to HeartbeatWorker; this call is only about
+// the runs.
+func (s *Store) RenewLeases(ctx context.Context, workerID string, runIDs []string, d time.Duration) ([]string, []string, error) {
+	if len(runIDs) == 0 {
+		return nil, nil, nil
+	}
+	var out struct {
+		Renewed    []string `json:"renewed"`
+		Lost       []string `json:"lost"`
+		Cancelling []string `json:"cancelling"`
+	}
+	if err := s.do(ctx, http.MethodPost, "/heartbeat", map[string]any{
+		"holding": runIDs, "lease": dur(d),
+	}, &out); err != nil {
+		return nil, nil, err
+	}
+	return out.Renewed, out.Cancelling, nil
+}
+
 // ------------------------------------------------------------- catalogue ---
 
 func (s *Store) UpsertFlow(ctx context.Context, f *core.Flow) error {

@@ -286,6 +286,25 @@ type workerHeartbeatBody struct {
 	Concurrency int       `json:"concurrency"`
 	ActiveRuns  int       `json:"active_runs"`
 	StartedAt   time.Time `json:"started_at"`
+	// Holding lists the runs this worker believes it still owns. Sending them
+	// with the heartbeat is what makes a worker's request rate independent of
+	// how many flows it is running.
+	Holding []string `json:"holding,omitempty"`
+	// Lease is a Go duration for the renewal; empty means the default.
+	Lease string `json:"lease,omitempty"`
+}
+
+// workerHeartbeatReply answers all three questions a worker asks each interval:
+// am I still alive to you, do I still hold these, and has anyone asked me to
+// stop.
+type workerHeartbeatReply struct {
+	Worker *core.WorkerInfo `json:"worker"`
+	// Renewed and Lost partition Holding. A lost run was reclaimed elsewhere and
+	// must be abandoned rather than finished.
+	Renewed []string `json:"renewed"`
+	Lost    []string `json:"lost"`
+	// Cancelling names held runs an operator has asked to stop.
+	Cancelling []string `json:"cancelling"`
 }
 
 func (s *Server) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +322,35 @@ func (s *Server) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, info)
+
+	reply := workerHeartbeatReply{Worker: info, Renewed: []string{}, Lost: []string{}, Cancelling: []string{}}
+	if len(b.Holding) > 0 {
+		lease, err := parseDur(b.Lease)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("lease: %w", err))
+			return
+		}
+		if lease <= 0 {
+			lease = time.Minute
+		}
+		renewed, cancelling, err := s.store.RenewLeases(r.Context(), id.WorkerID, b.Holding, lease)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		held := make(map[string]bool, len(renewed))
+		for _, rid := range renewed {
+			held[rid] = true
+		}
+		reply.Renewed = append(reply.Renewed, renewed...)
+		reply.Cancelling = append(reply.Cancelling, cancelling...)
+		for _, rid := range b.Holding {
+			if !held[rid] {
+				reply.Lost = append(reply.Lost, rid)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, reply)
 }
 
 type workerLeaseRenewBody struct {

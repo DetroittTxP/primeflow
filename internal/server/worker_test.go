@@ -878,3 +878,133 @@ func receive(t *testing.T, ch <-chan string) string {
 		return ""
 	}
 }
+
+// --- phase 5: one call per interval, whatever the worker is holding ---
+
+// The point of folding renewal and cancellation into the heartbeat is that a
+// worker's request rate stops depending on how much work it is doing. Counting
+// requests at two very different concurrencies is the only honest way to say
+// that.
+func TestHeartbeatCostIsIndependentOfHeldRuns(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	if err := a.store.EnsureWorkQueue(ctx, "busy"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := a.issueWorkerKey("busy-site", []string{"busy"})
+
+	var requests atomic.Int32
+	counted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		a.h.ServeHTTP(w, r)
+	}))
+	defer counted.Close()
+
+	rs, err := remote.New(remote.Config{
+		BaseURL: counted.URL, Token: secret, WorkerID: "busy-1",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	measure := func(held int) int32 {
+		for i := 0; i < held; i++ {
+			a.mkRun("busy")
+		}
+		leased, err := rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+			Queues: []string{"busy"}, Max: held, LeaseFor: time.Minute,
+		})
+		if err != nil || len(leased) != held {
+			t.Fatalf("expected to hold %d runs, got %d (%v)", held, len(leased), err)
+		}
+		ids := make([]string, len(leased))
+		for i := range leased {
+			ids[i] = leased[i].ID
+		}
+
+		requests.Store(0)
+		// One interval's worth of conversation.
+		if err := rs.HeartbeatWorker(ctx, &core.WorkerInfo{
+			ID: "busy-1", Name: "busy", Queues: []string{"busy"},
+			Concurrency: held, ActiveRuns: held, StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		renewed, _, err := rs.RenewLeases(ctx, "busy-1", ids, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(renewed) != held {
+			t.Fatalf("renewed %d of %d leases", len(renewed), held)
+		}
+		return requests.Load()
+	}
+
+	atOne := measure(1)
+	atEight := measure(8)
+	if atOne != atEight {
+		t.Fatalf("request cost scales with load: %d requests holding 1 run, %d holding 8", atOne, atEight)
+	}
+	// Two: the liveness beat and the batched renewal. Not 1+N.
+	if atEight > 2 {
+		t.Fatalf("expected at most two calls per interval, got %d", atEight)
+	}
+}
+
+// The same call has to tell a worker what it has lost and what it must stop,
+// because those are the two things it cannot safely guess.
+func TestHeartbeatReportsLostLeasesAndCancellations(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	if err := a.store.EnsureWorkQueue(ctx, "mixed"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := a.issueWorkerKey("mixed-site", []string{"mixed"})
+	for i := 0; i < 2; i++ {
+		a.mkRun("mixed")
+	}
+	srv := httptest.NewServer(a.h)
+	defer srv.Close()
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: secret, WorkerID: "mixed-1",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leased, err := rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+		Queues: []string{"mixed"}, Max: 2, LeaseFor: time.Minute,
+	})
+	if err != nil || len(leased) != 2 {
+		t.Fatalf("lease: %v (%d)", err, len(leased))
+	}
+	keep, stop := leased[0].ID, leased[1].ID
+
+	// One run is asked to stop; the other is reclaimed out from under us.
+	if _, err := a.store.SetFlowRunState(ctx, stop,
+		core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.store.RequestCancel(ctx, stop); err != nil {
+		t.Fatal(err)
+	}
+	stolen := "someone-else"
+	if _, err := a.store.SetFlowRunState(ctx, keep,
+		core.NewState(core.StateRunning, "Running", ""),
+		store.StateOpts{WorkerID: &stolen}); err != nil {
+		t.Fatal(err)
+	}
+
+	renewed, cancelling, err := rs.RenewLeases(ctx, "mixed-1", []string{keep, stop}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(renewed) != 1 || renewed[0] != stop {
+		t.Fatalf("renewed = %v, want just the run we still hold (%s)", renewed, stop)
+	}
+	if len(cancelling) != 1 || cancelling[0] != stop {
+		t.Fatalf("cancelling = %v, want %s", cancelling, stop)
+	}
+}
