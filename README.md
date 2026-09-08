@@ -533,6 +533,9 @@ documented: a single VM below, Kubernetes, and
 [workers at a remote site](#workers-at-a-remote-site) for a VM that should hold
 no database credential.
 
+For the container path — one image, a control-plane VM and a worker VM — see
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
 ### On a single VM
 
 Two ways to run it, both ending at the same place. Use Compose if Docker is
