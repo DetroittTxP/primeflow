@@ -142,6 +142,19 @@
   .seg button + button { border-left: 1px solid var(--line); }
   .seg button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 
+  /* row actions folded behind a "⋯" -- see rowMenu() */
+  button.act.kebab { padding: 5px 9px; line-height: 1; }
+  .menu[popover] {
+    position: fixed; inset: auto; margin: 0; padding: 4px; min-width: 152px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow);
+  }
+  .menu button {
+    display: block; width: 100%; text-align: left; font: inherit; color: var(--ink);
+    background: none; border: 0; border-radius: 6px; padding: 6px 10px; cursor: pointer; white-space: nowrap;
+  }
+  .menu button:hover { background: var(--accent-soft); color: var(--accent); }
+  .menu button.danger:hover { background: color-mix(in srgb, var(--err) 13%, transparent); color: var(--err); }
+
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .muted { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -855,6 +868,11 @@ function show(v, replace) {
   refreshCurrent();
 }
 function refreshCurrent() {
+  // A refresh rebuilds the table's rows, which would yank an open "⋯" menu
+  // out from under the pointer -- and live events can land at any moment. Let
+  // the menu win: closing it is one click, and the next tick catches the view
+  // up. Actions taken from the menu close it before their refresh lands.
+  if (document.querySelector('.menu:popover-open')) return;
   ({ dashboard: loadDashboard,
      runs: loadRuns,
      flows: loadFlowsPage,
@@ -1031,15 +1049,13 @@ async function loadQueues() {
       <td>${push ? '—' : online(q.name)}</td>
       <td>${push ? '<span class="muted">dispatched</span>' : `<b>${desiredWorkers(q)}</b> <span class="muted">${q.min_workers || 0}–${q.max_workers ?? '∞'}</span>`}</td>
       <td class="muted">${esc(q.owner || '—')}</td>
-      <td class="row">
-        <button class="act writer-only" onclick="act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})">
-          ${q.paused ? 'Resume' : 'Pause'}</button>
-        <button class="act writer-only" onclick="setLimit('${esc(q.name)}', ${q.concurrency_limit ?? 'null'})">Limit…</button>
-        ${push
-          ? `<button class="act writer-only" onclick='setPushEndpoint(${JSON.stringify(q)})'>Push endpoint…</button>`
-          : `<button class="act writer-only" onclick='setAutoscale(${JSON.stringify(q)})'>Autoscale…</button>
-             <button class="act writer-only" onclick="setPushEndpoint({name:'${esc(q.name)}',pool_type:'pull'})">Make push…</button>`}
-      </td>
+      ${menuCell([
+        [q.paused ? 'Resume' : 'Pause', `act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})`],
+        ['Limit…', `setLimit(${JSON.stringify(q.name)}, ${q.concurrency_limit ?? 'null'})`],
+        push ? ['Push endpoint…', `setPushEndpoint(${JSON.stringify(q)})`]
+             : ['Autoscale…', `setAutoscale(${JSON.stringify(q)})`],
+        !push && ['Make push…', `setPushEndpoint({name:${JSON.stringify(q.name)},pool_type:'pull'})`],
+      ], 'writer-only')}
     </tr>`;
   }).join('');
   const pick = document.getElementById('q-pick');
@@ -1153,14 +1169,14 @@ async function loadPending() {
       <td>${esc(r.flow_name)}</td>
       <td>${prio(r)}</td>
       <td>${when(r.scheduled_at)}</td>
-      <td class="row writer-only">
-        <button class="act" onclick="act('/runs/${r.id}/front',{method:'POST'})" title="Run this next">▲ Front</button>
-        <button class="act" onclick="bump('${r.id}', 100)">Urgent</button>
-        <button class="act" onclick="bump('${r.id}', 50)">Normal</button>
-        <button class="act" onclick="act('/runs/${r.id}/back',{method:'POST'})">▼ Back</button>
-        ${r.queue_position != null ? `<button class="act" onclick="act('/runs/${r.id}/unpin',{method:'POST'})">Unpin</button>` : ''}
-        <button class="act" onclick="moveQueue('${r.id}')">Move…</button>
-      </td>
+      ${menuCell([
+        ['<span title="Run this next">▲ Front</span>', `act('/runs/${r.id}/front',{method:'POST'})`],
+        ['Urgent', `bump('${r.id}', 100)`],
+        ['Normal', `bump('${r.id}', 50)`],
+        ['▼ Back', `act('/runs/${r.id}/back',{method:'POST'})`],
+        r.queue_position != null && ['Unpin', `act('/runs/${r.id}/unpin',{method:'POST'})`],
+        ['Move…', `moveQueue('${r.id}')`],
+      ], 'writer-only')}
     </tr>`).join('') : '<tr><td colspan="6" class="empty">Queue is empty.</td></tr>';
 }
 
@@ -1301,6 +1317,53 @@ async function quickRun(ev, flow) {
 }
 const safeJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
+// Every table's row actions hang off a "⋯" button instead of sitting inline:
+// a row of four or five buttons wrapped onto two lines and buried the row's
+// own data, and the actions moved around as the buttons on offer changed.
+//
+// Items are [label, javascript] pairs, falsy entries dropped so a caller can
+// write `cond && [...]`; a third element marks a destructive item. A row with
+// nothing left to offer gets no button at all, only the empty cell that keeps
+// the column count. The label is HTML, the javascript is an onclick body --
+// esc() lets it carry the quotes that JSON.stringify puts in.
+function menuCell(items, cls) {
+  const on = items.filter(Boolean);
+  if (!on.length) return `<td class="${cls || ''}"></td>`;
+  return `<td class="${cls || ''}" style="text-align:right">
+    <button class="act kebab" title="Actions" aria-haspopup="menu" onclick="rowMenu(this)">⋯</button>
+    <div class="menu" role="menu" popover onclick="this.hidePopover()">
+      ${on.map(([label, js, danger]) =>
+        `<button role="menuitem"${danger ? ' class="danger"' : ''} onclick="${esc(js)}">${label}</button>`).join('')}
+    </div>
+  </td>`;
+}
+
+// The menu is a popover, so it lives in the top layer -- an absolutely
+// positioned one would be clipped by the .scroll box around the table -- and
+// the browser handles Esc and click-outside for us. It only has to be placed,
+// which means closing it when the page scrolls out from under it.
+function rowMenu(btn) {
+  const m = btn.nextElementSibling, r = btn.getBoundingClientRect();
+  m.style.top = '0px';
+  m.style.left = '0px';
+  m.showPopover();
+  // Measured only once it is shown: hang the menu under the button, or above
+  // it when the last rows of a long table would push it off screen.
+  const below = r.bottom + 4;
+  m.style.top = (below + m.offsetHeight > innerHeight - 8 && r.top - 4 - m.offsetHeight > 8
+    ? r.top - 4 - m.offsetHeight : below) + 'px';
+  m.style.left = Math.max(8, r.right - m.offsetWidth) + 'px';
+  // Arm the listeners a frame late: scroll events are dispatched before the
+  // next frame's callbacks, so a scroll already in flight when the menu opened
+  // -- trackpad momentum, a scrollIntoView -- would otherwise shut it again at
+  // once. Capture, because the scroll is the table's .scroll box, not the page.
+  const close = () => { if (m.matches(':popover-open')) m.hidePopover(); };
+  requestAnimationFrame(() => {
+    addEventListener('scroll', close, { once: true, capture: true });
+    addEventListener('resize', close, { once: true });
+  });
+}
+
 async function loadDeployments() {
   const [ds, ctx] = await Promise.all([api('/deployments').then(x => x || []), poolContext()]);
   document.getElementById('deployments').innerHTML = ds.length ? ds.map(d => `
@@ -1311,12 +1374,12 @@ async function loadDeployments() {
       <td>${esc(d.work_queue)}${poolPill(poolBlocker(ctx.pool[d.work_queue], ctx.online(d.work_queue)))}</td>
       <td>${d.priority}</td>
       <td>${d.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
-      <td class="row writer-only">
-        <button class="act primary" onclick="act('/deployments/${d.id}/run',{method:'POST',body:'{}'})">Run now</button>
-        <button class="act" onclick="openDeploymentRun('${esc(d.id)}')">Run…</button>
-        <button class="act" onclick="act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})">${d.paused ? 'Resume' : 'Pause'}</button>
-        <button class="act" onclick="if(confirm('Delete deployment ${esc(d.name)}?'))act('/deployments/${d.id}',{method:'DELETE'})">Delete</button>
-      </td>
+      ${menuCell([
+        ['Run now', `act('/deployments/${d.id}/run',{method:'POST',body:'{}'})`],
+        ['Run…', `openDeploymentRun('${d.id}')`],
+        [d.paused ? 'Resume' : 'Pause', `act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})`],
+        ['Delete', `if(confirm('Delete deployment ' + ${JSON.stringify(d.name)} + '?'))act('/deployments/${d.id}',{method:'DELETE'})`, true],
+      ], 'writer-only')}
     </tr>`).join('') : '<tr><td colspan="7" class="empty">No deployments yet.</td></tr>';
 }
 
@@ -1419,7 +1482,7 @@ async function loadAutomations() {
       <td>${a.threshold}${a.window ? ' / ' + Math.round(a.window / 1e9) + 's' : ''}</td>
       <td class="mono">${esc(a.action)}</td>
       <td>${when(a.last_fired_at)}</td>
-      <td class="writer-only"><button class="act" onclick="if(confirm('Delete ${esc(a.name)}?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
+      <td class="writer-only"><button class="act" onclick="if(confirm('Delete ' + ${esc(JSON.stringify(a.name))} + '?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No automations yet.</td></tr>';
 }
 
@@ -2270,12 +2333,12 @@ async function loadKeys() {
       <td>${when(k.last_used_at)}</td>
       <td>${k.expires_at ? esc(new Date(k.expires_at).toLocaleDateString()) : '—'}</td>
       <td>${k.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">inactive</span>'}</td>
-      <td class="row">
-        <button class="act" onclick="openKeyForm('${k.id}')">Edit</button>
-        <button class="act" onclick="keyHistory('${k.id}')">History</button>
-        <button class="act" onclick="rotateKey('${k.id}')">Rotate</button>
-        <button class="act" onclick="deleteKey('${k.id}')">Delete</button>
-      </td>
+      ${menuCell([
+        ['Edit', `openKeyForm('${k.id}')`],
+        ['History', `keyHistory('${k.id}')`],
+        ['Rotate', `rotateKey('${k.id}')`],
+        ['Delete', `deleteKey('${k.id}')`, true],
+      ])}
     </tr>`;
   }).join('') : '<tr><td colspan="9" class="empty">No API keys yet.</td></tr>';
 }
@@ -2390,11 +2453,11 @@ async function loadUsers() {
       </select></td>
       <td>${u.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">disabled</span>'}</td>
       <td>${when(u.last_login_at)}</td>
-      <td class="row">
-        ${sso ? '' : `<button class="act" onclick="resetUserPw('${u.id}')">Reset password</button>
-        <button class="act" onclick="resetLink('${u.id}')">Reset link</button>`}
-        <button class="act" onclick="setUserActive('${u.id}', ${!u.active})">${u.active ? 'Deactivate' : 'Activate'}</button>
-      </td>
+      ${menuCell([
+        !sso && ['Reset password', `resetUserPw('${u.id}')`],
+        !sso && ['Reset link', `resetLink('${u.id}')`],
+        [u.active ? 'Deactivate' : 'Activate', `setUserActive('${u.id}', ${!u.active})`],
+      ])}
     </tr>`;
   }).join('');
 }

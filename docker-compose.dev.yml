@@ -1,0 +1,45 @@
+# Hot-reload overlay for docker-compose.yml. Postgres, NATS and Redis are
+# unchanged; server, worker and push-worker swap the production image for
+# Dockerfile.dev, mount the source, and let air rebuild on save.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#   make dev              # the same thing
+#
+# Edit a .go file — or internal/server/ui/index.html, which is embedded in the
+# binary — and only the affected service restarts, in a second or two. The
+# module and build caches are named volumes, so a `down` does not cost you a
+# cold compile. Ports, env and dependencies all come from the base file.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: primeflow-dev
+    command: ["air", "-c", ".air.server.toml"]
+    volumes: [".:/src", "gomodcache:/go/pkg/mod", "gobuildcache:/root/.cache/go-build"]
+
+  push-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: primeflow-dev
+    # The base file sets an entrypoint of its own; replace it, don't append.
+    entrypoint: ["air", "-c", ".air.push-worker.toml"]
+    volumes: [".:/src", "gomodcache:/go/pkg/mod", "gobuildcache:/root/.cache/go-build"]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: primeflow-dev
+    entrypoint: ["air", "-c", ".air.worker.toml"]
+    volumes: [".:/src", "gomodcache:/go/pkg/mod", "gobuildcache:/root/.cache/go-build"]
+    # One replica in dev: two would race to write the same rebuilt binary on
+    # the shared mount. Scale a pool the usual way when you want more:
+    # docker compose ... up -d --scale worker=3
+    deploy:
+      replicas: 1
+
+volumes:
+  gomodcache:
+  gobuildcache:

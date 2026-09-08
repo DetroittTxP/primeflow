@@ -3,3 +3,4 @@ bin/
 .env
 sites/*.env
 !sites/tls.env
+tmp/

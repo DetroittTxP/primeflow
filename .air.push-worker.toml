@@ -1,0 +1,24 @@
+# Rebuild loop for the example worker in push mode: same binary and watch set as
+# .air.worker.toml, started with -push. Its own file because air takes the
+# flag from here, not from the command line.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd  = "go build -o ./tmp/push-worker ./examples/primex-worker"
+  bin  = "./tmp/push-worker"
+  args_bin = ["-push"]
+  log = "build-errors-push-worker.log"
+  include_ext = ["go", "html", "sql"]
+  exclude_dir = ["bin", "tmp", "docs", "deploy", "sites", "resources", ".git", ".claude"]
+  exclude_regex = ["_test\\.go"]
+  delay = 300
+  # SIGINT lets the worker drop its leases on the way out, so a rebuild does not
+  # park a running task until the lease expires.
+  send_interrupt = true
+  kill_delay = "3s"
+  stop_on_error = false
+  poll = false
+
+[misc]
+  clean_on_exit = false

@@ -1,0 +1,30 @@
+# Development image: the opposite trade-off from Dockerfile. That one throws the
+# toolchain away and ships a static binary; this one keeps the toolchain, takes
+# the source from a bind mount, and lets `air` rebuild in place on every save.
+# Never deploy it — it runs as root and carries a compiler.
+FROM golang:1.25-alpine
+
+# git is what `go mod download` needs for VCS-backed modules.
+RUN apk add --no-cache git ca-certificates
+
+# Pinned so a dev image built today matches one built in six months. Bump with
+# --build-arg AIR_VERSION=vX.Y.Z.
+ARG AIR_VERSION=v1.63.0
+RUN go install github.com/air-verse/air@${AIR_VERSION}
+
+WORKDIR /src
+
+# Warm the module cache in the image, so the first rebuild after `up` is a
+# compile rather than a download. The source bind mount hides /src, but
+# GOMODCACHE (/go/pkg/mod) and GOCACHE live outside it and survive — compose
+# also keeps both in named volumes so they outlive the container.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Matches the production build: no cgo, so a rebuild is one static link.
+ENV CGO_ENABLED=0
+
+EXPOSE 8080 8090
+
+# docker-compose.dev.yml overrides this per service.
+CMD ["air", "-c", ".air.server.toml"]

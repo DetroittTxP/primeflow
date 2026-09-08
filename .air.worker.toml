@@ -1,0 +1,22 @@
+# Rebuild loop for the example worker (examples/primex-worker) in pull mode.
+# See .air.server.toml for why tmp_dir is a single shared level.
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd  = "go build -o ./tmp/worker ./examples/primex-worker"
+  bin  = "./tmp/worker"
+  log = "build-errors-worker.log"
+  include_ext = ["go", "html", "sql"]
+  exclude_dir = ["bin", "tmp", "docs", "deploy", "sites", "resources", ".git", ".claude"]
+  exclude_regex = ["_test\\.go"]
+  delay = 300
+  # SIGINT lets the worker drop its leases on the way out, so a rebuild does not
+  # park a running task until the lease expires.
+  send_interrupt = true
+  kill_delay = "3s"
+  stop_on_error = false
+  poll = false
+
+[misc]
+  clean_on_exit = false

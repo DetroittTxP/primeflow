@@ -1,0 +1,36 @@
+# Rebuild loop for `primeflow server`. Used by docker-compose.dev.yml; it also
+# works on the host if you have a Go toolchain and `air` on PATH.
+root = "."
+# Single level on purpose: air's mkdir is not recursive, so a nested tmp_dir
+# fails outright. The three services share this directory and differ by binary
+# and log name.
+tmp_dir = "tmp"
+
+[build]
+  cmd  = "go build -o ./tmp/server ./cmd/primeflow"
+  bin  = "./tmp/server"
+  args_bin = ["server"]
+  log = "build-errors-server.log"
+  # html is in here on purpose: the console is compiled into the binary with
+  # //go:embed (internal/server/ui.go), so editing index.html is a Go rebuild.
+  # sql likewise — internal/store/postgres embeds the migrations.
+  include_ext = ["go", "html", "sql"]
+  exclude_dir = ["bin", "tmp", "docs", "deploy", "sites", "resources", ".git", ".claude"]
+  exclude_regex = ["_test\\.go"]
+  # Coalesce the burst of events an editor emits when it saves.
+  delay = 300
+  # SIGINT first, so the server drains and releases its leader lease instead of
+  # leaving the next process to wait out a stale row.
+  send_interrupt = true
+  kill_delay = "3s"
+  # A build failure keeps the last good binary running and prints the error;
+  # the next save retries.
+  stop_on_error = false
+  # Bind mounts deliver inotify events fine here. If a save is not picked up on
+  # your machine, set this to true to fall back to polling.
+  poll = false
+
+[misc]
+  # tmp/ is shared, so cleaning it on exit would delete the binaries the other
+  # two services are running.
+  clean_on_exit = false

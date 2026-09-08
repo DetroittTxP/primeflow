@@ -13,7 +13,7 @@ SEED_PASSWORD ?= primeflow-demo
 SEED_RUNS     ?= 0
 SEED_ARGS     ?=
 
-.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker seed seed-compose docker clean tidy
+.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker seed seed-compose dev dev-down docker clean tidy
 
 all: build
 
@@ -61,6 +61,17 @@ seed: build ## Seed queues, deployments and demo accounts into $(TEST_DB)
 seed-compose: ## Seed the docker-compose stack's database
 	docker compose run --rm --build server seed \
 		-password "$(SEED_PASSWORD)" -runs $(SEED_RUNS) $(SEED_ARGS)
+
+# The compose stack rebuilt on every save. Dockerfile.dev keeps the Go
+# toolchain in the image and air watches the bind-mounted source; the caches are
+# named volumes, so `dev-down` is cheap to undo.
+DEV_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.dev.yml
+
+dev: ## Bring the stack up with hot reload (air rebuilds server and workers on save)
+	$(DEV_COMPOSE) up --build
+
+dev-down: ## Stop the hot-reload stack (keeps the build caches)
+	$(DEV_COMPOSE) down
 
 docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) -t detroitttttxp/primeflow:$(VERSION) -t detroitttttxp/primeflow:latest .

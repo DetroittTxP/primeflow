@@ -1,3 +1,8 @@
 bin/
 .git/
 *.log
+# air's rebuild output, written into the bind mount by docker-compose.dev.yml.
+tmp/
+# Agent scratch state, including full worktree checkouts of this repo. Nothing
+# in the build needs it, and `COPY . .` would otherwise bake it into a layer.
+.claude/
