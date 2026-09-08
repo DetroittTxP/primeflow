@@ -117,7 +117,7 @@ func (s *Store) ListChildRuns(ctx context.Context, parentID string) ([]core.Flow
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []core.FlowRun
+	out := []core.FlowRun{}
 	for rows.Next() {
 		r, err := scanFlowRun(rows)
 		if err != nil {
