@@ -1226,6 +1226,21 @@ func main() {
 		sdk.Timeout(30*time.Minute),
 	)
 
+	sdk.Flow("resize-vm", sdk.Typed(resizeVM),
+		sdk.Description("Reconfigure a VM's CPU, memory, disks and labels — one parameter of every type"),
+		sdk.Tags("primex", "vcd", "resize"),
+		// A populated value, not a zero one: the non-zero fields become the
+		// examples the console shows as input placeholders.
+		sdk.ParamsSchema(ResizeParams{
+			OrgName: "acme", VMName: "web-01", CPU: 4, MemoryGB: 8,
+			Restart: true, AddDisks: []string{"data-01"},
+			Labels: map[string]string{"env": "prod"},
+		}),
+		sdk.Retries(1),
+		sdk.RetryDelay(30*time.Second),
+		sdk.Timeout(30*time.Minute),
+	)
+
 	sdk.Flow("collect-metering", collectMetering,
 		sdk.Description("Collect per-org usage from Cloud Director and hand it to billing"),
 		sdk.Tags("primex", "metering"),

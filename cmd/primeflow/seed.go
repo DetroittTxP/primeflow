@@ -88,6 +88,17 @@ func seedDeployments() []core.Deployment {
 			Retries: 2, RetryDelay: 15 * time.Second, Timeout: 30 * time.Minute,
 		},
 		{
+			// The deployment to open the console's "Run…" dialog on: its stored
+			// parameters cover every type the form renders, so the dialog opens
+			// pre-filled on all of them rather than on a JSON textarea.
+			Name: "resize-vm-web-01", FlowName: "resize-vm",
+			Description: "Reconfigure one VM — the worked example for running with parameters",
+			Parameters: json.RawMessage(`{"org_name":"acme","vm_name":"web-01","cpu":4,` +
+				`"memory_gb":8,"restart":true,"add_disks":["data-01"],"labels":{"env":"prod"}}`),
+			WorkQueue: "vcd", Tags: []string{"demo", "vcd", "resize"},
+			Retries: 1, RetryDelay: 30 * time.Second, Timeout: 30 * time.Minute,
+		},
+		{
 			Name: "provision-fleet-acme", FlowName: "provision-fleet",
 			Description: "Three child VM builds with a durable wait between them",
 			Parameters:  json.RawMessage(`{"org_name":"acme","template":"ubuntu-22.04","count":3}`),
