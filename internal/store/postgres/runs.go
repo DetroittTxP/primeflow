@@ -421,8 +421,8 @@ func (s *Store) SetFlowRunState(ctx context.Context, id string, st core.State, o
 
 // LeaseFlowRuns is the dispatcher.
 //
-// For each queue the worker polls, it claims up to the remaining capacity in a
-// single statement. Ordering is:
+// For each queue the worker polls, it claims up to the remaining capacity.
+// Ordering is:
 //
 //  1. queue_position ascending, NULLs last  — operator pins jump the line
 //  2. priority descending                   — urgent work before background work
@@ -439,7 +439,101 @@ func (s *Store) LeaseFlowRuns(ctx context.Context, req store.LeaseRequest) ([]co
 	}
 	lease := fmt.Sprintf("%d milliseconds", req.LeaseFor.Milliseconds())
 
-	stmt := `
+	var out []core.FlowRun
+	remaining := req.Max
+	for _, qn := range req.Queues {
+		if remaining <= 0 {
+			break
+		}
+		// One transaction per lane, committed before the next one opens. A
+		// worker watching several lanes must never hold two dispatch locks at
+		// once: two workers whose PRIMEFLOW_QUEUES lists are in different orders
+		// would then wait on each other.
+		got, err := s.leaseFromQueue(ctx, req.WorkerID, qn, remaining, lease)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, got...)
+		remaining -= len(got)
+	}
+	return out, nil
+}
+
+// leaseFromQueue claims from one lane, inside one transaction.
+//
+// A lane that carries a concurrency limit is serialised with a
+// transaction-scoped advisory lock, and that lock is what makes the limit
+// exact. Under READ COMMITTED every statement takes its own snapshot, so two
+// dispatchers running at the same instant both count the same "active" total,
+// both see the full headroom, and both admit up to it — a lane capped at two
+// admits two per dispatcher, not two in total. Taking the lock in an earlier
+// statement of the same transaction forces the second dispatcher to count in a
+// statement that begins after the first one committed, so its snapshot already
+// contains those PENDING rows.
+//
+// An uncapped lane takes no lock at all. There is nothing to serialise, and it
+// keeps the fully parallel behaviour SKIP LOCKED gives it today.
+//
+// Lock ordering is total and cannot cycle: the advisory lock is always taken
+// first, the row locks that follow use SKIP LOCKED and never wait, and no
+// transaction ever holds more than one advisory lock.
+func (s *Store) leaseFromQueue(ctx context.Context, workerID, queue string, max int, lease string) ([]core.FlowRun, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op once Commit has run
+
+	var paused bool
+	var limit sql.NullInt64
+	err = tx.QueryRowContext(ctx,
+		`SELECT paused, concurrency_limit FROM pf_work_queues WHERE name = $1`, queue).
+		Scan(&paused, &limit)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil // a lane nobody has declared holds no work
+	case err != nil:
+		return nil, mapErr(err)
+	case paused:
+		return nil, nil // stop the lane, keep the work
+	}
+
+	if limit.Valid {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtext('pf_dispatch:' || $1)::bigint)`, queue); err != nil {
+			return nil, mapErr(err)
+		}
+	}
+
+	rows, err := tx.QueryContext(ctx, dispatchStmt, workerID, queue, max, lease)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	var out []core.FlowRun
+	for rows.Next() {
+		r, err := scanFlowRun(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if err := tx.Commit(); err != nil {
+		return nil, mapErr(err)
+	}
+	return out, nil
+}
+
+// dispatchStmt claims ready runs from one lane. The concurrency headroom is
+// still computed here; leaseFromQueue is what guarantees only one dispatcher
+// per capped lane evaluates it at a time.
+var dispatchStmt = `
 WITH cap AS (
     SELECT q.paused,
            q.concurrency_limit,
@@ -474,34 +568,6 @@ UPDATE pf_flow_runs r
   FROM cand
  WHERE r.id = cand.id
 RETURNING ` + prefixCols("r.", flowRunCols)
-
-	var out []core.FlowRun
-	remaining := req.Max
-	for _, qn := range req.Queues {
-		if remaining <= 0 {
-			break
-		}
-		rows, err := s.db.QueryContext(ctx, stmt, req.WorkerID, qn, remaining, lease)
-		if err != nil {
-			return out, mapErr(err)
-		}
-		for rows.Next() {
-			r, err := scanFlowRun(rows)
-			if err != nil {
-				rows.Close()
-				return out, err
-			}
-			out = append(out, *r)
-			remaining--
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return out, err
-		}
-	}
-	return out, nil
-}
 
 // prefixCols qualifies a comma-separated column list with a table alias.
 func prefixCols(prefix, cols string) string {

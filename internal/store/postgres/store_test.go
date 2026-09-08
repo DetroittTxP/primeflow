@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -251,6 +252,178 @@ func TestEnsureWorkQueuePreservesConfiguration(t *testing.T) {
 	}
 	if fresh.Paused || fresh.ConcurrencyLimit != nil {
 		t.Errorf("unexpected defaults on a fresh lane: %+v", fresh)
+	}
+}
+
+// The limit has to hold when several workers dispatch at the same instant, not
+// only when they take turns. Before the dispatch lock each of them counted the
+// same zero active runs and each admitted the full headroom, so a lane capped
+// at two handed out two runs *per worker*.
+//
+// The goroutines are given a warm connection before the barrier: without that,
+// TCP setup staggers them far enough apart that the race does not reproduce.
+func TestQueueConcurrencyLimitHoldsUnderConcurrentDispatch(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	const workers, rounds = 8, 6
+	limit := 2
+
+	for round := 0; round < rounds; round++ {
+		lane := fmt.Sprintf("capped-%d", round)
+		if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: lane, ConcurrencyLimit: &limit}); err != nil {
+			t.Fatal(err)
+		}
+		past := time.Now().UTC().Add(-time.Minute)
+		for i := 0; i < workers*2; i++ {
+			mkRun(t, st, lane, 50, past)
+		}
+
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			total int
+		)
+		ready := make(chan struct{}, workers)
+		start := make(chan struct{})
+		errs := make(chan error, workers)
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func(n int) {
+				defer wg.Done()
+				// Warm this goroutine's path through the pool, then wait.
+				if _, err := st.GetWorkQueue(ctx, lane); err != nil {
+					errs <- err
+					ready <- struct{}{}
+					return
+				}
+				ready <- struct{}{}
+				<-start
+				runs, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+					WorkerID: fmt.Sprintf("w%d", n), Queues: []string{lane},
+					Max: 10, LeaseFor: time.Minute,
+				})
+				if err != nil {
+					errs <- err
+					return
+				}
+				mu.Lock()
+				total += len(runs)
+				mu.Unlock()
+			}(i)
+		}
+		for i := 0; i < workers; i++ {
+			<-ready
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatal(err)
+		}
+		if total != limit {
+			t.Fatalf("round %d: limit leaked under concurrent dispatch: %d runs leased across %d workers, want %d",
+				round, total, workers, limit)
+		}
+	}
+}
+
+// The serialisation is only worth anything if it actually holds a dispatcher
+// off while another one is mid-dispatch. Taking the lane's dispatch lock by
+// hand and watching a lease block on it asserts the mechanism directly, without
+// depending on a race reproducing.
+func TestCappedLaneDispatchIsSerialised(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	limit := 2
+	if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: "held", ConcurrencyLimit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 6; i++ {
+		mkRun(t, st, "held", 50, past)
+	}
+
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext('pf_dispatch:' || $1)::bigint)`, "held"); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		runs, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+			WorkerID: "blocked", Queues: []string{"held"}, Max: 10, LeaseFor: time.Minute,
+		})
+		if err != nil {
+			done <- -1
+			return
+		}
+		done <- len(runs)
+	}()
+
+	select {
+	case n := <-done:
+		t.Fatalf("dispatch was not serialised: it leased %d runs while the lane's dispatch lock was held", n)
+	case <-time.After(400 * time.Millisecond):
+		// Correct: it is waiting on the lock.
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-done:
+		if n != limit {
+			t.Fatalf("after the lock was released the dispatcher leased %d, want %d", n, limit)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("dispatch never completed after the lock was released")
+	}
+}
+
+// Serialising a capped lane must not reintroduce the deadlock the design has
+// always been free of. Two capped lanes, two workers polling them in opposite
+// order: holding both dispatch locks in one transaction would wedge here, and
+// Postgres would report a deadlock rather than hang.
+func TestDispatchAcrossLanesDoesNotDeadlock(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	limit := 2
+	for _, n := range []string{"lane-a", "lane-b"} {
+		if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: n, ConcurrencyLimit: &limit}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 10; i++ {
+		mkRun(t, st, "lane-a", 50, past)
+		mkRun(t, st, "lane-b", 50, past)
+	}
+
+	orders := [][]string{{"lane-a", "lane-b"}, {"lane-b", "lane-a"}}
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for round := 0; round < 8; round++ {
+		for i, queues := range orders {
+			wg.Add(1)
+			go func(id string, qs []string) {
+				defer wg.Done()
+				if _, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+					WorkerID: id, Queues: qs, Max: 4, LeaseFor: time.Minute,
+				}); err != nil {
+					errs <- err
+				}
+			}(fmt.Sprintf("w%d-%d", round, i), queues)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("dispatch deadlocked or errored: %v", err)
 	}
 }
 
