@@ -472,6 +472,7 @@ pkg/sdk/                the authoring surface — flows, tasks, waits, artifacts
 pkg/primeflow/          wiring, so a worker's main() is five lines
 internal/core/          domain model and the state transition table
 internal/store/         persistence interface + PostgreSQL implementation
+internal/store/remote/  the same worker-facing interface over /api/v1/worker (remote sites)
 internal/engine/        durable execution: checkpoints, retries, cancellation
 internal/worker/        leasing, heartbeats, graceful drain
 internal/server/        REST API, SSE stream, embedded console
@@ -482,6 +483,8 @@ internal/metrics/       Prometheus registry + scrape-time queue collector
 internal/otelinit/      OTLP tracing setup (no-op unless an endpoint is set)
 examples/primex-worker/ VM provisioning, metering, and a sub-flow fleet demo
 deploy/k8s/             manifests + KEDA/HPA autoscaling examples
+docker-compose.sites.yml, sites/
+                        remote-site simulation: site workers, key issuing, nginx edge
 ```
 
 ---
@@ -646,8 +649,12 @@ rendered from that worker's live config, and the **package list** the host needs
 tags — e.g. a `vcd` tag adds "VMware Cloud Director API + client library").
 
 **Add worker…** is a full page, not a modal. It captures name / concurrency /
-image, the pools it serves (**+ Create pool…** inline), a **host-requirements
-checklist that gates generation**, and a **Delivery** method:
+image, the pools it serves (**+ Create pool…** inline), a **Connection** mode —
+*Database* (DSN + bus, for a worker beside Postgres) or *API* (a remote site:
+`PRIMEFLOW_API_URL` plus a pool-scoped `api-worker` key, which an admin can mint
+inline with **Issue key…**, scoped to exactly the pools ticked) — a
+**host-requirements checklist that gates generation** (its network line follows
+the mode), and a **Delivery** method:
 
 - **Git commit + PR/MR** (default) — renders `secret.yaml`, `deployment.yaml`,
   `kustomization.yaml`, then `git clone → checkout -b → add → commit → push` and
@@ -711,7 +718,9 @@ export PRIMEFLOW_QUEUES="site-bkk"
 ./primex-worker                            # no PRIMEFLOW_DATABASE_URL
 ```
 
-Issue the key from **Settings → External API**, or:
+Issue the key from **Workers → Add worker…** (Connection: *API*, then
+**Issue key…** — the page renders the site's `worker.env`, systemd unit or
+manifests with the key already in place), from **Settings → External API**, or:
 
 ```bash
 curl -X POST $PRIMEFLOW_API_URL/api/v1/api-keys -d '{
@@ -743,6 +752,155 @@ repeated.
 a remote worker beside the existing database-connected one, watch both take work
 from the lane, then stop the old one and remove its DSN. Nothing needs to happen
 at once, and the two kinds of worker are interchangeable from the server's side.
+
+### Deploying to a site VM
+
+The worker is one static binary with your flows compiled in, so a site gets a
+file, an env file and a unit — no runtime, no package manager, no git access.
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+  -o primex-worker ./examples/primex-worker      # or your own main()
+```
+
+```ini
+# /etc/primeflow/worker.env — the whole configuration of a site
+PRIMEFLOW_API_URL=https://primeflow.example.com
+PRIMEFLOW_WORKER_TOKEN=pmx_…
+PRIMEFLOW_QUEUES=site-bkk
+PRIMEFLOW_WORKER_NAME=site-bkk-vm1
+PRIMEFLOW_CONCURRENCY=4
+PRIMEFLOW_METRICS_ADDR=127.0.0.1:9090       # the only port a worker opens; keep it on loopback
+```
+
+```ini
+# /etc/systemd/system/primeflow-worker.service
+[Unit]
+Description=PrimeFlow worker (site-bkk)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=primeflow
+EnvironmentFile=/etc/primeflow/worker.env
+ExecStart=/usr/local/bin/primex-worker
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`TimeoutStopSec` is the same knob as `terminationGracePeriodSeconds` on
+Kubernetes: long enough to reach the next checkpoint, harmless past it.
+`Restart=always` is what turns a crash into a resume — the new process gets a
+new worker id, the old lease expires, and the run continues from its
+checkpoints on whichever worker in the pool leases it next.
+
+The first two log lines tell you it worked: `worker store: primeflow api`, then
+`wake-up stream connected`. The worker appears in **Workers** with its pools.
+Trigger a run on one of them and watch scheduled → completed: well under a
+second means the stream is doing the waking; a steady ~15s means something
+between the site and the server is buffering it (see the proxy notes below).
+
+Things that bite:
+
+- `PRIMEFLOW_QUEUES` must lie inside the key's `pools`. Lanes outside it are
+  silently dropped from every lease, so a mismatched worker looks healthy and
+  never takes work.
+- Remote mode runs workers only. `primeflow server` and `primeflow migrate`
+  refuse to start without a database rather than guess.
+- A `PRIMEFLOW_DATABASE_URL` set alongside the API variables is ignored with a
+  warning. Remove it, so the box holds no credential it does not use.
+- To rotate: **Settings → External API → Rotate** (or `POST
+  /api/v1/api-keys/{id}/rotate`), update the env file, restart the unit.
+
+### The proxy in front of the server
+
+The server speaks plain HTTP on `PRIMEFLOW_HTTP_ADDR`. Whatever terminates 443
+in front of it has to get two things right, and both fail silently:
+
+- **Do not buffer `/api/v1/worker/stream`.** It is server-sent events. A proxy
+  that holds the bytes turns sub-second dispatch into the 15s poll, and nothing
+  reports an error.
+- **Re-resolve the upstream.** nginx resolves a name in `proxy_pass` once, at
+  start-up. Behind Docker or any DNS-based discovery the server moves on a
+  restart and the proxy keeps the old address.
+
+[`sites/nginx.conf`](sites/nginx.conf) does both and is meant to be lifted:
+
+```nginx
+resolver 127.0.0.11 valid=10s;              # your resolver outside Docker
+set $upstream http://server:8080;
+
+location /api/v1/worker/stream {
+    proxy_pass $upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+location / {
+    proxy_pass $upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+}
+```
+
+Set `PRIMEFLOW_TRUSTED_PROXY_CIDRS` to the proxy's network if any key uses an
+IP allow-list or a required client certificate — that is what lets the server
+believe `X-Forwarded-For` and `X-SSL-Client-Verify` from it.
+
+### What crosses the link
+
+Everything a worker does is a call on `/api/v1/worker/*`, guarded by the key:
+
+| Call | Carries |
+|---|---|
+| `GET /stream` | SSE, held open: work and cancellation notices, filtered to the key's pools |
+| `POST /lease` | the lanes to poll, narrowed to the key's pools; returns the leased runs |
+| `PUT /runs/{id}/tasks/{key}` | a task checkpoint — the unit of replay |
+| `POST /runs/{id}/logs`, `…/artifacts` | flow logs and artifacts |
+| `POST /heartbeat` | liveness, every lease renewal, and the runs an operator asked to stop |
+| `POST /runs/{id}/state` | a transition; the server writes the event and publishes it on the worker's behalf |
+
+Per interval that is two calls whether the worker holds one run or eight
+(`TestHeartbeatCostIsIndependentOfHeldRuns` pins it); the rest is proportional
+to work done. Three things are never taken from a request body: the worker id
+(it comes from the credential), `force` (the janitor's), and the clock a cache
+entry is checked against (the server's, so a skewed site cannot extend one).
+There is no route that writes the event log, because automations act on it. A
+refusal is an answer, not a retry: 4xx is final, 5xx and transport failures
+back off with jitter.
+
+### Trying it locally
+
+[`docker-compose.sites.yml`](docker-compose.sites.yml) runs three "site VMs" as
+containers beside the main stack. Each boots from an env file holding a
+pool-scoped key, sits on a network the server joins and Postgres, NATS and
+Redis do not, and can reach nothing else.
+
+```bash
+./sites/issue-keys.sh                                      # pools + keys → sites/site-*.env
+docker compose -f docker-compose.sites.yml up -d --build   # plain http, straight to server:8080
+docker compose -f docker-compose.sites.yml logs -f site-a
+```
+
+Add `--env-file sites/tls.env` to the `up` and an nginx edge takes 443 in
+front of the server — worth one run before a real rollout, since it is the
+proxy, not the worker, that usually breaks. The key script is idempotent (a key
+it finds is rotated, not duplicated) and the env files are gitignored.
+
+Measured on this harness: a run on a site pool completes ~160ms after it is
+scheduled in both modes; a `site-a` key gets an empty lease for `site-b` and
+`403` on a `site-b` run id, logged as `pool-denied:site-b` in the key's
+history; a paused pool holds a run until resumed; `kill -9` mid-flow is
+rescheduled when the lease expires and replayed with `create-vm` returning its
+checkpoint rather than running again (`docker kill`, then `docker compose …
+start site-a` — Docker treats kill as a manual stop); and a server restart
+under nginx is followed by a completed run without touching the edge.
 
 ---
 

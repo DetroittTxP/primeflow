@@ -1316,8 +1316,17 @@ const WK_COMPONENTS = {
   base: [
     'primex-worker binary on the host (or Go 1.25+ to build ./examples/primex-worker)',
     'ca-certificates — TLS trust store for the flow\'s outbound calls',
-    'Outbound network to PostgreSQL :5432 and the notification bus (NATS :4222 / Redis :6379)',
   ],
+  // What the host must reach depends on how the worker talks to the
+  // orchestrator. Beside the database it needs Postgres and the bus; at a
+  // remote site it needs outbound HTTPS to the server and nothing else.
+  conn: {
+    database: ['Outbound network to PostgreSQL :5432 and the notification bus (NATS :4222 / Redis :6379)'],
+    api: [
+      'Outbound HTTPS to the PrimeFlow API URL below — no database or bus access is needed on the host',
+      'A pool-scoped api-worker key for exactly the pools ticked above (Issue key… below, or Settings → External API)',
+    ],
+  },
   vcd: [
     'VMware Cloud Director API reachable + a service account with vApp/VM rights',
     'The vCD client library / govc the flow imports, installed on the host',
@@ -1333,12 +1342,12 @@ const WK_COMPONENTS = {
   ],
 };
 
-function wkComponentsFor(tags) {
-  const out = [...WK_COMPONENTS.base];
-  for (const t of (tags || [])) if (WK_COMPONENTS[t]) out.push(...WK_COMPONENTS[t]);
+function wkComponentsFor(tags, mode) {
+  const out = [...WK_COMPONENTS.base, ...(WK_COMPONENTS.conn[mode] || WK_COMPONENTS.conn.database)];
+  for (const t of (tags || [])) if (Array.isArray(WK_COMPONENTS[t])) out.push(...WK_COMPONENTS[t]);
   return out;
 }
-function wkReqComponents() { return wkComponentsFor(window.__wkTags); }
+function wkReqComponents() { return wkComponentsFor(window.__wkTags, wkConn().mode); }
 
 async function renderNewWorker() {
   const body = document.getElementById('nw-body');
@@ -1363,10 +1372,27 @@ async function renderNewWorker() {
         <label>Worker name<input name="name" value="${nm}" required></label>
         <label>Concurrency<input name="concurrency" type="number" min="1" value="4"></label>
         <label>Image<input name="image" value="primex/primeflow:latest"></label>
+        <label>Connection
+          <select name="conn" onchange="nwConnToggle()">
+            <option value="database">Database (beside Postgres)</option>
+            <option value="api">API (remote site)</option>
+          </select>
+        </label>
         <label class="full">Work pools this worker serves
           <span class="wk-pools" id="wk-pools" onchange="wkGen()">${nwPoolChecks()}</span>
           <button type="button" class="act" style="margin-top:8px;align-self:flex-start" onclick="openCreatePool()">+ Create pool…</button>
         </label>
+        <div class="full nw-api" style="display:none;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+          <label>PrimeFlow API URL<input name="api_url" value="${esc(location.origin)}" placeholder="https://primeflow.example.com"></label>
+          <label>Worker token<input name="token" placeholder="pmx_…  (api-worker key scoped to the pools above)" autocomplete="off" spellcheck="false"></label>
+          <p class="muted" style="margin:0;grid-column:1/-1">
+            The worker holds this key and no database credential. It may lease only from the pools the key names;
+            wake-ups ride <code>/api/v1/worker/stream</code> on the same connection and the poll backstop defaults to 15s.
+            ${isAdmin()
+              ? '<button type="button" class="act" style="margin-left:8px" onclick="wkIssueKey()">Issue key…</button> mints an api-worker key scoped to the ticked pools and fills it in.'
+              : 'Ask an admin for an api-worker key scoped to these pools (Settings → External API).'}
+          </p>
+        </div>
       </form>
     </div>
     <div class="panel">
@@ -1440,6 +1466,47 @@ async function nwReloadPools(pick) {
   wkGen();
 }
 
+// wkConn reads how the new worker reaches the orchestrator. Database mode is
+// the classic shape beside Postgres; API mode is a worker at a remote site that
+// holds a pool-scoped key and nothing else (README → Workers at a remote site).
+function wkConn() {
+  const f = document.getElementById('wk-form');
+  if (!f || !f.elements.conn) return { mode: 'database', apiURL: '', token: '' };
+  return {
+    mode: f.elements.conn.value === 'api' ? 'api' : 'database',
+    apiURL: (f.elements.api_url.value || location.origin).trim().replace(/\/+$/, ''),
+    token: (f.elements.token.value || '').trim(),
+  };
+}
+
+function nwConnToggle() {
+  const f = document.getElementById('wk-form');
+  if (!f) return;
+  document.querySelector('.nw-api').style.display = f.elements.conn.value === 'api' ? 'grid' : 'none';
+  wkReqs(); // the network requirement differs per mode, so it is re-confirmed
+}
+
+// wkIssueKey mints the credential an API-mode worker needs: an api-worker key
+// scoped to exactly the pools ticked above. Pools are mandatory here — an
+// api-worker key with no pools may lease from every lane, which is never what
+// a site should hold.
+async function wkIssueKey() {
+  if (!isAdmin()) return toast('Only an admin can issue API keys', true);
+  const f = document.getElementById('wk-form');
+  const name = (f.elements.name.value || 'primex-worker').trim();
+  const pools = [...f.querySelectorAll('input[name=pool]:checked')].map(b => b.value);
+  if (!pools.length) return toast('Tick at least one pool first — the key is scoped to them', true);
+  try {
+    const res = await api('/api-keys', { method: 'POST', body: JSON.stringify({
+      name: name + ' worker', role: 'api-worker', pools,
+      description: 'Issued from Workers → Add worker for ' + name,
+    }) });
+    f.elements.token.value = res.secret;
+    toast('Key issued for ' + pools.join(', ') + ' — it is shown only here, copy the package now');
+    wkGen();
+  } catch (e) { toast(e.message, true); }
+}
+
 function nwDeliveryToggle() {
   const d = document.getElementById('wk-delivery');
   if (!d) return;
@@ -1470,10 +1537,18 @@ function wkReqGate() {
   else out.textContent = '# Confirm every host requirement above to generate the bootstrap package.';
 }
 
-function wkEnv(name, conc, queues) {
+function wkEnv(name, conc, queues, conn) {
+  const reach = (conn && conn.mode === 'api')
+    ? [
+        ['PRIMEFLOW_API_URL', conn.apiURL || 'https://PRIMEFLOW_HOST'],
+        ['PRIMEFLOW_WORKER_TOKEN', conn.token || 'pmx_REPLACE_ME'],
+      ]
+    : [
+        ['PRIMEFLOW_DATABASE_URL', 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
+        ['PRIMEFLOW_NATS_URL', 'nats://NATS_HOST:4222'],
+      ];
   return [
-    ['PRIMEFLOW_DATABASE_URL', 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
-    ['PRIMEFLOW_NATS_URL', 'nats://NATS_HOST:4222'],
+    ...reach,
     ['PRIMEFLOW_QUEUES', queues],
     ['PRIMEFLOW_CONCURRENCY', String(conc)],
     ['PRIMEFLOW_WORKER_NAME', name],
@@ -1507,13 +1582,22 @@ function wkGen() {
   const queues = pools.length ? pools.join(',') : 'default';
   const method = d.elements.method.value;
   const autosync = d.elements.autosync.checked;
-  const env = wkEnv(name, conc, queues);
+  const conn = wkConn();
+  const env = wkEnv(name, conc, queues, conn);
   const envLines = env.map(([k, v]) => k + '=' + v).join('\n');
   const { secret, dep, kust } = wkK8s(name, image, env);
 
-  let out = '# worker "' + name + '"  pools=' + queues + '  concurrency=' + conc + '\n' +
+  let out = '# worker "' + name + '"  pools=' + queues + '  concurrency=' + conc + '  connection=' + conn.mode + '\n' +
     '# host requirements confirmed by ' + esc(ME.email) + ':\n' +
     wkReqComponents().map(c => '#   [x] ' + c).join('\n') + '\n\n';
+  if (conn.mode === 'api') {
+    out += '# Reaches the orchestrator through ' + conn.apiURL + '/api/v1/worker/* — outbound HTTPS only,\n' +
+      '# no database credential on the host. Wake-ups arrive on /api/v1/worker/stream; the poll\n' +
+      '# backstop defaults to 15s (PRIMEFLOW_POLL). Every task checkpoint is one round trip.\n' +
+      (conn.token ? '' :
+        '# PRIMEFLOW_WORKER_TOKEN is a placeholder: issue an api-worker key scoped to pools=' + queues + '\n' +
+        '# (Issue key… above, or Settings → External API) and paste it in.\n') + '\n';
+  }
 
   if (method === 'script') {
     const target = d.elements.target.value;
