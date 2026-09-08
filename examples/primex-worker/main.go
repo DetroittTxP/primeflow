@@ -324,6 +324,111 @@ func addNumbers(c *sdk.Context) (any, error) {
 	return AddResult{A: p.A, B: p.B, Sum: sum}, nil
 }
 
+// ------------------------------------------------------------- site-loop ---
+
+// LoopParams tunes the per-site smoke test: how long to stay busy, and how
+// finely to slice that up.
+type LoopParams struct {
+	Seconds     int    `json:"seconds"`      // total wall time, default 20
+	StepSeconds int    `json:"step_seconds"` // one checkpoint per step, default 2
+	Label       string `json:"label,omitempty"`
+}
+
+// LoopTick is one checkpointed slice of the loop. Recording the worker on
+// every tick is what makes a resumed run legible: the ticks before a crash
+// carry the site that started it, the ones after carry the site that finished.
+type LoopTick struct {
+	N      int       `json:"n"`
+	Worker string    `json:"worker"`
+	At     time.Time `json:"at"`
+}
+
+// LoopResult is what the run returns.
+type LoopResult struct {
+	Label   string  `json:"label,omitempty"`
+	Worker  string  `json:"worker"`
+	Queue   string  `json:"queue"`
+	Ticks   int     `json:"ticks"`
+	Seconds float64 `json:"seconds"`
+}
+
+// siteLoop holds a worker slot for a fixed stretch — twenty seconds by
+// default — in checkpointed ticks. It is the flow to trigger at every site at
+// once: the run stays RUNNING long enough to watch dispatch reach each site,
+// to push a pool up against its concurrency limit, and to see which worker
+// picked the work up. Because every tick is its own checkpoint, killing a site
+// mid-loop resumes at the tick it reached rather than restarting the twenty
+// seconds.
+func siteLoop(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[LoopParams](c)
+	if err != nil {
+		return nil, err
+	}
+	total, step := p.Seconds, p.StepSeconds
+	if total <= 0 {
+		total = 20
+	}
+	if step <= 0 {
+		step = 2
+	}
+	if total > 300 {
+		// Past this it stops being a smoke test and starts being a lease
+		// expiry, which crash recovery already covers.
+		return nil, sdk.Permanent(fmt.Errorf("seconds must be 300 or less, got %d", total))
+	}
+	if step > total {
+		step = total
+	}
+	ticks := (total + step - 1) / step
+
+	who := workerName()
+	started := time.Now()
+	c.Info("site loop starting", "worker", who, "pool", c.Run().WorkQueue,
+		"seconds", total, "ticks", ticks, "step_seconds", step)
+
+	for i := 1; i <= ticks; i++ {
+		// Keyed by position, because here position is the data: tick 3 is
+		// tick 3 on a replay too, and its stored result returns instantly.
+		tick, err := sdk.Task(c, "tick", func(c *sdk.Context) (LoopTick, error) {
+			select {
+			case <-time.After(time.Duration(step) * time.Second):
+			case <-c.Done():
+				return LoopTick{}, c.Err()
+			}
+			return LoopTick{N: i, Worker: workerName(), At: time.Now().UTC()}, nil
+		}, sdk.TaskKey(fmt.Sprintf("tick:%02d", i)))
+		if err != nil {
+			return nil, err
+		}
+		c.Info("tick", "n", tick.N, "of", ticks, "worker", tick.Worker)
+	}
+
+	// Elapsed is this attempt's wall time, not the run's: a resumed run replays
+	// its finished ticks from their checkpoints and only sleeps for the rest.
+	elapsed := time.Since(started).Seconds()
+	_ = c.Markdown("loop", fmt.Sprintf(
+		"### Site loop finished\n\n- **Worker:** %s\n- **Pool:** %s\n- **Ticks:** %d × %ds\n- **Elapsed:** %.1fs\n",
+		who, c.Run().WorkQueue, ticks, step, elapsed))
+
+	return LoopResult{
+		Label: p.Label, Worker: who, Queue: c.Run().WorkQueue,
+		Ticks: ticks, Seconds: elapsed,
+	}, nil
+}
+
+// workerName is the site this run landed on. It mirrors what the worker
+// registers itself under, so a result traces back to one site VM.
+func workerName() string {
+	if n := os.Getenv("PRIMEFLOW_WORKER_NAME"); n != "" {
+		return n
+	}
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "worker"
+	}
+	return host
+}
+
 // ------------------------------------------------------------------ main ---
 
 func main() {
@@ -357,6 +462,15 @@ func main() {
 		sdk.ParamsSchema(AddParams{A: 2, B: 3}),
 		sdk.Retries(1),
 		sdk.Timeout(time.Minute),
+	)
+
+	sdk.Flow("site-loop", siteLoop,
+		sdk.Description("Hold a worker slot for ~20s in checkpointed ticks -- the per-site smoke test"),
+		sdk.Tags("demo", "site", "smoke"),
+		sdk.ParamsSchema(LoopParams{Seconds: 20, StepSeconds: 2}),
+		sdk.Retries(1),
+		sdk.RetryDelay(5*time.Second),
+		sdk.Timeout(10*time.Minute),
 	)
 
 	// Two ways to reach the orchestrator: a database connection, or — for a
