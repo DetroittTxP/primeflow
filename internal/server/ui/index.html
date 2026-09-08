@@ -35,8 +35,22 @@
     background: var(--panel); border-bottom: 1px solid var(--line);
     position: sticky; top: 0; z-index: 30;
   }
-  .brand { font-weight: 660; letter-spacing: -0.01em; font-size: 15px; }
-  .brand span { color: var(--accent); }
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    line-height: 1; margin-right: 4px;
+  }
+  .brand-logo {
+    display: block; width: auto; height: 28px;
+  }
+  .brand-name {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .brand-name .accent {
+    color: var(--accent);
+  }
   .grow { flex: 1; }
   .live { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
@@ -240,7 +254,10 @@
 </head>
 <body>
 <header>
-  <div class="brand">Prime<span>Flow</span></div>
+  <div class="brand" aria-label="PrimeFlow">
+    <img class="brand-logo" src="/primeflow.png" alt="PrimeFlow logo" />
+    <div class="brand-name">Prime<span class="accent">Flow</span></div>
+  </div>
   <div class="grow"></div>
   <div class="seg" id="win-switch" hidden>
     <button data-w="8h">8h</button><button data-w="24h" class="active">24h</button><button data-w="168h">1w</button>

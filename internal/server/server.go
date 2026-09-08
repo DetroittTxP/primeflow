@@ -343,7 +343,7 @@ func openOperatorPath(method, path string) bool {
 		return true
 	case strings.HasPrefix(path, "/api/v1/auth/oidc/"):
 		return true
-	case path == "/login.html" || path == "/reset.html" || path == "/favicon.ico":
+	case path == "/login.html" || path == "/reset.html" || path == "/primeflow.png" || path == "/favicon.ico":
 		return true
 	}
 	return false
