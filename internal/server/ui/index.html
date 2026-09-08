@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PrimeFlow</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232563eb'/%3E%3Cpath d='M9 8h14M9 16h10M9 24h6' stroke='white' stroke-width='3.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="/primeflow.png">
 <style>
   :root {
     --bg: #fbfbfc; --panel: #ffffff; --ink: #1c1f27; --muted: #697086;
@@ -213,6 +213,10 @@
   form.inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; padding: 14px; }
   form.inline label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
   form.inline .full { grid-column: 1 / -1; }
+  .wk-chk { flex-direction: row !important; align-items: flex-start; gap: 7px; color: var(--ink); font-size: 13px; line-height: 1.4; }
+  .wk-chk input { margin-top: 2px; }
+  .wk-pools { display: flex; flex-wrap: wrap; gap: 6px 20px; }
+  .wk-reqlist { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
   textarea {
     font-family: ui-monospace, monospace; font-size: 12px; background: var(--panel);
     color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 7px; min-height: 70px;
@@ -331,7 +335,7 @@
   <section id="v-queues">
     <div class="view-head"><h1>Work pools</h1></div>
     <div class="panel">
-      <h2>Pools<span class="grow"></span><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <h2>Pools<span class="grow"></span><button class="act primary" onclick="openCreatePool()">Create pool…</button><button class="act" onclick="loadQueues()">Refresh</button></h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
         A pool is a named lane of work. <b>Desired</b> is the worker count PrimeFlow publishes as
         <code>primeflow_queue_desired_workers</code> for a KEDA <code>ScaledObject</code> or an HPA to act on —
@@ -431,7 +435,7 @@
   <section id="v-workers">
     <div class="view-head"><h1>Workers</h1></div>
     <div class="panel">
-      <h2>Workers<span class="grow"></span><button class="act" onclick="loadWorkers()">Refresh</button></h2>
+      <h2>Workers<span class="grow"></span><button class="act primary" onclick="show('newworker')">Add worker…</button><button class="act" onclick="loadWorkers()">Refresh</button></h2>
       <div class="scroll"><table>
         <thead><tr><th>Name</th><th>Status</th><th>Pools</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
         <tbody id="workers"></tbody>
@@ -446,6 +450,14 @@
     </div>
   </section>
 
+  <section id="v-newworker">
+    <div class="view-head">
+      <button class="act" onclick="show('workers')">&larr; Workers</button>
+      <h1>Add worker</h1>
+    </div>
+    <div id="nw-body"></div>
+  </section>
+
   <section id="v-events">
     <div class="view-head"><h1>Event feed</h1></div>
     <div class="panel">
@@ -458,7 +470,32 @@
     <div class="view-head"><h1>Settings</h1></div>
     <div class="subnav" id="settings-subnav">
       <button data-s="external" class="active" onclick="showSettings('external')">External API</button>
+      <button data-s="git" onclick="showSettings('git')">Git connection</button>
       <button data-s="users" onclick="showSettings('users')">Users</button>
+    </div>
+
+    <div id="settings-git" hidden>
+      <div class="panel">
+        <h2>GitOps target repository</h2>
+        <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+          Where the Add-worker page renders manifests. The token is stored write-only and never
+          returned. <b>Server-side clone / commit / push (the Sync button and auto-sync reconciler)
+          land in a following iteration</b> — for now this connection pre-fills the git fields on the
+          worker page and is the place its value lives.
+        </p>
+        <form class="inline" id="git-form" onsubmit="saveGitConnection(event)">
+          <label class="full">Repo URL<input name="repo_url" placeholder="https://github.com/acme/gitops.git"></label>
+          <label>Branch<input name="branch" value="main"></label>
+          <label>Base path in repo<input name="base_path" placeholder="workers"></label>
+          <label>Provider<input name="provider" readonly placeholder="auto-detected"></label>
+          <label>Commit author name<input name="author_name" placeholder="PrimeFlow"></label>
+          <label>Commit author email<input name="author_email" placeholder="primeflow@example.com"></label>
+          <label class="full">Access token (PAT)<input name="token" type="password" placeholder="leave blank to keep the stored one"></label>
+          <label class="wk-chk full"><input type="checkbox" name="auto_sync">Auto-sync by default (new worker manifests are pushed automatically once the engine ships)</label>
+          <div class="full row"><button class="act primary" type="submit">Save connection</button>
+            <span class="muted" id="git-status"></span></div>
+        </form>
+      </div>
     </div>
 
     <div id="settings-external">
@@ -565,6 +602,47 @@
     <button class="act" onclick="document.getElementById('flow-dialog').close()">Close</button>
   </div>
   <div class="dlg-body" id="fd-body"></div>
+</dialog>
+
+<dialog id="worker-detail">
+  <div class="dlg-head">
+    <strong id="wdt-title">Worker</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('worker-detail').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="wdt-body"></div>
+</dialog>
+
+<dialog id="pool-dialog">
+  <div class="dlg-head">
+    <strong>Create work pool</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('pool-dialog').close()">Close</button>
+  </div>
+  <div class="dlg-body">
+    <form class="inline" id="pool-form" onsubmit="createPool(event)">
+      <label>Name *<input name="name" required placeholder="e.g. gpu-builds" pattern="[A-Za-z0-9._-]+" title="letters, digits, . _ - only"></label>
+      <label>Pool type
+        <select name="pool_type" onchange="poolTypeToggle()">
+          <option value="pull">pull — workers lease from the queue</option>
+          <option value="push">push — server POSTs each ready run to an endpoint</option>
+        </select>
+      </label>
+      <label class="full">Description<input name="description" placeholder="what runs here"></label>
+      <label>Concurrency limit<input name="concurrency_limit" type="number" min="0" placeholder="∞  (blank = unlimited)"></label>
+      <label>Owner / team<input name="owner" placeholder="blank = none"></label>
+      <div class="full" id="pool-pull" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+        <label>Min workers<input name="min_workers" type="number" min="0" value="0"></label>
+        <label>Max workers<input name="max_workers" type="number" min="0" placeholder="∞  (blank = unbounded)"></label>
+        <label>Target ready / worker<input name="target_ready_per_worker" type="number" min="1" value="5"></label>
+        <p class="muted full" style="margin:0;grid-column:1/-1">min / max / target feed the <code>desired_workers</code> signal KEDA or an HPA scales on. PrimeFlow never starts workers itself.</p>
+      </div>
+      <div class="full" id="pool-push" style="display:none;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
+        <label>Push endpoint URL *<input name="push_endpoint" type="url" placeholder="http://push-worker:8090/run"></label>
+        <label>Shared secret (HMAC)<input name="push_secret" placeholder="signs each dispatch"></label>
+      </div>
+      <label class="wk-chk full"><input type="checkbox" name="paused">Start paused (hold dispatch until resumed)</label>
+      <div class="full row"><button class="act primary" type="submit">Create pool</button></div>
+    </form>
+  </div>
 </dialog>
 
 <script>
@@ -679,6 +757,7 @@ function show(v) {
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
   document.getElementById('win-switch').hidden = v !== 'dashboard';
   if (v === 'settings') { loadSettings(); return; }
+  if (v === 'newworker') { renderNewWorker(); return; }
   refreshCurrent();
 }
 function refreshCurrent() {
@@ -690,7 +769,7 @@ function refreshCurrent() {
      automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
      events: loadEvents,
-     settings: () => settingsTab === 'external' ? loadKeys() : loadUsers() })[current]();
+     settings: () => settingsTab === 'external' ? loadKeys() : settingsTab === 'git' ? loadGitConnection() : loadUsers() })[current]();
 }
 document.getElementById('nav').innerHTML = VIEWS.map(([v, label, ic]) =>
   `<button data-v="${v}" onclick="show('${v}')"><span class="ic">${ic}</span>${label}</button>`).join('');
@@ -916,6 +995,61 @@ function setPushEndpoint(q) {
   act('/queues', { method: 'POST', body: JSON.stringify(body) });
 }
 
+// --- create work pool -------------------------------------------------
+function openCreatePool() {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const f = document.getElementById('pool-form');
+  f.reset();
+  poolTypeToggle();
+  document.getElementById('pool-dialog').showModal();
+}
+
+function poolTypeToggle() {
+  const el = document.getElementById('pool-form').elements;
+  const push = el.pool_type.value === 'push';
+  document.getElementById('pool-pull').style.display = push ? 'none' : 'grid';
+  document.getElementById('pool-push').style.display = push ? 'grid' : 'none';
+  el.push_endpoint.required = push;
+}
+
+async function createPool(ev) {
+  ev.preventDefault();
+  const el = ev.target.elements;
+  const push = el.pool_type.value === 'push';
+  const body = {
+    name: el.name.value.trim(),
+    description: el.description.value.trim(),
+    pool_type: el.pool_type.value,
+    owner: el.owner.value.trim(),
+    paused: el.paused.checked,
+  };
+  if (el.concurrency_limit.value.trim() !== '') {
+    const n = parseInt(el.concurrency_limit.value, 10);
+    if (isNaN(n) || n < 0) return toast('Concurrency limit must be a non-negative number', true);
+    body.concurrency_limit = n;
+  }
+  if (push) {
+    body.push_endpoint = el.push_endpoint.value.trim();
+    if (!body.push_endpoint) return toast('A push pool needs an endpoint URL', true);
+    if (el.push_secret.value.trim() !== '') body.push_secret = el.push_secret.value.trim();
+  } else {
+    body.min_workers = parseInt(el.min_workers.value, 10) || 0;
+    body.target_ready_per_worker = parseInt(el.target_ready_per_worker.value, 10) || 5;
+    if (el.max_workers.value.trim() !== '') {
+      const mx = parseInt(el.max_workers.value, 10);
+      if (isNaN(mx) || mx < body.min_workers) return toast('Max workers must be ≥ min workers', true);
+      body.max_workers = mx;
+    }
+  }
+  try {
+    await api('/queues', { method: 'POST', body: JSON.stringify(body) });
+    toast('Pool "' + body.name + '" created');
+    document.getElementById('pool-dialog').close();
+    if (current === 'newworker') { nwReloadPools(body.name); }
+    else { show('queues'); loadQueues(); }
+  } catch (e) { toast(e.message, true); }
+}
+
 async function loadPending() {
   const q = document.getElementById('q-pick').value;
   if (!q) { document.getElementById('pending').innerHTML = ''; return; }
@@ -1115,12 +1249,346 @@ async function saveAutomation(ev) {
 async function loadWorkers() {
   const ws = await api('/workers');
   document.getElementById('workers').innerHTML = ws.length ? ws.map(w => `
-    <tr>
+    <tr onclick="openWorkerDetail('${w.id}')" style="cursor:pointer" title="View parameters, config, YAML and packages">
       <td><strong>${esc(w.name)}</strong><div class="muted mono">${esc(w.id.slice(0, 8))}</div></td>
       <td>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</td>
       <td class="mono">${(w.queues || []).map(esc).join(', ')}</td>
       <td>${w.active_runs}</td><td>${w.concurrency}</td><td>${when(w.last_heartbeat)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
+}
+
+async function openWorkerDetail(id) {
+  const dlg = document.getElementById('worker-detail');
+  const body = document.getElementById('wdt-body');
+  body.innerHTML = '<div class="empty">Loading…</div>';
+  dlg.showModal();
+  const [ws, flows, git] = await Promise.all([
+    api('/workers'), api('/flows').catch(() => []), api('/settings/git').catch(() => ({})),
+  ]);
+  const w = (ws || []).find(x => x.id === id);
+  if (!w) { body.innerHTML = '<div class="empty">Worker not found — it may have deregistered.</div>'; return; }
+  document.getElementById('wdt-title').textContent = w.name;
+  const tags = [...new Set((flows || []).flatMap(f => f.tags || []))];
+  const comps = wkComponentsFor(tags);
+  const queues = (w.queues || []).join(',') || 'default';
+  const env = wkEnv(w.name, w.concurrency, queues);
+  const km = wkK8s(w.name, 'primex/primeflow:latest', env);
+  const path = ((git && git.base_path) ? git.base_path + '/' : '') + w.name;
+  body.innerHTML = `
+    <dl class="kv">
+      <dt>Name</dt><dd>${esc(w.name)}</dd>
+      <dt>ID</dt><dd class="mono">${esc(w.id)}</dd>
+      <dt>Status</dt><dd>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</dd>
+      <dt>Pools</dt><dd class="mono">${esc(queues)}</dd>
+      <dt>Concurrency</dt><dd>${w.concurrency}</dd>
+      <dt>Active runs</dt><dd>${w.active_runs}</dd>
+      <dt>Started</dt><dd>${when(w.started_at)}</dd>
+      <dt>Last heartbeat</dt><dd>${when(w.last_heartbeat)}</dd>
+    </dl>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Configuration (env)</h2>
+      <pre class="logs" style="margin:0 16px">${esc(env.map(([k, v]) => k + '=' + v).join('\n'))}</pre>
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Deployment YAML <span class="muted">— rendered from this worker's live config</span></h2>
+      <pre class="logs" id="wdt-yaml" style="margin:0 16px">${esc(km.secret + '\n---\n' + km.dep)}</pre>
+      <div class="row" style="padding:10px 16px"><button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wdt-yaml').textContent).then(()=>toast('Copied'))">Copy YAML</button></div>
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Package list <span class="muted">— components this worker's host needs</span></h2>
+      <ul style="margin:0;padding:12px 32px;color:var(--ink);line-height:1.6">${comps.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
+    </div>
+    ${(git && git.repo_url) ? `<div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Git delivery</h2>
+      <p class="muted" style="padding:0 16px">Target <span class="mono">${esc(git.repo_url)}</span> @ <span class="mono">${esc(git.branch || 'main')}</span>, path <span class="mono">${esc(path)}</span></p>
+      <div class="row" style="padding:10px 16px;gap:10px">
+        <button class="act" disabled title="server-side git sync ships in the next iteration">Sync now</button>
+        <label class="wk-chk"><input type="checkbox" disabled ${git.auto_sync ? 'checked' : ''}>Auto-sync</label>
+      </div>
+    </div>` : ''}`;
+}
+
+// --- add worker wizard --------------------------------------------------
+// PrimeFlow never launches workers itself. This wizard captures the config,
+// makes the operator confirm the host-side package/component requirements,
+// then emits a copy-paste bootstrap package for the new worker host.
+const WK_COMPONENTS = {
+  base: [
+    'primex-worker binary on the host (or Go 1.25+ to build ./examples/primex-worker)',
+    'ca-certificates — TLS trust store for the flow\'s outbound calls',
+    'Outbound network to PostgreSQL :5432 and the notification bus (NATS :4222 / Redis :6379)',
+  ],
+  vcd: [
+    'VMware Cloud Director API reachable + a service account with vApp/VM rights',
+    'The vCD client library / govc the flow imports, installed on the host',
+  ],
+  metering: [
+    'Billing API endpoint reachable + an API token for usage submission',
+  ],
+  provisioning: [
+    'Guest OS templates published in the target vDC catalog',
+  ],
+  fleet: [
+    'Deployment "provision-vm-standard" exists (the sub-flow target this flow calls)',
+  ],
+};
+
+function wkComponentsFor(tags) {
+  const out = [...WK_COMPONENTS.base];
+  for (const t of (tags || [])) if (WK_COMPONENTS[t]) out.push(...WK_COMPONENTS[t]);
+  return out;
+}
+function wkReqComponents() { return wkComponentsFor(window.__wkTags); }
+
+async function renderNewWorker() {
+  const body = document.getElementById('nw-body');
+  if (!canWrite()) { body.innerHTML = '<div class="panel"><p class="muted" style="padding:16px">Your account is read-only.</p></div>'; return; }
+  body.innerHTML = '<div class="panel"><p class="muted" style="padding:16px">Loading…</p></div>';
+  const [qs, flows, git] = await Promise.all([
+    api('/queues').catch(() => []), api('/flows').catch(() => []), api('/settings/git').catch(() => ({})),
+  ]);
+  window.__nwPools = (qs || []).filter(q => (q.pool_type || 'pull') === 'pull').map(q => q.name);
+  window.__wkTags = [...new Set((flows || []).flatMap(f => f.tags || []))];
+  window.__git = git || {};
+  const n = document.querySelectorAll('#workers tr').length + 1;
+  const nm = 'primex-worker-' + n;
+  const gRepo = esc(git.repo_url || '');
+  const gBranch = esc(git.branch || 'main');
+  const gBase = (git.base_path || 'workers').replace(/\/+$/, '');
+  const gAuto = git.auto_sync ? ' checked' : '';
+  body.innerHTML = `
+    <div class="panel">
+      <h2>Worker</h2>
+      <form class="inline" id="wk-form" onsubmit="return false" oninput="wkGen()">
+        <label>Worker name<input name="name" value="${nm}" required></label>
+        <label>Concurrency<input name="concurrency" type="number" min="1" value="4"></label>
+        <label>Image<input name="image" value="primex/primeflow:latest"></label>
+        <label class="full">Work pools this worker serves
+          <span class="wk-pools" id="wk-pools" onchange="wkGen()">${nwPoolChecks()}</span>
+          <button type="button" class="act" style="margin-top:8px;align-self:flex-start" onclick="openCreatePool()">+ Create pool…</button>
+        </label>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Delivery <span class="muted">— how the worker reaches its host / cluster</span></h2>
+      <form class="inline" id="wk-delivery" onsubmit="return false" oninput="wkGen()">
+        <label>Method
+          <select name="method" onchange="nwDeliveryToggle(); wkGen()">
+            <option value="git">Git commit + PR/MR (GitHub / GitLab)</option>
+            <option value="argocd">Argo CD Application (GitOps)</option>
+            <option value="flux">Flux Kustomization (GitOps)</option>
+            <option value="script">Script — Docker / systemd / kubectl</option>
+          </select>
+        </label>
+        <label id="nw-runtime" style="display:none">Runtime target
+          <select name="target" onchange="wkGen()">
+            <option value="docker">Docker</option>
+            <option value="systemd">systemd (bare host)</option>
+            <option value="k8s">Kubernetes</option>
+          </select>
+        </label>
+        <label class="wk-chk full"><input type="checkbox" name="autosync"${gAuto} onchange="wkGen()">Auto-sync — the GitOps controller continuously reconciles this worker (off = one-shot / manual sync)</label>
+        <div class="full nw-git" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
+          <label>Git repo URL<input name="repo" value="${gRepo}" placeholder="https://github.com/acme/gitops.git"></label>
+          <label>Path in repo<input name="path" value="${esc(gBase)}/${nm}"></label>
+          <label>Base branch<input name="branch" value="${gBranch}"></label>
+          <label>Feature branch<input name="head" value="add-worker-${nm}"></label>
+        </div>
+        <div class="full nw-argo" style="display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
+          <label>Argo CD project<input name="project" value="default"></label>
+          <label>Dest namespace<input name="namespace" value="primeflow"></label>
+          <label>Dest cluster<input name="server" value="https://kubernetes.default.svc"></label>
+          <label>Target revision<input name="revision" value="HEAD"></label>
+        </div>
+      </form>
+    </div>
+    <div class="panel">
+      <h2>Host requirements <span class="muted">— confirm each is satisfied on the target</span></h2>
+      <div id="wk-reqs"></div>
+    </div>
+    <div class="panel">
+      <h2>Bootstrap package</h2>
+      <p class="muted" style="padding:0 16px 8px">
+        PrimeFlow does not deploy workers itself. It emits the artifacts below; you apply them with the
+        chosen method. Credentials are placeholders — fill from your server config or a sealed secret.
+      </p>
+      <pre class="logs" id="wk-out" style="margin:0 16px"></pre>
+      <div class="row" style="padding:12px 16px;gap:8px">
+        <button class="act primary" id="wk-gen" disabled onclick="wkGen()">Generate</button>
+        <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wk-out').textContent).then(()=>toast('Copied'))">Copy</button>
+      </div>
+    </div>`;
+  nwDeliveryToggle();
+  wkReqs();
+}
+
+function nwPoolChecks() {
+  const pools = window.__nwPools || [];
+  if (!pools.length) return '<span class="muted">No pull pools yet — create one below, or the worker makes the pools it subscribes to on first check-in.</span>';
+  return pools.map(p => `<label class="wk-chk"><input type="checkbox" name="pool" value="${esc(p)}"${p === 'default' ? ' checked' : ''}>${esc(p)}</label>`).join('');
+}
+
+async function nwReloadPools(pick) {
+  const qs = await api('/queues').catch(() => []);
+  window.__nwPools = (qs || []).filter(q => (q.pool_type || 'pull') === 'pull').map(q => q.name);
+  const box = document.getElementById('wk-pools');
+  if (!box) return;
+  const chosen = new Set([...box.querySelectorAll('input:checked')].map(i => i.value));
+  if (pick) chosen.add(pick);
+  box.innerHTML = nwPoolChecks();
+  box.querySelectorAll('input[name=pool]').forEach(i => { if (chosen.has(i.value)) i.checked = true; });
+  wkGen();
+}
+
+function nwDeliveryToggle() {
+  const d = document.getElementById('wk-delivery');
+  if (!d) return;
+  const m = d.elements.method.value;
+  document.getElementById('nw-runtime').style.display = m === 'script' ? '' : 'none';
+  document.querySelector('.nw-git').style.display = m === 'script' ? 'none' : 'grid';
+  document.querySelector('.nw-argo').style.display = m === 'argocd' ? 'grid' : 'none';
+}
+
+function wkReqs() {
+  const el = document.getElementById('wk-reqs');
+  if (!el) return;
+  el.innerHTML = `<div class="wk-reqlist">${wkReqComponents().map(c =>
+    `<label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">${esc(c)}</label>`).join('')}
+    <label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">All flow-specific SDKs / CLIs the registered flows import are installed and on PATH</label>
+  </div>`;
+  wkReqGate();
+}
+
+function wkReqGate() {
+  const boxes = [...document.querySelectorAll('.wk-req')];
+  const ok = boxes.length > 0 && boxes.every(b => b.checked);
+  const gen = document.getElementById('wk-gen');
+  if (gen) gen.disabled = !ok;
+  const out = document.getElementById('wk-out');
+  if (!out) return;
+  if (ok) wkGen();
+  else out.textContent = '# Confirm every host requirement above to generate the bootstrap package.';
+}
+
+function wkEnv(name, conc, queues) {
+  return [
+    ['PRIMEFLOW_DATABASE_URL', 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
+    ['PRIMEFLOW_NATS_URL', 'nats://NATS_HOST:4222'],
+    ['PRIMEFLOW_QUEUES', queues],
+    ['PRIMEFLOW_CONCURRENCY', String(conc)],
+    ['PRIMEFLOW_WORKER_NAME', name],
+  ];
+}
+
+function wkK8s(name, image, env) {
+  const secret = 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: ' + name + '-env\ntype: Opaque\nstringData:\n' +
+    env.map(([k, v]) => '  ' + k + ': "' + v + '"').join('\n');
+  const dep = 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: ' + name + '\n' +
+    '  labels: { app.kubernetes.io/name: ' + name + ', app.kubernetes.io/part-of: primeflow }\n' +
+    'spec:\n  replicas: 1\n  selector: { matchLabels: { app: ' + name + ' } }\n' +
+    '  template:\n    metadata: { labels: { app: ' + name + ' } }\n    spec:\n      containers:\n' +
+    '        - name: worker\n          image: ' + image + '\n' +
+    '          command: ["/usr/local/bin/primex-worker"]\n' +
+    '          envFrom:\n            - secretRef: { name: ' + name + '-env }';
+  const kust = 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - secret.yaml\n  - deployment.yaml';
+  return { secret, dep, kust };
+}
+
+function wkGen() {
+  const gen = document.getElementById('wk-gen');
+  if (!gen || gen.disabled) return;
+  const f = document.getElementById('wk-form');
+  const d = document.getElementById('wk-delivery');
+  if (!f || !d) return;
+  const name = (f.elements.name.value || 'primex-worker').trim();
+  const conc = parseInt(f.elements.concurrency.value, 10) || 4;
+  const image = (f.elements.image.value || 'primex/primeflow:latest').trim();
+  const pools = [...f.querySelectorAll('input[name=pool]:checked')].map(b => b.value);
+  const queues = pools.length ? pools.join(',') : 'default';
+  const method = d.elements.method.value;
+  const autosync = d.elements.autosync.checked;
+  const env = wkEnv(name, conc, queues);
+  const envLines = env.map(([k, v]) => k + '=' + v).join('\n');
+  const { secret, dep, kust } = wkK8s(name, image, env);
+
+  let out = '# worker "' + name + '"  pools=' + queues + '  concurrency=' + conc + '\n' +
+    '# host requirements confirmed by ' + esc(ME.email) + ':\n' +
+    wkReqComponents().map(c => '#   [x] ' + c).join('\n') + '\n\n';
+
+  if (method === 'script') {
+    const target = d.elements.target.value;
+    out += '# ---- worker.env ----\n' + envLines + '\n\n';
+    if (target === 'docker') {
+      out += '# ---- Docker ----\n' +
+        'docker run -d --name ' + name + ' --env-file worker.env --restart unless-stopped \\\n' +
+        '  ' + image + ' /usr/local/bin/primex-worker\n';
+    } else if (target === 'systemd') {
+      out += '# ---- /etc/systemd/system/' + name + '.service ----\n' +
+        '[Unit]\nDescription=PrimeFlow worker ' + name + '\nAfter=network-online.target\n\n' +
+        '[Service]\nEnvironmentFile=/etc/' + name + '.env\nExecStart=/usr/local/bin/primex-worker\n' +
+        'Restart=always\nRestartSec=3\nUser=primeflow\n\n' +
+        '[Install]\nWantedBy=multi-user.target\n\n' +
+        '# then:\nsudo install -m600 worker.env /etc/' + name + '.env\n' +
+        'sudo systemctl daemon-reload && sudo systemctl enable --now ' + name + '\n';
+    } else {
+      out += '# ---- secret.yaml ----\n' + secret + '\n\n# ---- deployment.yaml ----\n' + dep + '\n\n' +
+        'kubectl apply -f secret.yaml -f deployment.yaml\n';
+    }
+  } else {
+    const repo = (d.elements.repo.value || 'https://github.com/ORG/gitops.git').trim();
+    const path = (d.elements.path.value || ('workers/' + name)).trim().replace(/^\/+|\/+$/g, '');
+    const base = (d.elements.branch.value || 'main').trim();
+    const head = (d.elements.head.value || ('add-worker-' + name)).trim();
+    const host = /gitlab/i.test(repo) ? 'gitlab' : (/github/i.test(repo) ? 'github' : 'git');
+    out += '# ==== files, committed under ' + path + '/ ====\n\n';
+    out += '# ' + path + '/secret.yaml   (replace with a SealedSecret / SOPS for real GitOps)\n' + secret + '\n\n';
+    out += '# ' + path + '/deployment.yaml\n' + dep + '\n\n';
+    out += '# ' + path + '/kustomization.yaml\n' + kust + '\n\n';
+
+    if (method === 'argocd') {
+      const project = (d.elements.project.value || 'default').trim();
+      const ns = (d.elements.namespace.value || 'primeflow').trim();
+      const server = (d.elements.server.value || 'https://kubernetes.default.svc').trim();
+      const rev = (d.elements.revision.value || 'HEAD').trim();
+      const syncPolicy = autosync
+        ? '  syncPolicy:\n    automated: { prune: true, selfHeal: true }\n    syncOptions: [CreateNamespace=true]\n'
+        : '  syncPolicy:\n    syncOptions: [CreateNamespace=true]   # auto-sync OFF: sync manually\n';
+      out += '# ---- Argo CD Application (commit to your app-of-apps, or: kubectl apply -n argocd -f -) ----\n' +
+        'apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: ' + name + '\n  namespace: argocd\n' +
+        'spec:\n  project: ' + project + '\n  source:\n    repoURL: ' + repo + '\n    path: ' + path + '\n' +
+        '    targetRevision: ' + rev + '\n  destination:\n    server: ' + server + '\n    namespace: ' + ns + '\n' +
+        syncPolicy + '\n' +
+        '# or imperatively:\n' +
+        'argocd app create ' + name + ' --repo ' + repo + ' --path ' + path + ' --revision ' + rev +
+        ' --dest-server ' + server + ' --dest-namespace ' + ns + ' --project ' + project +
+        (autosync ? ' --sync-policy automated' : '') + ' --sync-option CreateNamespace=true\n\n';
+    } else if (method === 'flux') {
+      out += '# ---- Flux Kustomization (in your fleet repo) ----\n' +
+        'apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: ' + name + '\n' +
+        '  namespace: flux-system\nspec:\n  interval: 5m\n  path: ./' + path + '\n  prune: true\n' +
+        (autosync ? '' : '  suspend: true   # auto-sync OFF: run `flux resume` / `flux reconcile` to apply\n') +
+        '  sourceRef: { kind: GitRepository, name: gitops }\n  targetNamespace: primeflow\n\n';
+    }
+
+    out += '# ---- commit & open a change ----\n' +
+      'git clone ' + repo + ' gitops && cd gitops\n' +
+      'git checkout -b ' + head + '\n' +
+      'mkdir -p ' + path + '   # write the files above into it\n' +
+      'git add ' + path + '\n' +
+      'git commit -m "add PrimeFlow worker ' + name + ' (pools: ' + queues + ')"\n' +
+      'git push -u origin ' + head + '\n';
+    if (host === 'github') out += 'gh pr create --base ' + base + ' --head ' + head + ' --fill\n';
+    else if (host === 'gitlab') out += 'glab mr create --source-branch ' + head + ' --target-branch ' + base + ' --fill\n';
+    else out += '# open a merge / pull request: ' + head + ' -> ' + base + '\n';
+
+    out += '\n# ---- sync ' + (autosync ? '(auto-sync is ON — the controller reconciles on merge) ----\n' : '(auto-sync is OFF — trigger it) ----\n');
+    if (method === 'argocd') out += 'argocd app sync ' + name + (autosync ? '   # optional: force an immediate reconcile\n' : '\n');
+    else if (method === 'flux') out += 'flux reconcile kustomization ' + name + ' --with-source\n';
+    else out += 'argocd app sync ' + name + '   # or: flux reconcile kustomization ' + name + '   # or your CD tool\'s sync trigger\n';
+  }
+
+  out += '\n# The worker registers on start and appears on the Workers page as "' + name + '".';
+  document.getElementById('wk-out').textContent = out;
 }
 
 // --- event timeline -------------------------------------------------------
@@ -1279,9 +1747,48 @@ function showSettings(s) {
   settingsTab = s;
   document.querySelectorAll('#settings-subnav button').forEach(b => b.classList.toggle('active', b.dataset.s === s));
   document.getElementById('settings-external').hidden = s !== 'external';
+  document.getElementById('settings-git').hidden = s !== 'git';
   document.getElementById('settings-users').hidden = s !== 'users';
   if (s === 'external') { loadExternalSettings(); loadRoles().then(() => { loadKeys(); renderExplorer(); }); }
+  else if (s === 'git') loadGitConnection();
   else loadUsers();
+}
+
+async function loadGitConnection() {
+  try {
+    const g = await api('/settings/git');
+    const el = document.getElementById('git-form').elements;
+    el.repo_url.value = g.repo_url || '';
+    el.branch.value = g.branch || 'main';
+    el.base_path.value = g.base_path || '';
+    el.provider.value = g.provider || '';
+    el.author_name.value = g.author_name || '';
+    el.author_email.value = g.author_email || '';
+    el.auto_sync.checked = !!g.auto_sync;
+    el.token.value = '';
+    el.token.placeholder = g.has_token ? 'a token is stored — blank keeps it' : 'personal access token';
+    document.getElementById('git-status').textContent = g.updated_at ? 'saved ' + when(g.updated_at) : '';
+    window.__git = g;
+  } catch (e) { toast(e.message, true); }
+}
+
+async function saveGitConnection(ev) {
+  ev.preventDefault();
+  const el = ev.target.elements;
+  const body = {
+    repo_url: el.repo_url.value.trim(),
+    branch: el.branch.value.trim() || 'main',
+    base_path: el.base_path.value.trim(),
+    author_name: el.author_name.value.trim(),
+    author_email: el.author_email.value.trim(),
+    auto_sync: el.auto_sync.checked,
+  };
+  if (el.token.value.trim() !== '') body.token = el.token.value.trim();
+  try {
+    await api('/settings/git', { method: 'PUT', body: JSON.stringify(body) });
+    toast('Git connection saved');
+    loadGitConnection();
+  } catch (e) { toast(e.message, true); }
 }
 function showExtTab(t) {
   extTab = t;

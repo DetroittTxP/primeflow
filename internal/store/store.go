@@ -281,6 +281,10 @@ type AuthStore interface {
 	GetExternalAPISettings(ctx context.Context) (core.ExternalAPISettings, error)
 	PutExternalAPISettings(ctx context.Context, s core.ExternalAPISettings) error
 
+	// --- git connection (GitOps worker delivery target) ---
+	GetGitConnection(ctx context.Context) (core.GitConnection, error)
+	PutGitConnection(ctx context.Context, c core.GitConnection) error
+
 	// --- api keys ---
 	CreateAPIKey(ctx context.Context, k *core.APIKey) error
 	GetAPIKey(ctx context.Context, id string) (*core.APIKey, error)

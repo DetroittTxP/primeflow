@@ -30,6 +30,7 @@ const (
 	ScopeReadDeployments  Scope = "read:deployments"
 	ScopeReadQueues       Scope = "read:queues"
 	ScopeReadEvents       Scope = "read:events"
+	ScopeReadWorkers      Scope = "read:workers"
 	ScopeWriteRuns        Scope = "write:runs"
 	ScopeWriteDeployments Scope = "write:deployments"
 	ScopeWriteQueues      Scope = "write:queues"
@@ -60,7 +61,7 @@ var roles = map[string]Role{
 		ID: "api-admin", Label: "API Administrator",
 		Description: "Full read and write across runs, deployments and queues.",
 		Scopes: []Scope{
-			ScopeReadRuns, ScopeReadDeployments, ScopeReadQueues, ScopeReadEvents,
+			ScopeReadRuns, ScopeReadDeployments, ScopeReadQueues, ScopeReadEvents, ScopeReadWorkers,
 			ScopeWriteRuns, ScopeWriteDeployments, ScopeWriteQueues,
 		},
 	},
@@ -72,7 +73,7 @@ var roles = map[string]Role{
 	"api-readonly": {
 		ID: "api-readonly", Label: "API Read-Only",
 		Description: "BI, analytics and audit pipelines. Reads every collection; mutates nothing.",
-		Scopes:      []Scope{ScopeReadRuns, ScopeReadDeployments, ScopeReadQueues, ScopeReadEvents},
+		Scopes:      []Scope{ScopeReadRuns, ScopeReadDeployments, ScopeReadQueues, ScopeReadEvents, ScopeReadWorkers},
 	},
 }
 
@@ -115,7 +116,9 @@ var Routes = []Route{
 	{Method: "GET", Path: "/deployments/{id}", Scope: ScopeReadDeployments},
 	{Method: "POST", Path: "/deployments/{id}/run", Scope: ScopeWriteRuns},
 	{Method: "GET", Path: "/queues", Scope: ScopeReadQueues},
+	{Method: "POST", Path: "/queues", Scope: ScopeWriteQueues},
 	{Method: "GET", Path: "/queues/{name}/pending", Scope: ScopeReadQueues},
+	{Method: "GET", Path: "/workers", Scope: ScopeReadWorkers},
 	{Method: "GET", Path: "/events", Scope: ScopeReadEvents},
 }
 

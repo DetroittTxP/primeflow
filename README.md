@@ -407,11 +407,22 @@ unauthenticated so probes need no credential.
 | `GET /queues/{name}` | one work pool: workers + computed `desired_workers` |
 | `GET /runs/{id}/children` | sub-flow runs a run started |
 | `GET/PUT /settings/log-retention` | `pf_logs` cleanup policy (admin) |
+| `GET/PUT /settings/git` | GitOps target repo for worker delivery — repo URL, branch, base path, PAT (write-only), auto-sync flag (admin) |
 | `GET /stats?window=8h` | time-bucketed activity for the Dashboard |
 | `GET /metrics` | Prometheus (unauthenticated) |
 
-The External API lives under `/api/external/v1` (runs, deployments, queues,
-events) and is documented in [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md).
+The External API lives under `/api/external/v1` and is documented in
+[`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md). It is a
+key-authenticated, scope-gated projection:
+
+| | scope |
+|---|---|
+| `GET /runs`, `POST /runs`, `GET /runs/{id}` (+ `/tasks` `/logs` `/artifacts`) | `read:runs` / `write:runs` |
+| `GET /deployments`, `GET /deployments/{id}`, `POST /deployments/{id}/run` | `read:deployments` / `write:runs` |
+| `GET /queues`, `GET /queues/{name}/pending` | `read:queues` |
+| `POST /queues` — **create / update a work pool** (IaC & GitOps callers) | `write:queues` |
+| `GET /workers` — live worker heartbeat table (read-only; workers self-register) | `read:workers` |
+| `GET /events` | `read:events` |
 
 ---
 
@@ -470,6 +481,54 @@ internal/otelinit/      OTLP tracing setup (no-op unless an endpoint is set)
 examples/primex-worker/ VM provisioning, metering, and a sub-flow fleet demo
 deploy/k8s/             manifests + KEDA/HPA autoscaling examples
 ```
+
+---
+
+## For new developers
+
+**Get it running.** `docker compose up --build` brings up Postgres, NATS, Redis,
+the server (`:8080`), two workers and a push receiver. Log in with
+`admin@primeflow.local` / `primeflow-admin` (compose defaults). `make build`
+produces `bin/primeflow` (server + CLI) and `bin/primex-worker` for running
+against the compose Postgres/NATS directly — a worker only needs
+`PRIMEFLOW_DATABASE_URL` + `PRIMEFLOW_NATS_URL`, it does not have to be a
+container.
+
+**The console is embedded, no build step.** `internal/server/ui/*.html` is
+compiled into the binary via `//go:embed` ([`internal/server/ui.go`](internal/server/ui.go)).
+`index.html` is the whole SPA — one `<style>`, one `<script>`, view sections
+`#v-<name>` toggled by `show(name)`, data via `api('/path')`. Edit it, rebuild
+the server image (`docker compose up -d --build server`), hard-refresh (favicons
+and the bundle cache hard).
+
+**Add an endpoint.**
+1. Handler in `internal/server/*.go` (`handlers.go`, `flows.go`, `apikeys.go`, …).
+   Use `decode(r, &body)`, `writeJSON`, `writeErr`, `fail`.
+2. Route in `internal/server/server.go` (`mux.HandleFunc("METHOD /api/v1/…", s.h)`).
+   `/api/v1/settings/*`, `/api/v1/users*`, `/api/v1/api-keys*` are admin-gated by
+   `adminOperatorPath`.
+3. External twin (optional): handler in `internal/server/external.go`, route in
+   `externalMux()`, and add it to `apiauth.Routes` with a `Scope` — that slice is
+   the single source of truth the router, the auth middleware and the API
+   Explorer all read.
+
+**Add a store method + setting.** Persistence is an interface
+([`internal/store/store.go`](internal/store/store.go)) with one implementation
+(`internal/store/postgres`). Instance settings are JSON rows in `pf_settings`
+keyed by a string — copy `GetGitConnection` / `PutGitConnection`
+([`internal/store/postgres/gitconn.go`](internal/store/postgres/gitconn.go)): no
+migration, `INSERT … ON CONFLICT (key) DO UPDATE`, and keep secrets out of the
+read path.
+
+**Add a schema migration.** Drop
+`internal/store/postgres/migrations/000N_name.sql` — additive and idempotent
+(`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), embedded and applied
+in order on server start unless `-no-migrate`.
+
+**Tests.** `make test-unit` (no DB) and `make test-integration`
+(`PRIMEFLOW_TEST_DATABASE_URL`, `-p 1` because the packages share one DB). Note:
+`TestLogPartitionMaintenance` is calendar-sensitive and can fail near month
+boundaries independent of your change.
 
 ---
 
@@ -568,6 +627,68 @@ sdk.Flow("provision-vm", provisionVM,
     sdk.ParamsSchema(ProvisionParams{OrgName: "acme", CPU: 2}))
 ```
 
+### Work Pools
+
+**Create pool…** opens a form (name, `pull`/`push` type, concurrency limit,
+owner, and — for pull pools — the `min` / `max` / `target-ready-per-worker`
+autoscaling envelope; for push pools — the endpoint URL and HMAC secret). Rows
+carry **Pause/Resume**, **Limit…**, **Autoscale…** and **Make push…**.
+
+### Workers
+
+The table lists the live heartbeat rows (workers self-register on start). **Click
+a row** for a detail dialog: parameters (id, pools, concurrency, active runs,
+heartbeat), the resolved `PRIMEFLOW_*` env, the **Deployment + Secret YAML**
+rendered from that worker's live config, and the **package list** the host needs
+(base components plus flow-specific ones inferred from the registered flows'
+tags — e.g. a `vcd` tag adds "VMware Cloud Director API + client library").
+
+**Add worker…** is a full page, not a modal. It captures name / concurrency /
+image, the pools it serves (**+ Create pool…** inline), a **host-requirements
+checklist that gates generation**, and a **Delivery** method:
+
+- **Git commit + PR/MR** (default) — renders `secret.yaml`, `deployment.yaml`,
+  `kustomization.yaml`, then `git clone → checkout -b → add → commit → push` and
+  a host-aware `gh pr create` / `glab mr create`.
+- **Argo CD Application** — plus an `argoproj.io/v1alpha1 Application` CR and
+  `argocd app create`.
+- **Flux Kustomization** — plus a `kustomize.toolkit.fluxcd.io/v1 Kustomization`.
+- **Script** — Docker `run` / systemd unit / `kubectl apply`.
+
+An **Auto-sync** toggle threads through every GitOps mode: on ⇒
+`syncPolicy.automated` (Argo) / no `suspend` (Flux); off ⇒ manual, and the
+output appends the exact **sync command** (`argocd app sync` /
+`flux reconcile kustomization … --with-source`). The git fields pre-fill from
+**Settings → Git connection**.
+
+### Settings → Git connection
+
+Stores the GitOps target repo (`GET/PUT /api/v1/settings/git`): repo URL, branch,
+base path, commit author, and a **write-only PAT** (stored, never returned; a
+read reports only `has_token`). The provider (`github` / `gitlab` / `other`) is
+derived from the URL. Today this connection pre-fills the Add-worker git fields;
+**server-side clone/commit/push and an auto-sync reconciler are the next
+iteration** (see Known gaps).
+
+---
+
+## GitOps worker delivery
+
+PrimeFlow does not deploy workers itself — it renders the manifests and hands you
+the apply path. The current flow:
+
+1. Configure **Settings → Git connection** once.
+2. **Workers → Add worker…**, pick pools + delivery method + auto-sync, confirm
+   the host-requirements checklist.
+3. Copy the generated bundle (manifests + Argo/Flux CR + git/sync commands) into
+   your GitOps repo. Your CD controller reconciles it; the worker registers on
+   start and appears in the Workers table, where its live config round-trips back
+   to the same YAML.
+
+**External / IaC callers** get the write half of pool management with
+`POST /api/external/v1/queues` (scope `write:queues`) and read the fleet with
+`GET /api/external/v1/workers` (scope `read:workers`).
+
 ---
 
 ## Known gaps
@@ -587,3 +708,11 @@ Honest list of what is not built yet:
 - **Push pools don't build or ship your code.** The receiver is still your
   PrimeFlow binary with database access; there is no code-upload step.
 - **Single OTLP exporter.** Traces only; no metrics-over-OTLP, no log export.
+- **GitOps worker delivery is generate-only so far.** *Settings → Git
+  connection* is stored and the Add-worker page renders every artifact, but the
+  server does not yet clone/commit/push. Next iteration: a `pf_worker_specs`
+  table with full CRUD (operator + `/api/external/v1/worker-specs`), a
+  server-side `git` engine, an auto-sync reconciler, and `git` in the (currently
+  distroless) image. Until then the Workers detail dialog shows *Sync now* /
+  *Auto-sync* as disabled placeholders and the Add-worker page emits the sync
+  commands for you to run.
