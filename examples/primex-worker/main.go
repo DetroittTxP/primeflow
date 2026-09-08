@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"math/rand"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/primex/primeflow/pkg/primeflow/worker"
@@ -638,6 +640,580 @@ func workerName() string {
 	return host
 }
 
+// ------------------------------------------------------------ site-audit ---
+//
+// site-audit is the deep per-site flow. Where onboard-tenant is a straight line
+// of six stages, this one has the three shapes a real site operation grows into
+// once it touches something it cannot simply retry:
+//
+//   - a fan-out whose checkpoint keys come from the data (one probe per
+//     subsystem), so adding a subsystem does not renumber the others;
+//   - resources that must be torn down in reverse if a later stage fails --
+//     the saga below -- because a maintenance window left open and a snapshot
+//     left behind are exactly what a half-finished run leaks;
+//   - a durable wait long enough to hand the worker slot back, followed by
+//     bounded polling, which is what "wait for it to settle, then check"
+//     actually costs on a site VM.
+
+// AuditParams drives one site's audit. Everything is optional: the defaults are
+// a complete, ~40s audit, so an operator can trigger it with `{}`.
+type AuditParams struct {
+	Site        string   `json:"site,omitempty"`         // label for the report; the queue decides where it runs
+	Subsystems  []string `json:"subsystems,omitempty"`   // default: control-plane, storage, network, telemetry
+	BakeSeconds int      `json:"bake_seconds,omitempty"` // durable wait after the snapshot, default 8
+	Window      string   `json:"window,omitempty"`       // YYYY-MM-DDTHH; empty means "this hour"
+	FailAt      string   `json:"fail_at,omitempty"`      // stage to fail on purpose, to watch the rollback
+}
+
+// auditStages is the pipeline in order, and the whitelist fail_at is checked
+// against, so a typo is rejected up front instead of quietly never firing.
+var auditStages = []string{"plan", "probe", "open-window", "snapshot", "verify", "seal"}
+
+// auditSubsystems is what a site is probed for when the caller names nothing.
+var auditSubsystems = []string{"control-plane", "storage", "network", "telemetry"}
+
+// Probe is one subsystem's reading. Attempts is carried in the result rather
+// than only in the checkpoint so the report itself shows which probe was flaky.
+type Probe struct {
+	Subsystem string `json:"subsystem"`
+	Healthy   bool   `json:"healthy"`
+	LatencyMS int    `json:"latency_ms"`
+	Attempts  int    `json:"attempts"`
+}
+
+// Window and Snapshot are the two resources the audit creates, and therefore
+// the two things the saga has to be able to undo.
+type Window struct {
+	ID     string `json:"id"`
+	Opened string `json:"opened"`
+}
+
+type Snapshot struct {
+	ID      string `json:"id"`
+	SizeGB  int    `json:"size_gb"`
+	Subsyss int    `json:"subsystems"`
+}
+
+// AuditResult is the run result, and the row fleet-audit puts in its table.
+type AuditResult struct {
+	Site       string  `json:"site"`
+	Worker     string  `json:"worker"`
+	Queue      string  `json:"queue"`
+	Window     string  `json:"window"`
+	Probes     []Probe `json:"probes"`
+	Unhealthy  int     `json:"unhealthy"`
+	SnapshotID string  `json:"snapshot_id"`
+	Sealed     bool    `json:"sealed"`
+	Seconds    float64 `json:"seconds"`
+}
+
+// ------------------------------------------------------------------ saga ---
+
+// saga is the list of compensations a run has earned so far, oldest first. It
+// is rebuilt on every replay: the forward stages return from their checkpoints
+// without re-executing, but they still push their undo, so a resumed run knows
+// exactly as much about what exists as the run that created it did.
+type saga struct {
+	steps []sagaStep
+}
+
+type sagaStep struct {
+	name string
+	undo func(*sdk.Context) error
+}
+
+func (s *saga) push(name string, undo func(*sdk.Context) error) {
+	s.steps = append(s.steps, sagaStep{name: name, undo: undo})
+}
+
+// unwind runs every compensation in reverse -- the last thing built is the
+// first thing torn down. Each undo is itself a checkpointed task, so a rollback
+// interrupted halfway resumes at the step it reached instead of deleting a
+// resource twice, which for a real snapshot is the difference between a clean
+// rollback and an error nobody can distinguish from success.
+func (s *saga) unwind(c *sdk.Context, cause error) error {
+	for i := len(s.steps) - 1; i >= 0; i-- {
+		st := s.steps[i]
+		c.Warn("compensating", "step", st.name, "because", cause.Error())
+		if err := sdk.Do(c, "undo-"+st.name, st.undo,
+			sdk.TaskKey("undo:"+st.name),
+			sdk.TaskRetries(3),
+			sdk.TaskRetryDelay(time.Second),
+		); err != nil {
+			// A failed rollback is worse than the original failure: it is the
+			// case a human has to look at, so it replaces the cause.
+			return sdk.Permanent(fmt.Errorf("rollback of %s failed (original failure: %v): %w", st.name, cause, err))
+		}
+	}
+	return nil
+}
+
+// siteAudit audits one site: probe it, open a maintenance window, snapshot it,
+// let it settle, verify, seal. A failure anywhere after the window is opened
+// unwinds everything already built, in reverse.
+func siteAudit(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[AuditParams](c)
+	if err != nil {
+		return nil, err
+	}
+	if p.FailAt != "" && !slices.Contains(auditStages, p.FailAt) {
+		return nil, sdk.Permanent(fmt.Errorf("fail_at %q is not a stage; want one of %v", p.FailAt, auditStages))
+	}
+	subsystems := p.Subsystems
+	if len(subsystems) == 0 {
+		subsystems = auditSubsystems
+	}
+	bake := p.BakeSeconds
+	if bake <= 0 {
+		bake = 8
+	}
+	started := time.Now()
+	who := workerName()
+
+	// 1. The window is frozen in a checkpoint before anything derives a key
+	//    from it. Computed inline, a run that starts at 10:59 and replays at
+	//    11:00 would look up a different hour, miss every cache key below, and
+	//    re-probe a site it had already finished.
+	window, err := sdk.Task(c, "plan", func(*sdk.Context) (string, error) {
+		if err := auditGate(p, "plan"); err != nil {
+			return "", err
+		}
+		if p.Window != "" {
+			return p.Window, nil
+		}
+		return time.Now().UTC().Format("2006-01-02T15"), nil
+	}, sdk.TaskKey("plan"))
+	if err != nil {
+		return nil, err
+	}
+
+	site := p.Site
+	if site == "" {
+		site = c.Run().WorkQueue
+	}
+	c.Info("audit starting", "site", site, "worker", who, "window", window,
+		"subsystems", len(subsystems), "bake_seconds", bake)
+
+	var undo saga
+
+	// 2. One probe per subsystem, keyed by the subsystem name rather than by
+	//    loop position: inserting a subsystem at the front on a later attempt
+	//    then leaves every other probe's checkpoint where it was instead of
+	//    shifting all of them and re-probing a site that was already done.
+	//
+	//    storage fails its first two attempts every time. A retry you can point
+	//    at beats one you wait for the dice to produce, and it makes the x3 in
+	//    that lane part of the fixture rather than a flake.
+	tries := map[string]int{}
+	probes := make([]Probe, 0, len(subsystems))
+	for _, sub := range subsystems {
+		probe, pErr := sdk.Task(c, "probe", func(c *sdk.Context) (Probe, error) {
+			tries[sub]++
+			if err := auditGate(p, "probe"); err != nil {
+				return Probe{}, err
+			}
+			if err := work(c, 250*time.Millisecond); err != nil {
+				return Probe{}, err
+			}
+			if sub == "storage" && tries[sub] <= 2 {
+				return Probe{}, fmt.Errorf("%s: array busy, attempt %d", sub, tries[sub])
+			}
+			return Probe{
+				Subsystem: sub,
+				Healthy:   sub != "telemetry", // telemetry is degraded on purpose: a finding, not a failure
+				LatencyMS: 20 + rand.Intn(180),
+				Attempts:  tries[sub],
+			}, nil
+		},
+			// Explicit keys are not decoration here. A task nested inside a
+			// retried parent that relied on ordinals would number itself
+			// differently on the second attempt and miss its own checkpoint.
+			sdk.TaskKey("probe:"+sub),
+			sdk.TaskRetries(3),
+			sdk.TaskRetryDelay(time.Second),
+		)
+		if pErr != nil {
+			return nil, pErr
+		}
+		probes = append(probes, probe)
+	}
+	unhealthy := 0
+	for _, pr := range probes {
+		if !pr.Healthy {
+			unhealthy++
+		}
+	}
+	c.Info("probes complete", "count", len(probes), "unhealthy", unhealthy)
+
+	// 3. First resource. From here on a failure has something to clean up.
+	win, err := sdk.Task(c, "open-window", func(c *sdk.Context) (Window, error) {
+		if err := auditGate(p, "open-window"); err != nil {
+			return Window{}, err
+		}
+		if err := work(c, 600*time.Millisecond); err != nil {
+			return Window{}, err
+		}
+		return Window{ID: fmt.Sprintf("win-%s-%s", site, window), Opened: time.Now().UTC().Format(time.RFC3339)}, nil
+	}, sdk.TaskKey("open-window"), sdk.TaskRetries(2))
+	if err != nil {
+		return nil, err
+	}
+	undo.push("open-window", func(c *sdk.Context) error {
+		c.Info("closing maintenance window", "window_id", win.ID)
+		return work(c, 300*time.Millisecond)
+	})
+
+	// 4. The expensive, side-effecting step: its own checkpoint and its own
+	//    timeout, so a crash after it never takes a second snapshot.
+	snap, err := sdk.Task(c, "snapshot", func(c *sdk.Context) (Snapshot, error) {
+		if err := auditGate(p, "snapshot"); err != nil {
+			return Snapshot{}, err
+		}
+		if err := work(c, 1200*time.Millisecond); err != nil {
+			return Snapshot{}, err
+		}
+		return Snapshot{
+			ID:      fmt.Sprintf("snap-%s-%d", site, time.Now().UnixNano()%1e6),
+			SizeGB:  40 + rand.Intn(200),
+			Subsyss: len(probes),
+		}, nil
+	},
+		sdk.TaskKey("snapshot"),
+		sdk.TaskRetries(2),
+		sdk.TaskRetryDelay(3*time.Second),
+		sdk.TaskTimeout(2*time.Minute),
+	)
+	if err != nil {
+		return nil, errors.Join(err, undo.unwind(c, err))
+	}
+	undo.push("snapshot", func(c *sdk.Context) error {
+		c.Info("deleting snapshot", "snapshot_id", snap.ID)
+		return work(c, 500*time.Millisecond)
+	})
+	c.Info("snapshot taken", "snapshot_id", snap.ID, "size_gb", snap.SizeGB)
+
+	// 5. Let it settle. Past the suspend threshold this hands the worker slot
+	//    back and the run is rescheduled for the wake time; under it the run
+	//    simply blocks. Either way the stages above replay from their
+	//    checkpoints rather than running again.
+	if err := sdk.Sleep(c, "bake", time.Duration(bake)*time.Second); err != nil {
+		if _, suspended := sdk.IsSuspend(err); suspended {
+			return nil, err // not a failure: nothing to unwind
+		}
+		return nil, errors.Join(err, undo.unwind(c, err))
+	}
+
+	// 6. Bounded polling, with each attempt its own checkpoint so a crash
+	//    mid-verify resumes on the attempt it reached instead of restarting the
+	//    poll. This is the nested-task shape: a keyed task inside a loop inside
+	//    a stage.
+	verified, err := sdk.Task(c, "verify", func(c *sdk.Context) (int, error) {
+		if err := auditGate(p, "verify"); err != nil {
+			return 0, err
+		}
+		for attempt := 1; attempt <= 5; attempt++ {
+			ok, aErr := sdk.Task(c, "verify-attempt", func(c *sdk.Context) (bool, error) {
+				if err := work(c, 400*time.Millisecond); err != nil {
+					return false, err
+				}
+				// Settles by the third look, deterministically.
+				return attempt >= 3, nil
+			}, sdk.TaskKey(fmt.Sprintf("verify:%s:%02d", snap.ID, attempt)))
+			if aErr != nil {
+				return 0, aErr
+			}
+			if ok {
+				return attempt, nil
+			}
+		}
+		return 0, fmt.Errorf("snapshot %s did not settle in 5 attempts", snap.ID)
+	}, sdk.TaskKey("verify"), sdk.TaskRetries(1))
+	if err != nil {
+		return nil, errors.Join(err, undo.unwind(c, err))
+	}
+	c.Info("snapshot verified", "attempts", verified)
+
+	// 7. Sealing is the commit point. Once it succeeds the window is closed
+	//    deliberately rather than rolled back, so the saga is dropped.
+	if err := sdk.Do(c, "seal", func(c *sdk.Context) error {
+		if err := auditGate(p, "seal"); err != nil {
+			return err
+		}
+		return work(c, 400*time.Millisecond)
+	}, sdk.TaskKey("seal"), sdk.TaskRetries(2), sdk.TaskRetryDelay(2*time.Second)); err != nil {
+		return nil, errors.Join(err, undo.unwind(c, err))
+	}
+	if err := sdk.Do(c, "close-window", func(c *sdk.Context) error {
+		c.Info("closing maintenance window", "window_id", win.ID)
+		return work(c, 300*time.Millisecond)
+	}, sdk.TaskKey("close-window"), sdk.TaskRetries(3)); err != nil {
+		return nil, err
+	}
+
+	elapsed := time.Since(started).Seconds()
+	_ = c.Table("probes-"+site, probes)
+	_ = c.Markdown("audit", fmt.Sprintf(
+		"### Audit of %s\n\n- **Worker:** %s (pool `%s`)\n- **Window:** %s\n- **Probes:** %d, %d degraded\n"+
+			"- **Snapshot:** `%s` (%d GB), verified on attempt %d\n- **Elapsed:** %.1fs\n",
+		site, who, c.Run().WorkQueue, window, len(probes), unhealthy, snap.ID, snap.SizeGB, verified, elapsed))
+
+	return AuditResult{
+		Site: site, Worker: who, Queue: c.Run().WorkQueue, Window: window,
+		Probes: probes, Unhealthy: unhealthy, SnapshotID: snap.ID,
+		Sealed: true, Seconds: elapsed,
+	}, nil
+}
+
+// auditGate is the one-line check each stage carries so fail_at can stop the
+// pipeline anywhere. Permanent, because a stage failed on request should not
+// then burn the retry budget pretending the failure might be transient.
+func auditGate(p AuditParams, stage string) error {
+	if p.FailAt == stage {
+		return sdk.Permanent(fmt.Errorf("stage %q failed on purpose (fail_at)", stage))
+	}
+	return nil
+}
+
+// ----------------------------------------------------------- fleet-audit ---
+//
+// fleet-audit is the orchestrator: it audits every site, one canary first and
+// then the rest in parallel waves. It is the counterpart to provision-fleet,
+// which waits for its children one at a time -- here the whole wave is in
+// flight at once, and the parent is asleep for all of it.
+
+// FleetAuditParams drives the fan-out.
+type FleetAuditParams struct {
+	Sites       []string `json:"sites,omitempty"`        // default: site-a..d, vm1
+	Canary      string   `json:"canary,omitempty"`       // audited alone first; empty means Sites[0]
+	WaveSize    int      `json:"wave_size,omitempty"`    // sites per parallel wave, default 2
+	Prefix      string   `json:"prefix,omitempty"`       // deployment name = prefix + site, default "site-audit-"
+	BakeSeconds int      `json:"bake_seconds,omitempty"` // passed to each child
+	FailSite    string   `json:"fail_site,omitempty"`    // this site gets fail_at, to exercise a partial fleet failure
+	FailAt      string   `json:"fail_at,omitempty"`
+}
+
+// fleetSites is the fleet as docker-compose.sites.yml builds it.
+var fleetSites = []string{"site-a", "site-b", "site-c", "site-d", "vm1"}
+
+// SiteOutcome is one site's line in the fleet report. It is deliberately flat:
+// a table artifact of these is the thing an operator actually reads.
+type SiteOutcome struct {
+	Site       string  `json:"site"`
+	Wave       int     `json:"wave"`
+	RunID      string  `json:"run_id"`
+	Status     string  `json:"status"`
+	Worker     string  `json:"worker,omitempty"`
+	Probes     int     `json:"probes"`
+	Unhealthy  int     `json:"unhealthy"`
+	SnapshotID string  `json:"snapshot_id,omitempty"`
+	Seconds    float64 `json:"seconds"`
+	Message    string  `json:"message,omitempty"`
+}
+
+// FleetAuditResult is the run result.
+type FleetAuditResult struct {
+	Sites     int           `json:"sites"`
+	Waves     int           `json:"waves"`
+	Failed    int           `json:"failed"`
+	Unhealthy int           `json:"unhealthy"`
+	Canary    string        `json:"canary"`
+	Outcomes  []SiteOutcome `json:"outcomes"`
+}
+
+func fleetAudit(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[FleetAuditParams](c)
+	if err != nil {
+		return nil, err
+	}
+	sites := p.Sites
+	if len(sites) == 0 {
+		sites = fleetSites
+	}
+	if len(sites) > 32 {
+		return nil, sdk.Permanent(fmt.Errorf("sites must be 32 or fewer, got %d", len(sites)))
+	}
+	prefix := p.Prefix
+	if prefix == "" {
+		prefix = "site-audit-"
+	}
+	waveSize := p.WaveSize
+	if waveSize <= 0 {
+		waveSize = 2
+	}
+	canary := p.Canary
+	if canary == "" {
+		canary = sites[0]
+	}
+	if !slices.Contains(sites, canary) {
+		return nil, sdk.Permanent(fmt.Errorf("canary %q is not in sites %v", canary, sites))
+	}
+
+	// The plan is a checkpoint so the wave boundaries cannot move under a
+	// replay: every dispatch key below is derived from it.
+	rest := make([]string, 0, len(sites))
+	for _, s := range sites {
+		if s != canary {
+			rest = append(rest, s)
+		}
+	}
+	waves, err := sdk.Task(c, "plan", func(*sdk.Context) ([][]string, error) {
+		var out [][]string
+		for i := 0; i < len(rest); i += waveSize {
+			out = append(out, rest[i:min(i+waveSize, len(rest))])
+		}
+		return out, nil
+	}, sdk.TaskKey("plan"))
+	if err != nil {
+		return nil, err
+	}
+	c.Info("fleet audit planned", "sites", len(sites), "canary", canary, "waves", len(waves), "wave_size", waveSize)
+
+	outcomes := make([]SiteOutcome, 0, len(sites))
+
+	// The canary goes alone and gates everything else: if one site cannot be
+	// audited, dispatching the other four only multiplies the mess. This is the
+	// sequential shape -- RunDeploymentAndWait suspends until the child lands.
+	child, err := c.RunDeploymentAndWait(prefix+canary, auditParamsFor(p, canary),
+		sdk.TriggerTags("fleet-audit", "canary"))
+	if err != nil {
+		return nil, err
+	}
+	outcomes = append(outcomes, outcomeOf(canary, 0, child.RunID, child.Status, "", child.Result))
+	c.Info("canary passed", "site", canary, "run_id", child.RunID)
+
+	// Then the waves. Each is dispatched all at once and waited on as a group:
+	// the parent releases its slot and the engine wakes it when the last child
+	// of the wave settles.
+	for w, wave := range waves {
+		ids := make([]string, 0, len(wave))
+		for _, site := range wave {
+			id, dErr := sdk.Task(c, "dispatch", func(c *sdk.Context) (string, error) {
+				return c.RunDeployment(prefix+site, auditParamsFor(p, site),
+					sdk.TriggerTags("fleet-audit", fmt.Sprintf("wave-%d", w+1)),
+					// The checkpoint already makes this exactly-once on a
+					// replay; the idempotency key closes the one gap it cannot
+					// -- a crash between the trigger landing and the checkpoint
+					// being written.
+					sdk.TriggerIdempotencyKey(fmt.Sprintf("fleet:%s:%s", c.Run().RunID, site)),
+				)
+			}, sdk.TaskKey("dispatch:"+site))
+			if dErr != nil {
+				return nil, dErr
+			}
+			ids = append(ids, id)
+		}
+
+		states, err := awaitRuns(c, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i, site := range wave {
+			outcomes = append(outcomes, outcomeOf(site, w+1, ids[i], states[i].Status, states[i].Message, states[i].Result))
+		}
+		c.Info("wave complete", "wave", w+1, "sites", len(wave))
+	}
+
+	// Aggregate, then decide. Failing early would leave the operator with a
+	// report on half the fleet, which is the half they already knew about.
+	//
+	// The artifacts are written before the verdict on purpose: a run that ends
+	// FAILED has its result discarded, so on the one run whose report matters
+	// most the table below is the only copy that survives.
+	failed, unhealthy := 0, 0
+	for _, o := range outcomes {
+		if o.Status != "COMPLETED" {
+			failed++
+		}
+		unhealthy += o.Unhealthy
+	}
+
+	_ = c.Table("fleet", outcomes)
+	_ = c.Markdown("fleet-audit", fmt.Sprintf(
+		"### Fleet audit\n\n- **Sites:** %d (canary `%s`, then %d wave(s) of %d)\n"+
+			"- **Failed:** %d\n- **Degraded subsystems:** %d\n\n%s\n",
+		len(sites), canary, len(waves), waveSize, failed, unhealthy, outcomeTable(outcomes)))
+
+	result := FleetAuditResult{
+		Sites: len(sites), Waves: len(waves) + 1, Failed: failed,
+		Unhealthy: unhealthy, Canary: canary, Outcomes: outcomes,
+	}
+	if failed > 0 {
+		// Permanent: re-running the parent would re-dispatch nothing (every
+		// child is checkpointed) and so could only produce the same verdict.
+		return result, sdk.Permanent(fmt.Errorf("%d of %d sites failed their audit", failed, len(outcomes)))
+	}
+	return result, nil
+}
+
+// awaitRuns waits -- durably -- for every run in ids to settle. It returns a
+// suspension while any are still in flight, which hands the worker slot back;
+// the engine reschedules the parent as soon as its last child finishes, and the
+// 30-second re-poll is only the backstop for a wake-up that went missing.
+func awaitRuns(c *sdk.Context, ids []string) ([]sdk.RunState, error) {
+	states := make([]sdk.RunState, len(ids))
+	pending := 0
+	for i, id := range ids {
+		st, err := c.Runtime().GetRunState(c, id)
+		if err != nil {
+			return nil, err
+		}
+		states[i] = st
+		if !st.Terminal() {
+			pending++
+		}
+	}
+	if pending > 0 {
+		return nil, sdk.Suspend(time.Now().Add(30*time.Second),
+			fmt.Sprintf("waiting for %d of %d sites", pending, len(ids)))
+	}
+	return states, nil
+}
+
+// auditParamsFor builds one child's parameters, applying fail_at to the single
+// site the caller nominated so a partial fleet failure can be produced on
+// demand rather than waited for.
+func auditParamsFor(p FleetAuditParams, site string) AuditParams {
+	a := AuditParams{Site: site, BakeSeconds: p.BakeSeconds}
+	if p.FailSite == site {
+		a.FailAt = p.FailAt
+	}
+	return a
+}
+
+// outcomeOf flattens a child run into its report row. A child that failed has
+// no result to decode, so only the status and message survive -- which is
+// exactly what the row should show.
+func outcomeOf(site string, wave int, runID, status, message string, result json.RawMessage) SiteOutcome {
+	o := SiteOutcome{Site: site, Wave: wave, RunID: runID, Status: status, Message: message}
+	var a AuditResult
+	if len(result) > 0 && string(result) != "null" && json.Unmarshal(result, &a) == nil {
+		o.Worker, o.Probes, o.Unhealthy = a.Worker, len(a.Probes), a.Unhealthy
+		o.SnapshotID, o.Seconds = a.SnapshotID, a.Seconds
+	}
+	return o
+}
+
+// outcomeTable renders the outcomes as markdown, because the table artifact and
+// the summary are read in different places and the summary should stand alone.
+func outcomeTable(outcomes []SiteOutcome) string {
+	var b strings.Builder
+	b.WriteString("| Site | Wave | Status | Worker | Probes | Degraded | Snapshot |\n")
+	b.WriteString("|---|---|---|---|---|---|---|\n")
+	for _, o := range outcomes {
+		wave := "canary"
+		if o.Wave > 0 {
+			wave = fmt.Sprintf("%d", o.Wave)
+		}
+		snap := o.SnapshotID
+		if snap == "" {
+			snap = "—"
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %d | %d | `%s` |\n",
+			o.Site, wave, o.Status, o.Worker, o.Probes, o.Unhealthy, snap))
+	}
+	return b.String()
+}
+
 // ------------------------------------------------------------------ main ---
 
 func main() {
@@ -689,6 +1265,26 @@ func main() {
 		sdk.Retries(1),
 		sdk.RetryDelay(5*time.Second),
 		sdk.Timeout(10*time.Minute),
+	)
+
+	sdk.Flow("site-audit", siteAudit,
+		sdk.Description("Probe, snapshot and seal one site -- fan-out keys, a durable wait and a saga rollback"),
+		sdk.Tags("demo", "site", "audit"),
+		sdk.ParamsSchema(AuditParams{Site: "site-a", BakeSeconds: 8}),
+		// No retries on purpose. A run that rolled back has COMPLETED
+		// checkpoints for resources that no longer exist, so replaying it would
+		// skip the rebuild and seal a snapshot it never took. Rolling forward
+		// from a rollback is a new run, not a retry.
+		sdk.Retries(0),
+		sdk.Timeout(15*time.Minute),
+	)
+
+	sdk.Flow("fleet-audit", fleetAudit,
+		sdk.Description("Audit every site: one canary, then parallel waves of child runs"),
+		sdk.Tags("demo", "fleet", "audit"),
+		sdk.ParamsSchema(FleetAuditParams{Sites: fleetSites, WaveSize: 2, BakeSeconds: 8}),
+		sdk.Retries(0),
+		sdk.Timeout(time.Hour),
 	)
 
 	// Two ways to reach the orchestrator: a database connection, or — for a

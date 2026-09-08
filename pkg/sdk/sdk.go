@@ -448,3 +448,11 @@ func TriggerDelay(d time.Duration) TriggerOption { return func(o *TriggerOptions
 
 // TriggerTags adds tags to the new run.
 func TriggerTags(t ...string) TriggerOption { return func(o *TriggerOptions) { o.Tags = t } }
+
+// TriggerIdempotencyKey makes a bare RunDeployment safe to replay: a second
+// trigger carrying the same key returns the run the first one created instead
+// of starting another. RunDeploymentAndWait sets one for itself; a flow that
+// fans out with RunDeployment and waits for the group needs to set its own.
+func TriggerIdempotencyKey(k string) TriggerOption {
+	return func(o *TriggerOptions) { o.IdempotencyKey = k }
+}
