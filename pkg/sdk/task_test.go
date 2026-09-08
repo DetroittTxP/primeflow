@@ -20,6 +20,7 @@ type fakeRuntime struct {
 	runStates map[string]sdk.RunState
 	logs      []sdk.LogEntry
 	arts      []sdk.ArtifactSpec
+	triggers  []sdk.TriggerOptions
 	saveNo    int
 }
 
@@ -72,8 +73,11 @@ func (f *fakeRuntime) Artifact(_ context.Context, a sdk.ArtifactSpec) error {
 	return nil
 }
 
-func (f *fakeRuntime) TriggerDeployment(context.Context, string, json.RawMessage, sdk.TriggerOptions) (string, error) {
-	return "run-1", nil
+func (f *fakeRuntime) TriggerDeployment(_ context.Context, _ string, _ json.RawMessage, o sdk.TriggerOptions) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.triggers = append(f.triggers, o)
+	return "child-1", nil
 }
 
 func (f *fakeRuntime) GetRunState(_ context.Context, runID string) (sdk.RunState, error) {

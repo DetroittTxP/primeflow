@@ -384,9 +384,15 @@ func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerO
 	if err != nil {
 		return ChildResult{}, err
 	}
+	// Result carries the child run id whatever the checkpoint's status says, so
+	// a replay recovers the id it already triggered and never fans out twice.
 	var childID string
-	if cp != nil && len(cp.Result) > 0 {
-		_ = json.Unmarshal(cp.Result, &childID)
+	var settled bool
+	if cp != nil {
+		if len(cp.Result) > 0 {
+			_ = json.Unmarshal(cp.Result, &childID)
+		}
+		settled = cp.Status == CheckpointCompleted || cp.Status == CheckpointFailed
 	}
 
 	if childID == "" {
@@ -424,14 +430,45 @@ func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerO
 	}
 	switch {
 	case st.Status == "COMPLETED":
+		if !settled {
+			c.settleSubflow(key, name, childID, CheckpointCompleted, "")
+		}
 		return ChildResult{RunID: childID, Status: st.Status, Result: st.Result}, nil
 	case st.Terminal(): // FAILED or CANCELLED
+		if !settled {
+			c.settleSubflow(key, name, childID, CheckpointFailed,
+				fmt.Sprintf("sub-flow %s: %s", st.Status, st.Message))
+		}
 		return ChildResult{RunID: childID, Status: st.Status},
 			Permanent(fmt.Errorf("sub-flow %q %s: %s", name, st.Status, st.Message))
 	default:
 		return ChildResult{RunID: childID, Status: st.Status},
 			Suspend(time.Now().Add(30*time.Second), "waiting for sub-flow "+name)
 	}
+}
+
+// settleSubflow closes the checkpoint that RunDeploymentAndWait opened when it
+// triggered the child, so a lane the parent has stopped waiting on stops
+// reading RUNNING in the console once the child lands.
+//
+// It records a display fact, not a memo of the child's result: Result stays the
+// child run id so replay still recovers it, and the caller re-reads the child's
+// state on every replay rather than trusting this status. Started is left unset
+// on purpose — the engine emits a task span and metric only for a terminal
+// checkpoint carrying one, and the trigger's start time does not survive the
+// parent's suspension, so there is no honest duration to report. A save that
+// fails costs only the displayed status, which is not worth failing an
+// otherwise finished wait over.
+func (c *Context) settleSubflow(key, name, childID string, status CheckpointStatus, msg string) {
+	idRaw, err := json.Marshal(childID)
+	if err != nil {
+		return
+	}
+	ended := time.Now().UTC()
+	_ = c.rt.SaveCheckpoint(c.ctx, Checkpoint{
+		Key: key, Name: "subflow:" + name, Status: status, Result: idRaw,
+		Message: msg, Ended: &ended,
+	})
 }
 
 // TriggerOption customises RunDeployment.
