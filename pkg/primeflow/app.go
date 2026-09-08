@@ -423,7 +423,7 @@ func Open(ctx context.Context, o Options) (*App, error) {
 	}
 
 	return &App{
-		Options: o, Store: st, Bus: b,
+		Options: o, Store: st, WorkerStore: st, Bus: b,
 		Events:        events.New(st, b, o.Logger),
 		Metrics:       metrics.New(st),
 		Log:           o.Logger,
@@ -563,7 +563,7 @@ func (a *App) ServeAPI(ctx context.Context) error {
 
 // ServeWorker runs a worker for the registered flows.
 func (a *App) ServeWorker(ctx context.Context) error {
-	w := worker.New(a.WorkerStore, a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
+	w := worker.New(a.workerStore(), a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
 		Name:            a.Options.WorkerName,
 		Queues:          a.Options.Queues,
 		Concurrency:     a.Options.Concurrency,
@@ -616,7 +616,7 @@ func (a *App) claimForPush(ctx context.Context, runID string) (*core.FlowRun, er
 	// SCHEDULED -> PENDING under our lease. The engine emits flow-run.RUNNING
 	// when it starts, exactly as for a leased run, so we deliberately do not
 	// emit a state-change event here.
-	claimed, err := a.WorkerStore.ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
+	claimed, err := a.workerStore().ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
 	if err != nil {
 		return nil, err // ErrConflict => already claimed by another receiver
 	}
@@ -639,13 +639,13 @@ func (a *App) executePushRun(ctx context.Context, run *core.FlowRun) {
 			case <-done:
 				return
 			case <-t.C:
-				_ = a.WorkerStore.RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
+				_ = a.workerStore().RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
 			}
 		}
 	}()
 	defer close(done)
 
-	eng := engine.New(a.WorkerStore, a.Options.Registry, a.Events, a.Log, engine.Config{
+	eng := engine.New(a.workerStore(), a.Options.Registry, a.Events, a.Log, engine.Config{
 		WorkerID: *run.WorkerID, Metrics: a.Metrics, MaxSubflowDepth: a.Options.MaxSubflowDepth,
 	})
 	eng.Execute(ctx, run)
@@ -765,4 +765,15 @@ func cancelPollFor(o Options) time.Duration {
 		return -1
 	}
 	return 0
+}
+
+// workerStore is what the engine and the worker run against. On the database
+// path the full store is the worker store by definition, so falling back to it
+// keeps the two from drifting apart — a nil here is a panic on the first flow
+// a worker registers, which is a long way from where the mistake was made.
+func (a *App) workerStore() store.WorkerStore {
+	if a.WorkerStore != nil {
+		return a.WorkerStore
+	}
+	return a.Store
 }
