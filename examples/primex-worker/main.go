@@ -17,6 +17,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/primex/primeflow/pkg/primeflow"
@@ -150,10 +151,20 @@ func collectMetering(c *sdk.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	day := p.Day
-	if day == "" {
-		day = time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	// The day is frozen in a checkpoint before anything uses it, because it
+	// feeds every task key below. Derived inline, a run that starts at 23:59
+	// and replays after midnight would compute a different day, miss every
+	// checkpoint, and collect the whole night again under new keys.
+	day, err := sdk.Task(c, "resolve-day", func(*sdk.Context) (string, error) {
+		if p.Day != "" {
+			return p.Day, nil
+		}
+		return time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02"), nil
+	}, sdk.TaskKey("resolve-day"))
+	if err != nil {
+		return nil, err
 	}
+
 	orgs := p.Orgs
 	if len(orgs) == 0 {
 		orgs = []string{"acme", "globex", "initech"}
@@ -324,6 +335,204 @@ func addNumbers(c *sdk.Context) (any, error) {
 	return AddResult{A: p.A, B: p.B, Sum: sum}, nil
 }
 
+// -------------------------------------------------------- onboard-tenant ---
+
+// OnboardParams drives the multi-stage pipeline.
+type OnboardParams struct {
+	OrgName string `json:"org_name"`
+	Tier    string `json:"tier,omitempty"`    // standard | premium
+	FailAt  string `json:"fail_at,omitempty"` // stage to fail on purpose
+}
+
+// onboardStages is the pipeline in order. Naming the stages in one place is
+// what keeps fail_at honest: an unknown stage is rejected up front instead of
+// quietly never firing.
+var onboardStages = []string{
+	"validate", "reserve-quota", "create-network", "attach-storage", "apply-policy", "notify",
+}
+
+// Quota is what reserve-quota books. It is cached per org and tier, so a second
+// onboarding for the same tenant reuses it.
+type Quota struct {
+	Org      string `json:"org"`
+	Tier     string `json:"tier"`
+	VCPU     int    `json:"vcpu"`
+	MemoryGB int    `json:"memory_gb"`
+}
+
+// Network and Storage are the two resources the middle stages build.
+type Network struct {
+	ID   string `json:"id"`
+	CIDR string `json:"cidr"`
+}
+
+type Storage struct {
+	ID       string `json:"id"`
+	Datapool string `json:"datapool"`
+	Attempts int    `json:"attempts"`
+}
+
+// OnboardResult is the run result.
+type OnboardResult struct {
+	Org     string  `json:"org"`
+	Tier    string  `json:"tier"`
+	Quota   Quota   `json:"quota"`
+	Network Network `json:"network"`
+	Storage Storage `json:"storage"`
+	Stages  int     `json:"stages"`
+}
+
+// onboardTenant is six stages, each its own checkpoint, so the console shows
+// where a run got to rather than only whether it finished.
+//
+// Every stage lands in pf_task_runs as it happens: state, attempts, duration
+// and result, one lane per stage on the run's timeline. That is what makes the
+// three interesting cases legible without reading a log --
+//
+//   - reserve-quota is cached across runs, so onboarding the same org twice
+//     shows the second run reusing the first stage instead of re-reserving;
+//   - attach-storage fails its first two attempts on purpose, so its lane
+//     always reads x3 and the retry policy is visible rather than a matter of
+//     luck;
+//   - fail_at stops one named stage, leaving the stages before it COMPLETED
+//     and the rest never started, which is the shape of a real partial failure.
+func onboardTenant(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[OnboardParams](c)
+	if err != nil {
+		return nil, err
+	}
+	if p.FailAt != "" && !slices.Contains(onboardStages, p.FailAt) {
+		return nil, sdk.Permanent(fmt.Errorf("fail_at %q is not a stage; want one of %v", p.FailAt, onboardStages))
+	}
+	tier := p.Tier
+	if tier == "" {
+		tier = "standard"
+	}
+
+	// 1. Cheap validation, still its own checkpoint: the console then shows it
+	//    passed even on a run a later stage failed.
+	org, err := sdk.Task(c, "validate", func(c *sdk.Context) (string, error) {
+		if err := stageGate(p, "validate"); err != nil {
+			return "", err
+		}
+		if p.OrgName == "" {
+			return "", sdk.Permanent(errors.New("org_name is required"))
+		}
+		return p.OrgName, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.Info("onboarding tenant", "org", org, "tier", tier, "stages", len(onboardStages))
+
+	// 2. Quota is the same answer for the same org and tier, so it is cached
+	//    across runs rather than merely checkpointed within one.
+	quota, err := sdk.Task(c, "reserve-quota", func(c *sdk.Context) (Quota, error) {
+		if err := stageGate(p, "reserve-quota"); err != nil {
+			return Quota{}, err
+		}
+		if err := work(c, 900*time.Millisecond); err != nil {
+			return Quota{}, err
+		}
+		q := Quota{Org: org, Tier: tier, VCPU: 16, MemoryGB: 64}
+		if tier == "premium" {
+			q.VCPU, q.MemoryGB = 64, 256
+		}
+		return q, nil
+	}, sdk.TaskCache("quota:"+org+":"+tier, 10*time.Minute), sdk.TaskRetries(2))
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. The slow stage, so there is something with real width on the timeline.
+	net, err := sdk.Task(c, "create-network", func(c *sdk.Context) (Network, error) {
+		if err := stageGate(p, "create-network"); err != nil {
+			return Network{}, err
+		}
+		if err := work(c, 2*time.Second); err != nil {
+			return Network{}, err
+		}
+		return Network{ID: fmt.Sprintf("urn:vcloud:network:%d", time.Now().UnixNano()%1e9), CIDR: "10.42.0.0/16"}, nil
+	}, sdk.TaskRetries(2), sdk.TaskRetryDelay(2*time.Second))
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Deterministically flaky. The counter lives in this invocation, so the
+	//    first two attempts always fail and the third always succeeds -- a
+	//    retry you can point at, not one you wait for the dice to produce. A
+	//    replay skips the stage entirely: the checkpoint is already completed.
+	tries := 0
+	store, err := sdk.Task(c, "attach-storage", func(c *sdk.Context) (Storage, error) {
+		tries++
+		if err := stageGate(p, "attach-storage"); err != nil {
+			return Storage{}, err
+		}
+		if err := work(c, 400*time.Millisecond); err != nil {
+			return Storage{}, err
+		}
+		if tries <= 2 {
+			return Storage{}, fmt.Errorf("storage array busy, attempt %d", tries)
+		}
+		return Storage{ID: "urn:vcloud:disk:" + org, Datapool: "gold", Attempts: tries}, nil
+	}, sdk.TaskRetries(3), sdk.TaskRetryDelay(time.Second))
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Policy, then 6. the notification. Do is Task without a result: it is
+	//    still a checkpoint and still a lane.
+	if err := sdk.Do(c, "apply-policy", func(c *sdk.Context) error {
+		if err := stageGate(p, "apply-policy"); err != nil {
+			return err
+		}
+		return work(c, 1500*time.Millisecond)
+	}, sdk.TaskRetries(2)); err != nil {
+		return nil, err
+	}
+
+	if err := sdk.Do(c, "notify", func(c *sdk.Context) error {
+		if err := stageGate(p, "notify"); err != nil {
+			return err
+		}
+		c.Info("tenant ready", "org", org, "network", net.ID, "storage", store.ID)
+		return work(c, 200*time.Millisecond)
+	}, sdk.TaskRetries(4), sdk.TaskRetryDelay(2*time.Second)); err != nil {
+		return nil, err
+	}
+
+	_ = c.Markdown("onboarded", fmt.Sprintf(
+		"### Tenant onboarded\n\n- **Org:** %s (%s)\n- **Quota:** %d vCPU, %d GB\n- **Network:** `%s` %s\n- **Storage:** `%s` on %s after %d attempts\n",
+		org, tier, quota.VCPU, quota.MemoryGB, net.ID, net.CIDR, store.ID, store.Datapool, store.Attempts))
+
+	return OnboardResult{
+		Org: org, Tier: tier, Quota: quota, Network: net, Storage: store,
+		Stages: len(onboardStages),
+	}, nil
+}
+
+// stageGate is the one-line check every stage carries so fail_at can stop the
+// pipeline anywhere. The error is permanent: a stage failed on request should
+// not then burn the retry budget.
+func stageGate(p OnboardParams, stage string) error {
+	if p.FailAt == stage {
+		return sdk.Permanent(fmt.Errorf("stage %q failed on purpose (fail_at)", stage))
+	}
+	return nil
+}
+
+// work stands in for the call a stage would really make. It honours
+// cancellation, so cancelling a run stops inside the stage rather than waiting
+// for the next checkpoint boundary.
+func work(c *sdk.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-c.Done():
+		return c.Err()
+	}
+}
+
 // ------------------------------------------------------------- site-loop ---
 
 // LoopParams tunes the per-site smoke test: how long to stay busy, and how
@@ -462,6 +671,15 @@ func main() {
 		sdk.ParamsSchema(AddParams{A: 2, B: 3}),
 		sdk.Retries(1),
 		sdk.Timeout(time.Minute),
+	)
+
+	sdk.Flow("onboard-tenant", onboardTenant,
+		sdk.Description("Six checkpointed stages -- the worked example of per-task tracking"),
+		sdk.Tags("demo", "pipeline"),
+		sdk.ParamsSchema(OnboardParams{OrgName: "acme", Tier: "standard"}),
+		sdk.Retries(1),
+		sdk.RetryDelay(10*time.Second),
+		sdk.Timeout(10*time.Minute),
 	)
 
 	sdk.Flow("site-loop", siteLoop,
