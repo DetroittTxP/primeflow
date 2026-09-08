@@ -108,7 +108,15 @@ recorded in the key's audit trail.
 
 ## 2. `vm2` — the worker
 
-The worker has to trust the control plane's certificate, so copy it across:
+Send the directory over first: it is what creates `~/primeflow` on vm2, and the
+certificate lands inside it.
+
+```bash
+scp -r deploy/vm-worker vm2:~/primeflow
+```
+
+The worker has to trust the control plane's certificate, so copy that across
+too — from `mainvm`, where it was generated:
 
 ```bash
 # on mainvm
@@ -121,7 +129,7 @@ scp server.crt vm2:~/primeflow/server.crt
 Then:
 
 ```bash
-scp -r deploy/vm-worker vm2:~/primeflow && ssh vm2
+ssh vm2
 cd ~/primeflow
 
 cp worker.env.example worker.env && chmod 600 worker.env
