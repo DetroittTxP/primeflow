@@ -119,7 +119,8 @@ func (e *Engine) Execute(parent context.Context, run *core.FlowRun) {
 			"flow", run.FlowName, "run", run.ID)
 		e.settle(parent, run, core.NewState(core.StateScheduled, "AwaitingWorker",
 			fmt.Sprintf("flow %q is not registered on worker %s", run.FlowName, e.cfg.WorkerID)),
-			store.StateOpts{ClearLease: true, ScheduleAt: ptr(time.Now().UTC().Add(30 * time.Second))})
+			store.StateOpts{ClearLease: true, Resume: true,
+				ScheduleAt: ptr(time.Now().UTC().Add(30 * time.Second))})
 		return
 	}
 
@@ -228,11 +229,15 @@ func (e *Engine) finish(ctx context.Context, run *core.FlowRun, flow *sdk.FlowDe
 	now := time.Now().UTC()
 
 	// Suspension: the flow asked to continue later. Not a failure, and the
-	// attempt does not count against the retry budget.
+	// attempt does not count against the retry budget — Resume is what makes
+	// that true, because the dispatcher increments run_count on every lease and
+	// a resumed run would otherwise spend an attempt each time it waited. A
+	// RunDeploymentAndWait parent re-suspends every 30s, so without it a run
+	// that waits out a child has no retries left for its own failures.
 	if s, ok := sdk.IsSuspend(runErr); ok {
 		e.settle(ctx, run,
 			core.NewState(core.StateScheduled, "Suspended", s.Reason),
-			store.StateOpts{ScheduleAt: &s.Until, ClearLease: true})
+			store.StateOpts{ScheduleAt: &s.Until, ClearLease: true, Resume: true})
 		return
 	}
 

@@ -753,6 +753,118 @@ func TestEventCursor(t *testing.T) {
 	}
 }
 
+// leaseOne claims exactly one run from a lane and fails the test otherwise.
+func leaseOne(t *testing.T, st *postgres.Store, worker, queue string) *core.FlowRun {
+	t.Helper()
+	got, err := st.LeaseFlowRuns(context.Background(), store.LeaseRequest{
+		WorkerID: worker, Queues: []string{queue}, Max: 1, LeaseFor: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("leased %d runs, want 1", len(got))
+	}
+	return &got[0]
+}
+
+// TestSuspendDoesNotConsumeAnAttempt pins the contract engine.finish documents:
+// a durable wait is not a failed attempt.
+//
+// The dispatcher increments run_count on every lease, and engine.finish reads
+// run_count as the attempt number when it decides whether a failure still has
+// retry budget. Without StateOpts.Resume the two are the same event, so a
+// RunDeploymentAndWait parent — which re-suspends every 30 seconds until its
+// children land — spends its whole retry budget waiting and then fails on its
+// first real error with no attempts left.
+func TestSuspendDoesNotConsumeAnAttempt(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	run := mkRun(t, st, "default", 50, time.Now().UTC().Add(-time.Minute))
+
+	const waits = 5
+	for i := 1; i <= waits; i++ {
+		leased := leaseOne(t, st, "w1", "default")
+		if leased.RunCount != 1 {
+			t.Fatalf("wait %d: run_count = %d, want 1 — the run is still on its first attempt", i, leased.RunCount)
+		}
+		if _, err := st.SetFlowRunState(ctx, run.ID,
+			core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+			t.Fatal(err)
+		}
+		// engine.finish's suspend branch.
+		at := time.Now().UTC().Add(-time.Second)
+		if _, err := st.SetFlowRunState(ctx, run.ID,
+			core.NewState(core.StateScheduled, "Suspended", "waiting for sub-flow"),
+			store.StateOpts{ScheduleAt: &at, ClearLease: true, Resume: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A genuine retry still counts, so the budget check keeps working.
+	leased := leaseOne(t, st, "w1", "default")
+	if leased.RunCount != 1 {
+		t.Fatalf("after %d waits run_count = %d, want 1", waits, leased.RunCount)
+	}
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-time.Second)
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateScheduled, "AwaitingRetry", "boom"),
+		store.StateOpts{ScheduleAt: &at, ClearLease: true}); err != nil {
+		t.Fatal(err)
+	}
+	if leased = leaseOne(t, st, "w1", "default"); leased.RunCount != 2 {
+		t.Errorf("after a real failure run_count = %d, want 2", leased.RunCount)
+	}
+}
+
+// TestResumeFlagIsConsumedByOneLease checks the flag cannot outlive the lease it
+// was written for: two suspensions must not buy three free leases.
+func TestResumeFlagIsConsumedByOneLease(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	run := mkRun(t, st, "default", 50, time.Now().UTC().Add(-time.Minute))
+
+	leaseOne(t, st, "w1", "default") // attempt 1
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-time.Second)
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateScheduled, "Suspended", "sleeping"),
+		store.StateOpts{ScheduleAt: &at, ClearLease: true, Resume: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The resume itself is free...
+	if got := leaseOne(t, st, "w1", "default"); got.RunCount != 1 {
+		t.Fatalf("resume lease: run_count = %d, want 1", got.RunCount)
+	}
+	// ...and the flag is now spent, so a crash-and-requeue costs an attempt.
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateScheduled, "AwaitingRetry", "crashed"),
+		store.StateOpts{ScheduleAt: &at, ClearLease: true, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := leaseOne(t, st, "w1", "default"); got.RunCount != 2 {
+		t.Errorf("run_count = %d after the resume was spent, want 2", got.RunCount)
+	}
+}
+
 // TestConcurrencyLimitCountsCancellingRuns is the lane cap under cancellation.
 //
 // Cancelling a run asks it to wind down; it does not stop it. The run keeps its

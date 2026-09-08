@@ -400,7 +400,12 @@ type workerStateBody struct {
 	EndedAt    *time.Time      `json:"ended_at,omitempty"`
 	ScheduleAt *time.Time      `json:"schedule_at,omitempty"`
 	BumpRun    bool            `json:"bump_run,omitempty"`
-	ClearLease bool            `json:"clear_lease,omitempty"`
+	// Resume says this SCHEDULED transition did not consume an attempt (a
+	// durable suspension, or a flow the worker does not have registered). A
+	// worker can already decline to fail a run at all, so trusting it here
+	// grants nothing it did not already have.
+	Resume     bool `json:"resume,omitempty"`
+	ClearLease bool `json:"clear_lease,omitempty"`
 	// Force is accepted only so it can be refused with a clear message rather
 	// than silently ignored.
 	Force bool `json:"force,omitempty"`
@@ -425,6 +430,7 @@ func (s *Server) workerSetRunState(w http.ResponseWriter, r *http.Request) {
 	opts := store.StateOpts{
 		Result: b.Result, StartedAt: b.StartedAt, EndedAt: b.EndedAt,
 		ScheduleAt: b.ScheduleAt, BumpRun: b.BumpRun, ClearLease: b.ClearLease,
+		Resume: b.Resume,
 	}
 	// The write is conditional on this worker still holding the run. The lease
 	// already recorded the owner, so there is nothing to stamp — and stamping

@@ -331,7 +331,13 @@ type StateOpts struct {
 	EndedAt         *time.Time
 	ScheduleAt      *time.Time // for SCHEDULED transitions (retry backoff, durable sleep)
 	BumpRun         bool       // increment run_count
-	ClearLease      bool
+	// Resume marks a transition back into the queue that did not consume an
+	// attempt: a durable suspension, or a run handed back because its flow is
+	// not registered on the worker that leased it. The next lease skips its
+	// run_count increment, so a flow that waits does not spend its retry
+	// budget waiting. Meaningless on any transition other than SCHEDULED.
+	Resume     bool
+	ClearLease bool
 	// Force skips the transition rule table. Reserved for the janitor.
 	Force bool
 }

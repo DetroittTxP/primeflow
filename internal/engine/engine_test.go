@@ -3,6 +3,7 @@ package engine_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -454,5 +455,89 @@ func TestStateChangesEmitEvents(t *testing.T) {
 	}
 	if !sawRunning || !sawCompleted {
 		t.Fatalf("missing state events (running=%v completed=%v)", sawRunning, sawCompleted)
+	}
+}
+
+// TestWaitingDoesNotSpendTheRetryBudget is the end-to-end form of the contract
+// engine.finish documents: "a suspension is not a failure, and the attempt does
+// not count against the retry budget".
+//
+// The dispatcher increments run_count on every lease and engine.finish reads
+// run_count as the attempt number, so without StateOpts.Resume a flow that waits
+// arrives at its first real error with the budget already spent. A
+// RunDeploymentAndWait parent re-suspends every 30 seconds, which made this the
+// normal case for any flow with children rather than an edge case.
+func TestWaitingDoesNotSpendTheRetryBudget(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	const waits = 3
+	var attempts atomic.Int64
+	h.reg.Register("patient", func(c *sdk.Context) (any, error) {
+		attempts.Add(1)
+		for i := 0; i < waits; i++ {
+			if err := sdk.Sleep(c, fmt.Sprintf("wait-%d", i), time.Hour); err != nil {
+				return nil, err
+			}
+		}
+		return nil, errors.New("boom")
+	})
+
+	run := h.create(t, "patient", 2) // two retries after the first attempt
+
+	// Each pass suspends on the next sleep. The run keeps returning to the lane
+	// and being re-leased, and must still read as attempt 1 throughout.
+	for i := 0; i < waits; i++ {
+		leased := h.lease(t)
+		if leased.RunCount != 1 {
+			t.Fatalf("wait %d: leased at attempt %d, want 1", i, leased.RunCount)
+		}
+		h.engine.Execute(ctx, leased)
+
+		got := h.reload(t, run.ID)
+		if got.State != core.StateScheduled || got.StateName != "Suspended" {
+			t.Fatalf("wait %d: got %s/%s, want SCHEDULED/Suspended", i, got.State, got.StateName)
+		}
+		// Bring the wake time forward, both on the row and in the checkpoint the
+		// SDK reads back, so the next pass falls through this sleep.
+		if _, err := h.store.RescheduleRun(ctx, run.ID, time.Now().UTC().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.store.DB().ExecContext(ctx,
+			`UPDATE pf_task_runs SET result = to_jsonb($2::text)
+			  WHERE flow_run_id=$1 AND task_key=$3`,
+			run.ID, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano),
+			fmt.Sprintf("wait:wait-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Past every sleep now: the flow reaches its error. That is attempt 1 of 3.
+	h.engine.Execute(ctx, h.lease(t))
+	got := h.reload(t, run.ID)
+	if got.State != core.StateScheduled || got.StateName != "AwaitingRetry" {
+		t.Fatalf("first real failure after %d waits: got %s/%s, want SCHEDULED/AwaitingRetry — "+
+			"the waits spent the retry budget", waits, got.State, got.StateName)
+	}
+
+	// Burn the remaining two attempts; only then is the run failed.
+	for i := 2; i <= 3; i++ {
+		if _, err := h.store.RescheduleRun(ctx, run.ID, time.Now().UTC().Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		leased := h.lease(t)
+		if leased.RunCount != i {
+			t.Fatalf("expected attempt %d, got %d", i, leased.RunCount)
+		}
+		h.engine.Execute(ctx, leased)
+	}
+
+	got = h.reload(t, run.ID)
+	if got.State != core.StateFailed {
+		t.Fatalf("run should be FAILED once the budget is exhausted, got %s", got.State)
+	}
+	if attempts.Load() != waits+3 {
+		t.Errorf("flow function ran %d times, want %d (%d replays through the waits + 3 attempts)",
+			attempts.Load(), waits+3, waits)
 	}
 }

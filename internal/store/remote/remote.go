@@ -296,6 +296,7 @@ func (s *Store) SetFlowRunState(ctx context.Context, id string, st core.State, o
 	body := map[string]any{
 		"state": string(st.Type), "state_name": st.Name, "state_message": st.Message,
 		"bump_run": opts.BumpRun, "clear_lease": opts.ClearLease,
+		"resume": opts.Resume,
 	}
 	if len(opts.Result) > 0 {
 		body["result"] = opts.Result

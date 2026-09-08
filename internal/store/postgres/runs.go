@@ -407,6 +407,9 @@ func (s *Store) SetFlowRunState(ctx context.Context, id string, st core.State, o
 	if opts.BumpRun {
 		set = append(set, "run_count = run_count + 1")
 	}
+	if opts.Resume {
+		set = append(set, "resume_requested = true")
+	}
 	if opts.ClearLease {
 		set = append(set, "worker_id = NULL", "lease_expires_at = NULL")
 	}
@@ -584,7 +587,8 @@ UPDATE pf_flow_runs r
        state_message    = '',
        worker_id        = $1,
        lease_expires_at = now() + $4::interval,
-       run_count        = r.run_count + 1,
+       run_count        = r.run_count + CASE WHEN r.resume_requested THEN 0 ELSE 1 END,
+       resume_requested = false,
        started_at       = COALESCE(r.started_at, now()),
        updated_at       = now()
   FROM cand
