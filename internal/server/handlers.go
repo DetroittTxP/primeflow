@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -253,6 +254,11 @@ func (s *Server) triggerDeployment(r *http.Request, d *core.Deployment, b trigge
 	if b.WorkQueue != "" {
 		queue = b.WorkQueue
 	}
+	// Whatever won above is what the worker will decode -- the caller's
+	// parameters, or the deployment's defaults when the caller sent none.
+	if err := s.validateRunParams(r.Context(), d.FlowName, params); err != nil {
+		return nil, err
+	}
 	run, err := s.store.CreateFlowRun(r.Context(), store.CreateRunInput{
 		Name: b.Name, FlowName: d.FlowName, DeploymentID: &d.ID, Parameters: params,
 		WorkQueue: queue, Priority: priority,
@@ -338,6 +344,24 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "runs": runs})
 }
 
+// validateRunParams rejects parameters the flow's own decoder would refuse, so
+// the mistake costs an HTTP 400 while the caller is still there rather than a
+// dispatch, a worker slot and a FAILED run minutes later.
+//
+// A flow no worker has registered yet has no schema to check against. That is
+// not the caller's fault -- creating the run before the worker boots is a
+// supported order -- so it passes and waits in the queue as before.
+func (s *Server) validateRunParams(ctx context.Context, flowName string, params json.RawMessage) error {
+	f, err := s.store.GetFlowByName(ctx, flowName)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	return core.ValidateParams(f.ParamsSchema, params)
+}
+
 // createRunBody starts an ad-hoc run of a registered flow, with no deployment.
 type createRunBody struct {
 	FlowName   string          `json:"flow_name"`
@@ -380,6 +404,10 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	priority := b.Priority
 	if priority == 0 {
 		priority = core.PriorityNormal
+	}
+	if err := s.validateRunParams(r.Context(), b.FlowName, b.Parameters); err != nil {
+		fail(w, err)
+		return
 	}
 	run, err := s.store.CreateFlowRun(r.Context(), store.CreateRunInput{
 		Name: b.Name, FlowName: b.FlowName, Parameters: b.Parameters,

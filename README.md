@@ -420,6 +420,14 @@ route ของผู้ดูแลทั้งหมดอยู่ใต้ `
 | `GET /stats?window=8h` | กิจกรรมแบ่งช่วงเวลาสำหรับ Dashboard |
 | `GET /metrics` | Prometheus (ไม่ต้องยืนยันตัวตน) |
 
+การสร้างงานทุกทาง — `POST /runs`, `POST /deployments/{id}/run`, `POST /webhooks/{deployment}`
+และคู่แฝดฝั่ง External — ตรวจ parameter กับ schema ที่ flow ประกาศไว้ก่อนเข้าคิว และตอบ `400`
+พร้อมชื่อฟิลด์ที่ผิด แทนที่จะปล่อยงานไป fail ในตัว worker การตรวจนี้ปฏิเสธเฉพาะสิ่งที่ตัว decode
+ของ flow จะปฏิเสธอยู่แล้วเท่านั้น: key ที่ไม่รู้จักผ่านได้ (automation ที่ตั้ง `pass_event` แทรก `_event`),
+ฟิลด์ที่หายไปผ่านได้แม้ schema จะบอกว่า required (ธงนั้นมาจาก reflection ไม่ได้บอกว่า flow
+ต้องการค่าจริงไหม), `null` ผ่านได้ทุกชนิด และ flow ที่ยังไม่มี worker ลงทะเบียนก็ยังสร้างงานได้ตามเดิม
+งานตามตารางเวลาไม่ผ่านด่านนี้ เพราะ scheduler สร้างงานตรงจาก parameter ของ deployment
+
 `POST /runs/{id}/cancel` ตอบ `409` ถ้างานจบไปแล้ว (`COMPLETED` / `FAILED` / `CANCELLED`)
 ไม่มีอะไรให้หยุด และการรับคำสั่งไว้จะทิ้ง `cancel_requested` ค้างบนงานที่สำเร็จตลอดไป
 `CRASHED` ไม่นับว่าจบ — janitor ยังอาจ reschedule ได้ ผู้ดูแลจึงยังสั่งยกเลิกดักไว้ก่อนได้

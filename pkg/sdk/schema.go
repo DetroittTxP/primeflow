@@ -83,7 +83,7 @@ func BuildParamsSchema(v any) ParamsSchemaDoc {
 		if omitempty {
 			required = false
 		}
-		field := ParamField{Name: name, Type: kindToSchemaType(ft.Kind()), Required: required}
+		field := ParamField{Name: name, Type: typeToSchemaType(ft), Required: required}
 		if fv := rv.Field(i); fv.IsValid() && !fv.IsZero() {
 			field.Example = fv.Interface()
 		}
@@ -92,8 +92,8 @@ func BuildParamsSchema(v any) ParamsSchemaDoc {
 	return doc
 }
 
-func kindToSchemaType(k reflect.Kind) string {
-	switch k {
+func typeToSchemaType(t reflect.Type) string {
+	switch t.Kind() {
 	case reflect.String:
 		return "string"
 	case reflect.Bool:
@@ -104,6 +104,12 @@ func kindToSchemaType(k reflect.Kind) string {
 	case reflect.Float32, reflect.Float64:
 		return "number"
 	case reflect.Slice, reflect.Array:
+		// A []byte is not a list on the wire: encoding/json writes it as a
+		// base64 string, so the form -- and anyone validating against this
+		// schema -- must expect a string.
+		if t.Elem().Kind() == reflect.Uint8 {
+			return "string"
+		}
 		return "array"
 	default:
 		return "object"

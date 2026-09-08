@@ -147,6 +147,9 @@ type Store interface {
 
 	// --- catalogue ---
 	ListFlows(ctx context.Context) ([]core.Flow, error)
+	// GetFlowByName returns the newest registered version of one flow, or
+	// ErrNotFound when no worker has published it yet.
+	GetFlowByName(ctx context.Context, name string) (*core.Flow, error)
 
 	UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error
 	GetWorkQueue(ctx context.Context, name string) (*core.WorkQueue, error)

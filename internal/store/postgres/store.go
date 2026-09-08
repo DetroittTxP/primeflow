@@ -159,6 +159,23 @@ RETURNING id, created_at, updated_at`
 	return mapErr(err)
 }
 
+// GetFlowByName returns the newest registered version of one flow. The server
+// validates a run's parameters against the schema this carries, so it is on the
+// enqueue path and reads one row rather than the whole catalogue.
+func (s *Store) GetFlowByName(ctx context.Context, name string) (*core.Flow, error) {
+	const q = `SELECT id, name, version, description, tags, labels, params_schema, created_at, updated_at
+	           FROM pf_flows WHERE name = $1 ORDER BY updated_at DESC LIMIT 1`
+	var f core.Flow
+	var labels []byte
+	err := s.db.QueryRowContext(ctx, q, name).Scan(&f.ID, &f.Name, &f.Version, &f.Description,
+		pq.Array(&f.Tags), &labels, scanJSON(&f.ParamsSchema), &f.CreatedAt, &f.UpdatedAt)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	_ = json.Unmarshal(labels, &f.Labels)
+	return &f, nil
+}
+
 // ListFlows returns the whole catalogue, newest first.
 func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
 	const q = `SELECT id, name, version, description, tags, labels, params_schema, created_at, updated_at

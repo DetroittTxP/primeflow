@@ -523,6 +523,11 @@ func fail(w http.ResponseWriter, err error) {
 			writeErr(w, http.StatusConflict, err)
 			return
 		}
+		var ip core.ErrInvalidParams
+		if errors.As(err, &ip) {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err)
 	}
 }
