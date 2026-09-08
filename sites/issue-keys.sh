@@ -7,13 +7,13 @@
 #   PRIMEFLOW_URL       server base URL     (default http://localhost:8085)
 #   PRIMEFLOW_ADMIN     operator email      (default admin@primeflow.local)
 #   PRIMEFLOW_PASSWORD  operator password   (default primeflow-admin)
-#   SITES               space-separated     (default "site-a site-b site-c site-d")
+#   SITES               space-separated     (default "site-a site-b site-c site-d vm1")
 set -euo pipefail
 
 SERVER="${PRIMEFLOW_URL:-http://localhost:8085}"
 EMAIL="${PRIMEFLOW_ADMIN:-admin@primeflow.local}"
 PASSWORD="${PRIMEFLOW_PASSWORD:-primeflow-admin}"
-SITES="${SITES:-site-a site-b site-c site-d}"
+SITES="${SITES:-site-a site-b site-c site-d vm1}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
