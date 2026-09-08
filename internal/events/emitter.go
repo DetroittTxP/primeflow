@@ -19,6 +19,11 @@ import (
 )
 
 // Emitter writes events to the store and publishes them on the bus.
+//
+// A nil *Emitter is a valid no-op, and so is one built without a store or a
+// bus. A worker that reaches the orchestrator over its API rather than over a
+// database connection has neither, and the server records the transition on its
+// behalf; making the absent emitter safe is what lets that worker exist.
 type Emitter struct {
 	store store.Store
 	bus   bus.Bus
@@ -53,6 +58,9 @@ type FlowRunPayload struct {
 // "flow-run.<State>", e.g. "flow-run.FAILED", which is what automation rules
 // match against (a trailing "*" wildcard is supported there).
 func (e *Emitter) FlowRunStateChanged(ctx context.Context, r *core.FlowRun) {
+	if e == nil {
+		return
+	}
 	p := FlowRunPayload{
 		RunID: r.ID, RunName: r.Name, FlowName: r.FlowName, WorkQueue: r.WorkQueue,
 		State: r.State, StateMessage: r.StateMessage, Priority: r.Priority,
@@ -67,6 +75,9 @@ func (e *Emitter) FlowRunStateChanged(ctx context.Context, r *core.FlowRun) {
 
 // Emit writes one event.
 func (e *Emitter) Emit(ctx context.Context, name, resourceType, resourceID string, payload json.RawMessage) {
+	if e == nil || e.store == nil {
+		return
+	}
 	ev := &core.Event{
 		ID: uuid.NewString(), Name: name, ResourceType: resourceType,
 		ResourceID: resourceID, Payload: payload, Occurred: time.Now().UTC(),
@@ -84,7 +95,7 @@ func (e *Emitter) Emit(ctx context.Context, name, resourceType, resourceID strin
 
 // WorkAvailable nudges workers polling a queue. Losing this only costs latency.
 func (e *Emitter) WorkAvailable(ctx context.Context, queue string) {
-	if e.bus == nil {
+	if e == nil || e.bus == nil {
 		return
 	}
 	if err := e.bus.Publish(ctx, bus.TopicWork, map[string]string{"queue": queue}); err != nil {
@@ -94,7 +105,7 @@ func (e *Emitter) WorkAvailable(ctx context.Context, queue string) {
 
 // Cancel asks whichever worker holds the run to stop it.
 func (e *Emitter) Cancel(ctx context.Context, runID string) {
-	if e.bus == nil {
+	if e == nil || e.bus == nil {
 		return
 	}
 	_ = e.bus.Publish(ctx, bus.TopicControl, bus.ControlMessage{Action: "cancel", FlowRunID: runID})

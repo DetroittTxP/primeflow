@@ -71,19 +71,78 @@ type QueueStat struct {
 	Ready int `json:"ready"`
 }
 
-// Store is the full persistence surface. The Postgres implementation is the
-// only one intended for production; the interface exists so the engine can be
-// unit-tested and so a different backend stays possible.
-type Store interface {
-	// --- catalogue ---
-	UpsertFlow(ctx context.Context, f *core.Flow) error
-	ListFlows(ctx context.Context) ([]core.Flow, error)
+// WorkerStore is the slice of the persistence surface a process that only
+// executes flows touches: dispatch, leases, run state, checkpoints, the logs
+// and artifacts a flow writes, and the sub-flow lineage queries.
+//
+// It exists so that a worker can be built against a backend that is not
+// PostgreSQL — an HTTP client speaking to the server's API, for a worker that
+// runs at a remote site and holds no database credential. Keeping it narrow is
+// the point: the compiler then proves such an implementation complete instead
+// of leaving unimplemented methods to panic on the one path that reaches them.
+type WorkerStore interface {
+	// --- dispatch and liveness ---
+	// LeaseFlowRuns atomically claims up to req.Max ready runs, honouring
+	// queue pause flags, per-queue concurrency limits and the priority
+	// ordering. This is the heart of dispatch.
+	LeaseFlowRuns(ctx context.Context, req LeaseRequest) ([]core.FlowRun, error)
+	RenewLease(ctx context.Context, runID, workerID string, d time.Duration) error
+	HeartbeatWorker(ctx context.Context, w *core.WorkerInfo) error
 
-	UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error
+	// --- catalogue published on boot ---
+	UpsertFlow(ctx context.Context, f *core.Flow) error
 	// EnsureWorkQueue creates the queue if it is missing and leaves an existing
 	// one exactly as it is. Callers that only need the lane to exist must use
 	// this, not UpsertWorkQueue.
 	EnsureWorkQueue(ctx context.Context, name string) error
+
+	// --- run lifecycle ---
+	// SetFlowRunState applies the orchestration rules and records the change.
+	// It returns the updated run, or ErrInvalidTransition-wrapping error.
+	SetFlowRunState(ctx context.Context, id string, st core.State, opts StateOpts) (*core.FlowRun, error)
+	GetFlowRun(ctx context.Context, id string) (*core.FlowRun, error)
+	CreateFlowRun(ctx context.Context, in CreateRunInput) (*core.FlowRun, error)
+
+	// --- durable checkpoints ---
+	GetTaskRun(ctx context.Context, flowRunID, taskKey string) (*core.TaskRun, error)
+	UpsertTaskRun(ctx context.Context, tr *core.TaskRun) error
+	FindCachedResult(ctx context.Context, cacheKey string, now time.Time) (json.RawMessage, bool, error)
+
+	// --- what a running flow writes ---
+	AppendLogs(ctx context.Context, recs []core.LogRecord) error
+	CreateArtifact(ctx context.Context, a *core.Artifact) error
+
+	// --- sub-flows ---
+	GetDeploymentByName(ctx context.Context, name string) (*core.Deployment, error)
+	// AncestorDeploymentIDs walks parent_run_id upward from runID (bounded by
+	// maxDepth) and returns the deployment id of each ancestor, nearest first.
+	// It is how the sub-flow guard detects recursion and enforces a depth cap.
+	AncestorDeploymentIDs(ctx context.Context, runID string, maxDepth int) ([]string, error)
+	// CountUnfinishedChildren counts children not yet in a terminal state.
+	CountUnfinishedChildren(ctx context.Context, parentID string) (int, error)
+	// ResumeSuspendedRun reschedules a run only if it is still SCHEDULED, so a
+	// parent that is transiently RUNNING is never disturbed. Returns
+	// ErrNotFound when nothing was resumed.
+	ResumeSuspendedRun(ctx context.Context, runID string, at time.Time) (*core.FlowRun, error)
+
+	// --- push work pools ---
+	// ClaimPushRun is called by the receiver to take SCHEDULED -> PENDING for a
+	// specific run; the engine then drives it to RUNNING, as for a leased run.
+	ClaimPushRun(ctx context.Context, runID, workerID string, leaseFor time.Duration) (*core.FlowRun, error)
+}
+
+// Store is the full persistence surface: everything WorkerStore covers, plus
+// what the server, scheduler, janitor and automation evaluator need. The
+// Postgres implementation is the only one intended for production; the
+// interface exists so the engine can be unit-tested and so a different backend
+// stays possible.
+type Store interface {
+	WorkerStore
+
+	// --- catalogue ---
+	ListFlows(ctx context.Context) ([]core.Flow, error)
+
+	UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error
 	GetWorkQueue(ctx context.Context, name string) (*core.WorkQueue, error)
 	ListWorkQueues(ctx context.Context) ([]core.WorkQueue, error)
 	SetQueuePaused(ctx context.Context, name string, paused bool) error
@@ -91,41 +150,25 @@ type Store interface {
 
 	UpsertDeployment(ctx context.Context, d *core.Deployment) error
 	GetDeployment(ctx context.Context, id string) (*core.Deployment, error)
-	GetDeploymentByName(ctx context.Context, name string) (*core.Deployment, error)
 	ListDeployments(ctx context.Context) ([]core.Deployment, error)
 	DeleteDeployment(ctx context.Context, id string) error
 	SetDeploymentPaused(ctx context.Context, id string, paused bool) error
 
 	// --- flow runs ---
-	CreateFlowRun(ctx context.Context, in CreateRunInput) (*core.FlowRun, error)
-	GetFlowRun(ctx context.Context, id string) (*core.FlowRun, error)
 	ListFlowRuns(ctx context.Context, f FlowRunFilter) ([]core.FlowRun, error)
 	// PendingInQueue previews a queue in the exact order dispatch will take
 	// it, which is what makes the admin reordering controls trustworthy.
 	PendingInQueue(ctx context.Context, queue string, limit int) ([]core.FlowRun, error)
 	CountFlowRuns(ctx context.Context, f FlowRunFilter) (int, error)
-
-	// SetFlowRunState applies the orchestration rules and records the change.
-	// It returns the updated run, or ErrInvalidTransition-wrapping error.
-	SetFlowRunState(ctx context.Context, id string, st core.State, opts StateOpts) (*core.FlowRun, error)
-
-	// LeaseFlowRuns atomically claims up to req.Max ready runs, honouring
-	// queue pause flags, per-queue concurrency limits and the priority
-	// ordering. This is the heart of dispatch.
-	LeaseFlowRuns(ctx context.Context, req LeaseRequest) ([]core.FlowRun, error)
-	RenewLease(ctx context.Context, runID, workerID string, d time.Duration) error
 	ReclaimExpiredLeases(ctx context.Context, now time.Time) ([]core.FlowRun, error)
 
 	// --- push work pools ---
 	// PushReadyRuns lists dispatchable runs in a push pool; MarkPushDispatched
 	// holds one while its endpoint is notified; ClearPushDispatch releases the
-	// hold on a failed notify; ClaimPushRun is called by the receiver to take
-	// SCHEDULED -> PENDING for a specific run (the engine then drives it to
-	// RUNNING, as for a leased run).
+	// hold on a failed notify.
 	PushReadyRuns(ctx context.Context, pool string, limit int) ([]core.FlowRun, error)
 	MarkPushDispatched(ctx context.Context, runID string, leaseFor time.Duration) error
 	ClearPushDispatch(ctx context.Context, runID string) error
-	ClaimPushRun(ctx context.Context, runID, workerID string, leaseFor time.Duration) (*core.FlowRun, error)
 
 	// --- operator queue controls ---
 	SetRunPriority(ctx context.Context, runID string, priority int) (*core.FlowRun, error)
@@ -136,16 +179,11 @@ type Store interface {
 	RescheduleRun(ctx context.Context, runID string, at time.Time) (*core.FlowRun, error)
 	MoveRunToQueue(ctx context.Context, runID, queue string) (*core.FlowRun, error)
 
-	// --- task runs (durable checkpoints) ---
-	GetTaskRun(ctx context.Context, flowRunID, taskKey string) (*core.TaskRun, error)
+	// --- task runs ---
 	ListTaskRuns(ctx context.Context, flowRunID string) ([]core.TaskRun, error)
-	UpsertTaskRun(ctx context.Context, tr *core.TaskRun) error
-	FindCachedResult(ctx context.Context, cacheKey string, now time.Time) (json.RawMessage, bool, error)
 
 	// --- observability ---
-	AppendLogs(ctx context.Context, recs []core.LogRecord) error
 	ListLogs(ctx context.Context, flowRunID string, afterID int64, limit int) ([]core.LogRecord, error)
-	CreateArtifact(ctx context.Context, a *core.Artifact) error
 	ListArtifacts(ctx context.Context, flowRunID string) ([]core.Artifact, error)
 	// GetLogRetention / PutLogRetention manage the pf_logs cleanup policy;
 	// DeleteLogsOlderThan is the batched delete the janitor runs.
@@ -161,16 +199,6 @@ type Store interface {
 	// --- sub-flows ---
 	// ListChildRuns returns every run whose parent_run_id is parentID.
 	ListChildRuns(ctx context.Context, parentID string) ([]core.FlowRun, error)
-	// CountUnfinishedChildren counts children not yet in a terminal state.
-	CountUnfinishedChildren(ctx context.Context, parentID string) (int, error)
-	// AncestorDeploymentIDs walks parent_run_id upward from runID (bounded by
-	// maxDepth) and returns the deployment id of each ancestor, nearest first.
-	// It is how the sub-flow guard detects recursion and enforces a depth cap.
-	AncestorDeploymentIDs(ctx context.Context, runID string, maxDepth int) ([]string, error)
-	// ResumeSuspendedRun reschedules a run only if it is still SCHEDULED, so a
-	// parent that is transiently RUNNING is never disturbed. Returns
-	// ErrNotFound when nothing was resumed.
-	ResumeSuspendedRun(ctx context.Context, runID string, at time.Time) (*core.FlowRun, error)
 
 	// --- events & automations ---
 	AppendEvent(ctx context.Context, e *core.Event) error
@@ -189,7 +217,6 @@ type Store interface {
 	TouchAutomation(ctx context.Context, id string, at time.Time) error
 
 	// --- workers ---
-	HeartbeatWorker(ctx context.Context, w *core.WorkerInfo) error
 	ListWorkers(ctx context.Context) ([]core.WorkerInfo, error)
 
 	// --- leadership for singleton loops ---

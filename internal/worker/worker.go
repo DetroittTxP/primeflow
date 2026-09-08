@@ -80,7 +80,7 @@ func (c *Config) applyDefaults() {
 type Worker struct {
 	id     string
 	cfg    Config
-	store  store.Store
+	store  store.WorkerStore
 	bus    bus.Bus
 	engine *engine.Engine
 	reg    *sdk.Registry
@@ -96,7 +96,7 @@ type Worker struct {
 }
 
 // New builds a worker. The engine it is given must share the same registry.
-func New(s store.Store, b bus.Bus, reg *sdk.Registry, em *events.Emitter, log *slog.Logger, cfg Config) *Worker {
+func New(s store.WorkerStore, b bus.Bus, reg *sdk.Registry, em *events.Emitter, log *slog.Logger, cfg Config) *Worker {
 	cfg.applyDefaults()
 	if log == nil {
 		log = slog.Default()

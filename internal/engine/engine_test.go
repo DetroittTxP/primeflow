@@ -99,6 +99,63 @@ func (h *harness) reload(t *testing.T, id string) *core.FlowRun {
 	return r
 }
 
+// A worker that reaches the orchestrator over its API has no database to append
+// events to and no bus to publish them on, so it is built without an emitter and
+// the server records transitions on its behalf. Running a flow to completion
+// with a nil emitter is what proves nothing on the execution path depends on
+// one, and that the narrow WorkerStore is genuinely all a worker needs.
+func TestEngineRunsWithoutAnEmitter(t *testing.T) {
+	h := newHarness(t)
+	var ran atomic.Int32
+	h.reg.Register("no-emitter", func(c *sdk.Context) (any, error) {
+		return sdk.Task(c, "step", func(c *sdk.Context) (int, error) {
+			ran.Add(1)
+			c.Info("working without an emitter")
+			_ = c.Markdown("note", "ran")
+			return 7, nil
+		})
+	})
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// The narrow interface is what a remote worker would be handed; taking it
+	// here keeps the assertion honest.
+	var narrow store.WorkerStore = h.store
+	eng := engine.New(narrow, h.reg, nil, log, engine.Config{
+		WorkerID:           "no-emitter-worker",
+		CancelPollInterval: 50 * time.Millisecond,
+		SuspendThreshold:   time.Second,
+		LogFlushInterval:   20 * time.Millisecond,
+	})
+
+	run := h.create(t, "no-emitter", 0)
+	leased, err := h.store.LeaseFlowRuns(context.Background(), store.LeaseRequest{
+		WorkerID: "no-emitter-worker", Queues: []string{"default"}, Max: 1, LeaseFor: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease: %v (%d runs)", err, len(leased))
+	}
+	eng.Execute(context.Background(), &leased[0])
+
+	got := h.reload(t, run.ID)
+	if got.State != core.StateCompleted {
+		t.Fatalf("state = %s (%s), want COMPLETED", got.State, got.StateMessage)
+	}
+	if ran.Load() != 1 {
+		t.Fatalf("task ran %d times, want 1", ran.Load())
+	}
+
+	// The checkpoint, the log line and the artifact are all still written: only
+	// the event stream is absent.
+	tasks, err := h.store.ListTaskRuns(context.Background(), run.ID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("checkpoint missing: %v (%d task runs)", err, len(tasks))
+	}
+	arts, err := h.store.ListArtifacts(context.Background(), run.ID)
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("artifact missing: %v (%d)", err, len(arts))
+	}
+}
+
 // TestDurableResumeSkipsCompletedTasks is the headline guarantee: after a
 // failure, the retry must not repeat work that already succeeded.
 func TestDurableResumeSkipsCompletedTasks(t *testing.T) {

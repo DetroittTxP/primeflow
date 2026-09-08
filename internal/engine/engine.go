@@ -63,7 +63,7 @@ func (c *Config) applyDefaults() {
 
 // Engine runs flows.
 type Engine struct {
-	store    store.Store
+	store    store.WorkerStore
 	registry *sdk.Registry
 	events   *events.Emitter
 	log      *slog.Logger
@@ -74,7 +74,7 @@ type Engine struct {
 }
 
 // New builds an engine.
-func New(s store.Store, reg *sdk.Registry, em *events.Emitter, log *slog.Logger, cfg Config) *Engine {
+func New(s store.WorkerStore, reg *sdk.Registry, em *events.Emitter, log *slog.Logger, cfg Config) *Engine {
 	cfg.applyDefaults()
 	if log == nil {
 		log = slog.Default()
