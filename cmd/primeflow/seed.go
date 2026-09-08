@@ -180,6 +180,16 @@ func cmdSeed(ctx context.Context, args []string) error {
 
 	for i := range seedQueues {
 		q := seedQueues[i]
+		// Mirror the API's read-modify-write. UpsertWorkQueue writes paused
+		// straight from what it is handed -- unlike UpsertDeployment, which
+		// leaves it alone -- and pausing a lane is an operator's decision, not
+		// something a re-seed gets to undo.
+		switch cur, err := st.GetWorkQueue(ctx, q.Name); {
+		case err == nil:
+			q.Paused = cur.Paused
+		case !errors.Is(err, store.ErrNotFound):
+			return fmt.Errorf("queue %s: %w", q.Name, err)
+		}
 		if err := st.UpsertWorkQueue(ctx, &q); err != nil {
 			return fmt.Errorf("queue %s: %w", q.Name, err)
 		}
@@ -218,8 +228,13 @@ func cmdSeed(ctx context.Context, args []string) error {
 			}
 			created++
 		}
-		fmt.Printf("accounts:    %d created, %d already existed (password %q)\n",
-			created, len(seedUsers)-created, *password)
+		fmt.Printf("accounts:    %d created, %d already existed\n", created, len(seedUsers)-created)
+		if created > 0 {
+			// Only the new accounts got this password. One that already existed
+			// keeps its own -- admin@primeflow.local is normally the bootstrap
+			// account PRIMEFLOW_ADMIN_PASSWORD created on the server's first boot.
+			fmt.Printf("             password %q (newly created accounts only)\n", *password)
+		}
 	}
 
 	for i := 0; i < *runs; i++ {
