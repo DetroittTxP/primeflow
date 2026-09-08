@@ -290,6 +290,18 @@ type AuthStore interface {
 	// --- git connection (GitOps worker delivery target) ---
 	GetGitConnection(ctx context.Context) (core.GitConnection, error)
 	PutGitConnection(ctx context.Context, c core.GitConnection) error
+	// GitConnectionWithToken is for internal/gitsync only: it returns the
+	// stored token alongside the connection. HTTP handlers must not call it.
+	GitConnectionWithToken(ctx context.Context) (core.GitConnection, string, error)
+
+	// --- worker specs (GitOps worker delivery) ---
+	ListWorkerSpecs(ctx context.Context) ([]core.WorkerSpec, error)
+	GetWorkerSpec(ctx context.Context, id string) (*core.WorkerSpec, error)
+	GetWorkerSpecByName(ctx context.Context, name string) (*core.WorkerSpec, error)
+	UpsertWorkerSpec(ctx context.Context, ws *core.WorkerSpec) error
+	DeleteWorkerSpec(ctx context.Context, id string) error
+	WorkerSpecsForAutoSync(ctx context.Context) ([]core.WorkerSpec, error)
+	SetWorkerSpecSyncResult(ctx context.Context, id string, r core.WorkerSpecSyncResult) error
 
 	// --- api keys ---
 	CreateAPIKey(ctx context.Context, k *core.APIKey) error

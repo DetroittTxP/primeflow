@@ -39,6 +39,15 @@ func TestRolesEnforceScopes(t *testing.T) {
 	if !admin.Has(ScopeWriteQueues) {
 		t.Fatal("api-admin should carry write:queues")
 	}
+	if !admin.Has(ScopeReadWorkerSpecs) || !admin.Has(ScopeWriteWorkerSpecs) {
+		t.Fatal("api-admin should carry the worker-spec scopes")
+	}
+	if ro.Has(ScopeReadWorkerSpecs) || ro.Has(ScopeWriteWorkerSpecs) {
+		t.Fatal("api-readonly must not carry worker-spec scopes")
+	}
+	if tr, _ := LookupRole("api-trigger"); tr.Has(ScopeWriteWorkerSpecs) {
+		t.Fatal("api-trigger must not carry write:worker-specs")
+	}
 	if ValidRole("api-superuser") {
 		t.Fatal("unknown role reported valid")
 	}

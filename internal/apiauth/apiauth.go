@@ -31,17 +31,11 @@ const (
 	ScopeReadQueues       Scope = "read:queues"
 	ScopeReadEvents       Scope = "read:events"
 	ScopeReadWorkers      Scope = "read:workers"
+	ScopeReadWorkerSpecs  Scope = "read:worker-specs"
 	ScopeWriteRuns        Scope = "write:runs"
 	ScopeWriteDeployments Scope = "write:deployments"
 	ScopeWriteQueues      Scope = "write:queues"
-
-	// Worker scopes. A worker claims work and reports on what it claimed; it
-	// never manages deployments, never edits a queue's settings, and — most
-	// importantly — never writes an event. Automations act on the event log, so
-	// a worker able to append to it could trip an automation against a lane it
-	// has no other authority over.
-	ScopeWorkerLease  Scope = "worker:lease"
-	ScopeWorkerReport Scope = "worker:report"
+	ScopeWriteWorkerSpecs Scope = "write:worker-specs"
 )
 
 // Role is a named, fixed bundle of scopes. Roles are defined in code, not the
@@ -70,7 +64,8 @@ var roles = map[string]Role{
 		Description: "Full read and write across runs, deployments and queues.",
 		Scopes: []Scope{
 			ScopeReadRuns, ScopeReadDeployments, ScopeReadQueues, ScopeReadEvents, ScopeReadWorkers,
-			ScopeWriteRuns, ScopeWriteDeployments, ScopeWriteQueues,
+			ScopeReadWorkerSpecs,
+			ScopeWriteRuns, ScopeWriteDeployments, ScopeWriteQueues, ScopeWriteWorkerSpecs,
 		},
 	},
 	"api-trigger": {
@@ -134,6 +129,11 @@ var Routes = []Route{
 	{Method: "POST", Path: "/queues", Scope: ScopeWriteQueues},
 	{Method: "GET", Path: "/queues/{name}/pending", Scope: ScopeReadQueues},
 	{Method: "GET", Path: "/workers", Scope: ScopeReadWorkers},
+	{Method: "GET", Path: "/worker-specs", Scope: ScopeReadWorkerSpecs},
+	{Method: "GET", Path: "/worker-specs/{id}", Scope: ScopeReadWorkerSpecs},
+	{Method: "POST", Path: "/worker-specs", Scope: ScopeWriteWorkerSpecs},
+	{Method: "DELETE", Path: "/worker-specs/{id}", Scope: ScopeWriteWorkerSpecs},
+	{Method: "POST", Path: "/worker-specs/{id}/sync", Scope: ScopeWriteWorkerSpecs},
 	{Method: "GET", Path: "/events", Scope: ScopeReadEvents},
 }
 

@@ -242,6 +242,32 @@ writes, same events. If the receiver never claims, the hold lapses, the run
 is re-dispatched, and eventually the janitor reclaims it as `CRASHED` — the same
 recovery path as an abandoned pull run. No new failure mode.
 
+### GitOps worker delivery
+
+PrimeFlow does not launch workers, but it will write their manifests. A
+`pf_worker_specs` row is the inputs the Add-worker wizard collects (name, image,
+pools, concurrency, replicas, delivery kind, namespace). `internal/gitsync`
+renders that row to Kubernetes YAML — the same Go code the console preview, the
+"Sync now" button and the reconciler all call, so there is exactly one renderer.
+
+The git engine (`internal/gitsync/git.go`, pure-Go [go-git]) clones the repo
+from `Settings → Git connection` **into memory** (credentials and manifests
+never touch local disk), writes the rendered files under the spec's path,
+commits with the configured author, and pushes **straight to the branch** — no
+pull request. A brand-new repo with no commits is bootstrapped in place. If the
+worktree is unchanged after writing, the sync is a no-op that still reports the
+current HEAD.
+
+`auto_sync` specs are driven by a leader-elected reconciler (role `gitsync`,
+`PRIMEFLOW_GITSYNC_INTERVAL`, default 2m): each tick it re-renders every
+auto-sync spec, compares the tree hash to `last_synced_hash`, and pushes the
+ones that drifted. A failed push records `sync_state='error'` and `last_error`
+and is retried next tick — it never blocks the server. The distroless image is
+unchanged: go-git is pure Go, so there is still no `git` binary or shell in the
+runtime.
+
+[go-git]: https://github.com/go-git/go-git
+
 ### Transports
 
 The wake-up bus (`internal/bus`) has three interchangeable implementations,

@@ -478,10 +478,12 @@
       <div class="panel">
         <h2>GitOps target repository</h2>
         <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
-          Where the Add-worker page renders manifests. The token is stored write-only and never
-          returned. <b>Server-side clone / commit / push (the Sync button and auto-sync reconciler)
-          land in a following iteration</b> — for now this connection pre-fills the git fields on the
-          worker page and is the place its value lives.
+          The repository worker specs are rendered and committed into. The token is stored
+          write-only and never returned. <b>Sync commits straight to the branch below</b> — no pull
+          request — so point it at a repo where that is expected (a GitOps config repo). Secret
+          values in the rendered manifests are placeholders; replace them with a SealedSecret / SOPS
+          entry in the repo. Turn on <b>Auto-sync</b> per spec to have the reconciler push drift
+          automatically.
         </p>
         <form class="inline" id="git-form" onsubmit="saveGitConnection(event)">
           <label class="full">Repo URL<input name="repo_url" placeholder="https://github.com/acme/gitops.git"></label>
@@ -491,7 +493,7 @@
           <label>Commit author name<input name="author_name" placeholder="PrimeFlow"></label>
           <label>Commit author email<input name="author_email" placeholder="primeflow@example.com"></label>
           <label class="full">Access token (PAT)<input name="token" type="password" placeholder="leave blank to keep the stored one"></label>
-          <label class="wk-chk full"><input type="checkbox" name="auto_sync">Auto-sync by default (new worker manifests are pushed automatically once the engine ships)</label>
+          <label class="wk-chk full"><input type="checkbox" name="auto_sync">Auto-sync new worker specs by default (the reconciler pushes drift without a manual Sync)</label>
           <div class="full row"><button class="act primary" type="submit">Save connection</button>
             <span class="muted" id="git-status"></span></div>
         </form>
@@ -1302,13 +1304,16 @@ async function loadWorkers() {
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
 }
 
+let currentWorkerDetailId = null;
 async function openWorkerDetail(id) {
+  currentWorkerDetailId = id;
   const dlg = document.getElementById('worker-detail');
   const body = document.getElementById('wdt-body');
   body.innerHTML = '<div class="empty">Loading…</div>';
   dlg.showModal();
-  const [ws, flows, git] = await Promise.all([
+  const [ws, flows, git, specs] = await Promise.all([
     api('/workers'), api('/flows').catch(() => []), api('/settings/git').catch(() => ({})),
+    api('/worker-specs').catch(() => []),
   ]);
   const w = (ws || []).find(x => x.id === id);
   if (!w) { body.innerHTML = '<div class="empty">Worker not found — it may have deregistered.</div>'; return; }
@@ -1343,14 +1348,56 @@ async function openWorkerDetail(id) {
       <h2>Package list <span class="muted">— components this worker's host needs</span></h2>
       <ul style="margin:0;padding:12px 32px;color:var(--ink);line-height:1.6">${comps.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
     </div>
-    ${(git && git.repo_url) ? `<div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
-      <h2>Git delivery</h2>
-      <p class="muted" style="padding:0 16px">Target <span class="mono">${esc(git.repo_url)}</span> @ <span class="mono">${esc(git.branch || 'main')}</span>, path <span class="mono">${esc(path)}</span></p>
-      <div class="row" style="padding:10px 16px;gap:10px">
-        <button class="act" disabled title="server-side git sync ships in the next iteration">Sync now</button>
-        <label class="wk-chk"><input type="checkbox" disabled ${git.auto_sync ? 'checked' : ''}>Auto-sync</label>
-      </div>
-    </div>` : ''}`;
+    ${gitDeliveryPanel(w, git, (specs || []).find(s => s.name === w.name))}`;
+}
+
+// gitDeliveryPanel renders the GitOps status for a worker: live Sync now /
+// Auto-sync controls when a pf_worker_specs row backs it, a "create spec" nudge
+// when a repo is configured but no spec exists, and nothing at all otherwise.
+function gitDeliveryPanel(w, git, spec) {
+  if (!spec && !(git && git.repo_url)) return '';
+  const head = `<div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)"><h2>GitOps delivery</h2>`;
+  if (!spec) {
+    return head + `<p class="muted" style="padding:0 16px 12px">No worker spec backs this worker yet.
+      <a href="#" onclick="show('newworker');return false">Add one from the wizard</a> to enable server-side sync.</p></div>`;
+  }
+  const st = spec.sync_state || 'pending';
+  const pill = { synced: 's-COMPLETED', pending: 's-SCHEDULED', drift: 's-RUNNING', error: 's-FAILED' }[st] || 's-SCHEDULED';
+  return head + `
+    <p class="muted" style="padding:0 16px">Target <span class="mono">${esc(git.repo_url || '')}</span> @ <span class="mono">${esc(git.branch || 'main')}</span></p>
+    <dl class="kv" style="padding:6px 16px">
+      <dt>State</dt><dd><span class="pill ${pill}">${esc(st)}</span></dd>
+      <dt>Last synced</dt><dd>${spec.last_synced_at ? when(spec.last_synced_at) : '—'}</dd>
+      <dt>Commit</dt><dd class="mono">${spec.last_synced_sha ? esc(spec.last_synced_sha.slice(0, 10)) : '—'}</dd>
+      ${spec.last_error ? `<dt>Error</dt><dd class="mono" style="color:var(--bad)">${esc(spec.last_error)}</dd>` : ''}
+    </dl>
+    <div class="row" style="padding:10px 16px;gap:12px">
+      <button class="act primary" onclick="syncWorkerSpecNow('${spec.id}')">Sync now</button>
+      <label class="wk-chk"><input type="checkbox" ${spec.auto_sync ? 'checked' : ''} onchange="toggleWorkerSpecAutoSync('${spec.id}', this.checked)">Auto-sync</label>
+    </div></div>`;
+}
+
+async function syncWorkerSpecNow(id) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  toast('Syncing…');
+  try {
+    const res = await api('/worker-specs/' + id + '/sync', { method: 'POST' });
+    if (res && res.last_error) toast('Sync failed: ' + res.last_error, true);
+    else toast('Synced — commit ' + ((res.last_synced_sha || '').slice(0, 8) || 'ok'));
+  } catch (e) {
+    toast('Sync failed: ' + e.message, true);
+  }
+  if (currentWorkerDetailId) openWorkerDetail(currentWorkerDetailId);
+}
+
+async function toggleWorkerSpecAutoSync(id, on) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  try {
+    await api('/worker-specs/' + id, { method: 'POST', body: { auto_sync: on } });
+    toast('Auto-sync ' + (on ? 'on' : 'off'));
+  } catch (e) {
+    toast('Update failed: ' + e.message, true);
+  }
 }
 
 // --- add worker wizard --------------------------------------------------
@@ -1487,7 +1534,11 @@ async function renderNewWorker() {
       <div class="row" style="padding:12px 16px;gap:8px">
         <button class="act primary" id="wk-gen" disabled onclick="wkGen()">Generate</button>
         <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wk-out').textContent).then(()=>toast('Copied'))">Copy</button>
+        <span class="grow"></span>
+        <button class="act" id="wk-save" disabled onclick="saveWorkerSpec(false)" title="Persist this as a worker spec (git/argocd/flux delivery only)">Save spec</button>
+        <button class="act primary" id="wk-savesync" disabled onclick="saveWorkerSpec(true)" title="Save the spec and commit it to the GitOps repo now">Save &amp; sync</button>
       </div>
+      <p class="muted" id="wk-save-note" style="padding:0 16px 12px"></p>
     </div>`;
   nwDeliveryToggle();
   wkReqs();
@@ -1559,6 +1610,8 @@ function nwDeliveryToggle() {
   document.getElementById('nw-runtime').style.display = m === 'script' ? '' : 'none';
   document.querySelector('.nw-git').style.display = m === 'script' ? 'none' : 'grid';
   document.querySelector('.nw-argo').style.display = m === 'argocd' ? 'grid' : 'none';
+  const boxes = [...document.querySelectorAll('.wk-req')];
+  wkSaveGate(boxes.length > 0 && boxes.every(b => b.checked));
 }
 
 function wkReqs() {
@@ -1576,22 +1629,86 @@ function wkReqGate() {
   const ok = boxes.length > 0 && boxes.every(b => b.checked);
   const gen = document.getElementById('wk-gen');
   if (gen) gen.disabled = !ok;
+  wkSaveGate(ok);
   const out = document.getElementById('wk-out');
   if (!out) return;
   if (ok) wkGen();
   else out.textContent = '# Confirm every host requirement above to generate the bootstrap package.';
 }
 
-function wkEnv(name, conc, queues, conn) {
-  const reach = (conn && conn.mode === 'api')
-    ? [
-        ['PRIMEFLOW_API_URL', conn.apiURL || 'https://PRIMEFLOW_HOST'],
-        ['PRIMEFLOW_WORKER_TOKEN', conn.token || 'pmx_REPLACE_ME'],
-      ]
-    : [
-        ['PRIMEFLOW_DATABASE_URL', 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
-        ['PRIMEFLOW_NATS_URL', 'nats://NATS_HOST:4222'],
-      ];
+// Save spec / Save & sync are available once the host requirements are ticked
+// and the delivery method is one the server can render (git / argocd / flux).
+function wkSaveGate(reqsOK) {
+  const d = document.getElementById('wk-delivery');
+  const save = document.getElementById('wk-save');
+  const savesync = document.getElementById('wk-savesync');
+  const note = document.getElementById('wk-save-note');
+  if (!d || !save || !savesync) return;
+  const method = d.elements.method.value;
+  const renderable = method !== 'script';
+  save.disabled = !(reqsOK && renderable);
+  savesync.disabled = !(reqsOK && renderable && (window.__git && window.__git.repo_url));
+  if (note) {
+    if (!renderable) note.textContent = 'Script delivery is copy-paste only — pick Git / Argo CD / Flux to save a server-managed spec.';
+    else if (!(window.__git && window.__git.repo_url)) note.textContent = 'Set a repo in Settings → Git connection to enable Save & sync.';
+    else note.textContent = 'Save spec stores it; Save & sync also commits the manifests to ' + esc(window.__git.repo_url) + ' @ ' + esc(window.__git.branch || 'main') + '.';
+  }
+}
+
+// saveWorkerSpec turns the wizard forms into a pf_worker_specs row and,
+// optionally, triggers an immediate server-side git sync.
+async function saveWorkerSpec(alsoSync) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const f = document.getElementById('wk-form');
+  const d = document.getElementById('wk-delivery');
+  if (!f || !d) return;
+  const method = d.elements.method.value;
+  if (method === 'script') return toast('Script delivery has no server spec', true);
+  const pools = [...f.querySelectorAll('input[name=pool]:checked')].map(b => b.value);
+  if (!pools.length) return toast('Pick at least one work pool', true);
+
+  const body = {
+    name: (f.elements.name.value || '').trim(),
+    image: (f.elements.image.value || 'primex/primeflow:latest').trim(),
+    queues: pools,
+    concurrency: parseInt(f.elements.concurrency.value, 10) || 4,
+    replicas: 1,
+    delivery: method,
+    auto_sync: d.elements.autosync.checked,
+    repo_path: (d.elements.path.value || '').trim(),
+  };
+  if (method === 'argocd') {
+    body.namespace = (d.elements.namespace.value || 'primeflow').trim();
+    body.argocd = {
+      project: (d.elements.project.value || 'default').trim(),
+      dest_server: (d.elements.server.value || 'https://kubernetes.default.svc').trim(),
+      revision: (d.elements.revision.value || 'HEAD').trim(),
+    };
+  }
+
+  let spec;
+  try {
+    // Upsert by name: if a spec already exists, update it in place.
+    const existing = (await api('/worker-specs').catch(() => [])) || [];
+    const match = existing.find(s => s.name === body.name);
+    spec = await api('/worker-specs' + (match ? '/' + match.id : ''), { method: 'POST', body });
+  } catch (e) {
+    return toast('Save failed: ' + e.message, true);
+  }
+  toast('Worker spec saved');
+  if (!alsoSync) { show('workers'); return; }
+
+  try {
+    const res = await api('/worker-specs/' + spec.id + '/sync', { method: 'POST' });
+    if (res && res.last_error) toast('Sync failed: ' + res.last_error, true);
+    else toast('Synced — commit ' + ((res.last_synced_sha || '').slice(0, 8) || 'ok'));
+  } catch (e) {
+    toast('Sync failed: ' + e.message, true);
+  }
+  show('workers');
+}
+
+function wkEnv(name, conc, queues) {
   return [
     ...reach,
     ['PRIMEFLOW_QUEUES', queues],

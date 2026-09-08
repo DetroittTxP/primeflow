@@ -79,9 +79,9 @@ scopes; every External API route requires one scope.
 
 | Role id | Label | Scopes |
 |---|---|---|
-| `api-admin` | API Administrator | `read:runs`, `read:deployments`, `read:queues`, `read:events`, `write:runs`, `write:deployments`, `write:queues` |
+| `api-admin` | API Administrator | `read:runs`, `read:deployments`, `read:queues`, `read:events`, `read:workers`, `read:worker-specs`, `write:runs`, `write:deployments`, `write:queues`, `write:worker-specs` |
 | `api-trigger` | API Trigger | `read:deployments`, `read:runs`, `write:runs` |
-| `api-readonly` | API Read-Only | `read:runs`, `read:deployments`, `read:queues`, `read:events` |
+| `api-readonly` | API Read-Only | `read:runs`, `read:deployments`, `read:queues`, `read:events`, `read:workers` |
 
 ### Routes and the scope each needs
 
@@ -97,6 +97,11 @@ scopes; every External API route requires one scope.
 | POST | `/api/external/v1/deployments/{id}/run` | `write:runs` |
 | GET | `/api/external/v1/queues` | `read:queues` |
 | GET | `/api/external/v1/queues/{name}/pending` | `read:queues` |
+| GET | `/api/external/v1/workers` | `read:workers` |
+| GET | `/api/external/v1/worker-specs` · `/worker-specs/{id}` | `read:worker-specs` |
+| POST | `/api/external/v1/worker-specs` · `/worker-specs/{id}` | `write:worker-specs` |
+| POST | `/api/external/v1/worker-specs/{id}/sync` | `write:worker-specs` |
+| DELETE | `/api/external/v1/worker-specs/{id}` | `write:worker-specs` |
 | GET | `/api/external/v1/events` | `read:events` |
 
 The console's **Settings → External API → API Explorer** tab renders this table

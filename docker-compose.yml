@@ -62,6 +62,10 @@ services:
       PRIMEFLOW_ADMIN_EMAIL: admin@primeflow.local
       PRIMEFLOW_ADMIN_PASSWORD: primeflow-admin
       PRIMEFLOW_LOG_RETENTION: "720h"
+      # GitOps worker delivery: how often the reconciler pushes drifted
+      # auto-sync worker specs. Set the target repo in the console under
+      # Settings → Git connection (a file:/// path works for a local trial).
+      PRIMEFLOW_GITSYNC_INTERVAL: "2m"
       # PRIMEFLOW_API_TOKEN: change-me
       # PRIMEFLOW_TRUSTED_PROXY_CIDRS: 10.0.0.0/8
       # OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
