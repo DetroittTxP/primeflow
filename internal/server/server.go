@@ -34,6 +34,7 @@ import (
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/events"
+	"github.com/primex/primeflow/internal/gitsync"
 	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/oidcauth"
 	"github.com/primex/primeflow/internal/ratelimit"
@@ -84,6 +85,11 @@ type Config struct {
 	OIDCRedirectURL string
 	OIDCLabel       string
 	ResetTTL        time.Duration
+
+	// GitEngine, when non-nil, powers server-side GitOps worker delivery: the
+	// "Sync now" action and the /worker-specs routes. Nil leaves those routes
+	// returning 503.
+	GitEngine *gitsync.Engine
 }
 
 // Server holds the API dependencies.
@@ -96,6 +102,7 @@ type Server struct {
 
 	loginThrottle ratelimit.Throttle
 	rateLimiter   ratelimit.Limiter
+	gitEngine     *gitsync.Engine
 }
 
 // New builds a server.
@@ -121,6 +128,7 @@ func New(s store.Store, b bus.Bus, em *events.Emitter, log *slog.Logger, cfg Con
 		store: s, bus: b, events: em, log: log, cfg: cfg,
 		loginThrottle: lt,
 		rateLimiter:   rl,
+		gitEngine:     cfg.GitEngine,
 	}
 }
 
@@ -182,6 +190,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/queues/{name}/pending", s.queuePending)
 	mux.HandleFunc("POST /api/v1/queues/{name}/pause", s.pauseQueue(true))
 	mux.HandleFunc("POST /api/v1/queues/{name}/resume", s.pauseQueue(false))
+
+	// --- worker specs (GitOps worker delivery) ---
+	mux.HandleFunc("GET /api/v1/worker-specs", s.listWorkerSpecs)
+	mux.HandleFunc("POST /api/v1/worker-specs", s.upsertWorkerSpec)
+	mux.HandleFunc("GET /api/v1/worker-specs/{id}", s.getWorkerSpec)
+	mux.HandleFunc("POST /api/v1/worker-specs/{id}", s.upsertWorkerSpec)
+	mux.HandleFunc("DELETE /api/v1/worker-specs/{id}", s.deleteWorkerSpec)
+	mux.HandleFunc("POST /api/v1/worker-specs/{id}/sync", s.syncWorkerSpec)
+	mux.HandleFunc("POST /api/v1/worker-specs/preview", s.previewWorkerSpec)
 
 	// --- events, automations, webhooks ---
 	mux.HandleFunc("GET /api/v1/events", s.listEvents)

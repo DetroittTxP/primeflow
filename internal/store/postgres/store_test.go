@@ -34,7 +34,8 @@ func newStore(t *testing.T) *postgres.Store {
 	}
 	if _, err := st.DB().ExecContext(ctx, `
 TRUNCATE pf_logs, pf_artifacts, pf_task_runs, pf_flow_runs, pf_events,
-         pf_automations, pf_deployments, pf_workers, pf_leader, pf_flows RESTART IDENTITY CASCADE;
+         pf_automations, pf_deployments, pf_workers, pf_leader, pf_flows,
+         pf_worker_specs RESTART IDENTITY CASCADE;
 DELETE FROM pf_work_queues WHERE name <> 'default';
 UPDATE pf_work_queues SET paused = false, concurrency_limit = NULL, push_endpoint = '', push_secret = '';`); err != nil {
 		t.Fatalf("reset: %v", err)

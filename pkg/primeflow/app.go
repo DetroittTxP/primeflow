@@ -35,6 +35,7 @@ import (
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/engine"
 	"github.com/primex/primeflow/internal/events"
+	"github.com/primex/primeflow/internal/gitsync"
 	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/oidcauth"
 	"github.com/primex/primeflow/internal/otelinit"
@@ -95,6 +96,10 @@ type Options struct {
 	// ResetTTL bounds admin-issued password-reset links (default 1h).
 	ResetTTL time.Duration
 
+	// GitSyncInterval is how often the GitOps reconciler pushes drifted
+	// auto-sync worker specs (PRIMEFLOW_GITSYNC_INTERVAL, default 2m).
+	GitSyncInterval time.Duration
+
 	// LogRetention, when > 0, sets the pf_logs cleanup horizon on a
 	// migrate-on-start process (PRIMEFLOW_LOG_RETENTION, e.g. "720h").
 	LogRetention time.Duration
@@ -153,6 +158,11 @@ func (o *Options) applyEnv() {
 	if o.ResetTTL == 0 {
 		if d, err := time.ParseDuration(envOr("PRIMEFLOW_RESET_TTL", "1h")); err == nil {
 			o.ResetTTL = d
+		}
+	}
+	if o.GitSyncInterval == 0 {
+		if d, err := time.ParseDuration(envOr("PRIMEFLOW_GITSYNC_INTERVAL", "2m")); err == nil {
+			o.GitSyncInterval = d
 		}
 	}
 	if o.LogRetention == 0 {
@@ -240,6 +250,7 @@ type App struct {
 	keyLimiter    ratelimit.Limiter
 	rlClose       func() error
 	oidc          *oidcauth.Provider
+	gitEngine     *gitsync.Engine
 
 	holder       string
 	otelShutdown otelinit.ShutdownFunc
@@ -339,7 +350,8 @@ func Open(ctx context.Context, o Options) (*App, error) {
 		Metrics:       metrics.New(st),
 		Log:           o.Logger,
 		loginThrottle: lt, keyLimiter: rl, rlClose: rlClose, oidc: oidcProvider,
-		holder: uuid.NewString(), otelShutdown: shutdown,
+		gitEngine: gitsync.NewEngine(st, o.Logger),
+		holder:    uuid.NewString(), otelShutdown: shutdown,
 	}, nil
 }
 
@@ -446,14 +458,17 @@ func (a *App) ServeAPI(ctx context.Context) error {
 		OIDCRedirectURL:   a.Options.OIDCRedirectURL,
 		OIDCLabel:         a.Options.OIDCLabel,
 		ResetTTL:          a.Options.ResetTTL,
+		GitEngine:         a.gitEngine,
 	})
 	sch := scheduler.New(a.Store, a.Events, a.Log, scheduler.Config{Holder: a.holder})
 	autos := automations.New(a.Store, a.Events, a.Log, automations.Config{Holder: a.holder})
+	reconciler := gitsync.NewReconciler(a.Store, a.gitEngine, a.Events, a.Log, a.holder, a.Options.GitSyncInterval)
 
 	return runAll(ctx,
 		func(c context.Context) error { return srv.ListenAndServe(c) },
 		func(c context.Context) error { return sch.Run(c) },
 		func(c context.Context) error { return autos.Run(c) },
+		func(c context.Context) error { return reconciler.Run(c) },
 	)
 }
 

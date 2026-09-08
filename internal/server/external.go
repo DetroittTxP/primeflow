@@ -37,6 +37,9 @@ func (s *Server) externalMux() http.Handler {
 	post := func(path string, scope apiauth.Scope, h http.HandlerFunc) {
 		m.HandleFunc("POST /api/external/v1"+path, s.ext(scope, h))
 	}
+	del := func(path string, scope apiauth.Scope, h http.HandlerFunc) {
+		m.HandleFunc("DELETE /api/external/v1"+path, s.ext(scope, h))
+	}
 
 	get("/health", "", s.extHealth)
 	get("/runs", apiauth.ScopeReadRuns, s.extListRuns)
@@ -52,6 +55,12 @@ func (s *Server) externalMux() http.Handler {
 	post("/queues", apiauth.ScopeWriteQueues, s.extUpsertQueue)
 	get("/queues/{name}/pending", apiauth.ScopeReadQueues, s.extQueuePending)
 	get("/workers", apiauth.ScopeReadWorkers, s.extListWorkers)
+	get("/worker-specs", apiauth.ScopeReadWorkerSpecs, s.listWorkerSpecs)
+	get("/worker-specs/{id}", apiauth.ScopeReadWorkerSpecs, s.getWorkerSpec)
+	post("/worker-specs", apiauth.ScopeWriteWorkerSpecs, s.upsertWorkerSpec)
+	post("/worker-specs/{id}", apiauth.ScopeWriteWorkerSpecs, s.upsertWorkerSpec)
+	post("/worker-specs/{id}/sync", apiauth.ScopeWriteWorkerSpecs, s.syncWorkerSpec)
+	del("/worker-specs/{id}", apiauth.ScopeWriteWorkerSpecs, s.deleteWorkerSpec)
 	get("/events", apiauth.ScopeReadEvents, s.extListEvents)
 	return m
 }

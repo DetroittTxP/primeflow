@@ -54,6 +54,10 @@ data:
   # PRIMEFLOW_REDIS_URL: "redis://redis.primeflow.svc.cluster.local:6379"
   # Bounded pf_logs: leader prunes/drops old monthly partitions every 30 min.
   PRIMEFLOW_LOG_RETENTION: "720h"
+  # GitOps worker delivery: the reconciler pushes drifted auto-sync worker
+  # specs this often. The target repo + token are set at runtime in the console
+  # (Settings → Git connection), not here.
+  PRIMEFLOW_GITSYNC_INTERVAL: "2m"
   # Uncomment to export traces (server AND workers pick this up).
   # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc:4318"
   # OTEL_SERVICE_NAME: "primeflow"
