@@ -313,14 +313,23 @@ func (s *Server) workerHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &b) {
 		return
 	}
-	info := &core.WorkerInfo{
-		ID: id.WorkerID, Name: b.Name, Queues: b.Queues,
-		Concurrency: b.Concurrency, ActiveRuns: b.ActiveRuns,
-		StartedAt: b.StartedAt, LastHeartbeat: time.Now().UTC(),
-	}
-	if err := s.store.HeartbeatWorker(r.Context(), info); err != nil {
-		fail(w, err)
-		return
+	// Two different calls land on this route: the liveness beat, which carries
+	// who the worker is, and the batched lease renewal, which carries only the
+	// runs it holds. Registering from the second would write back the fields it
+	// never sends, so a remote worker would lose its name, its lanes and its
+	// concurrency in the console for exactly as long as it is busy. A worker
+	// always names itself, so the name is what tells the two apart.
+	var info *core.WorkerInfo
+	if b.Name != "" {
+		info = &core.WorkerInfo{
+			ID: id.WorkerID, Name: b.Name, Queues: b.Queues,
+			Concurrency: b.Concurrency, ActiveRuns: b.ActiveRuns,
+			StartedAt: b.StartedAt, LastHeartbeat: time.Now().UTC(),
+		}
+		if err := s.store.HeartbeatWorker(r.Context(), info); err != nil {
+			fail(w, err)
+			return
+		}
 	}
 
 	reply := workerHeartbeatReply{Worker: info, Renewed: []string{}, Lost: []string{}, Cancelling: []string{}}

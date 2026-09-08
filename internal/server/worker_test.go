@@ -953,6 +953,78 @@ func TestHeartbeatCostIsIndependentOfHeldRuns(t *testing.T) {
 	}
 }
 
+// Those two calls share one route, and only the first carries identity. The
+// renewal must leave the registry alone: a worker holding runs is exactly the
+// one an operator is looking at, and a row with no name, no lanes and no
+// concurrency is not a worker.
+func TestLeaseRenewalDoesNotBlankTheWorkerRegistry(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	if err := a.store.EnsureWorkQueue(ctx, "site-a"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := a.issueWorkerKey("site-a", []string{"site-a"})
+
+	srv := httptest.NewServer(a.h)
+	defer srv.Close()
+
+	const wid = "site-a-vm1-fe4b37fe"
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: secret, WorkerID: wid,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rs.HeartbeatWorker(ctx, &core.WorkerInfo{
+		ID: wid, Name: "site-a-vm1", Queues: []string{"site-a"},
+		Concurrency: 2, ActiveRuns: 1, StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a.mkRun("site-a")
+	leased, err := rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+		Queues: []string{"site-a"}, Max: 1, LeaseFor: time.Minute,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease a run: got %d (%v)", len(leased), err)
+	}
+
+	// The renewal half of the same interval: held runs and nothing else.
+	renewed, _, err := rs.RenewLeases(ctx, wid, []string{leased[0].ID}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(renewed) != 1 {
+		t.Fatalf("renewed %d of 1 leases", len(renewed))
+	}
+
+	ws, err := a.store.ListWorkers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *core.WorkerInfo
+	for i := range ws {
+		if ws[i].ID == wid {
+			got = &ws[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("the worker vanished from the registry")
+	}
+	if got.Name != "site-a-vm1" {
+		t.Errorf("name = %q, want \"site-a-vm1\"", got.Name)
+	}
+	if len(got.Queues) != 1 || got.Queues[0] != "site-a" {
+		t.Errorf("queues = %v, want [site-a]", got.Queues)
+	}
+	if got.Concurrency != 2 {
+		t.Errorf("concurrency = %d, want 2", got.Concurrency)
+	}
+}
+
 // The same call has to tell a worker what it has lost and what it must stop,
 // because those are the two things it cannot safely guess.
 func TestHeartbeatReportsLostLeasesAndCancellations(t *testing.T) {
