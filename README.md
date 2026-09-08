@@ -420,6 +420,10 @@ route ของผู้ดูแลทั้งหมดอยู่ใต้ `
 | `GET /stats?window=8h` | กิจกรรมแบ่งช่วงเวลาสำหรับ Dashboard |
 | `GET /metrics` | Prometheus (ไม่ต้องยืนยันตัวตน) |
 
+`POST /runs/{id}/cancel` ตอบ `409` ถ้างานจบไปแล้ว (`COMPLETED` / `FAILED` / `CANCELLED`)
+ไม่มีอะไรให้หยุด และการรับคำสั่งไว้จะทิ้ง `cancel_requested` ค้างบนงานที่สำเร็จตลอดไป
+`CRASHED` ไม่นับว่าจบ — janitor ยังอาจ reschedule ได้ ผู้ดูแลจึงยังสั่งยกเลิกดักไว้ก่อนได้
+
 External API อยู่ใต้ `/api/external/v1` และมีเอกสารใน
 [`docs/api_roles_and_permissions.md`](docs/api_roles_and_permissions.md) เป็น projection
 ที่ยืนยันด้วย key และกั้นด้วย scope:

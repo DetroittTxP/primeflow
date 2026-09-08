@@ -701,6 +701,38 @@ func TestCancelSemantics(t *testing.T) {
 	if got.State != core.StateCancelling || !got.CancelRequest {
 		t.Fatalf("running run should move to CANCELLING, got %s", got.State)
 	}
+
+	// A finished run has nothing left to stop. Accepting the request would
+	// leave cancel_requested set on it forever, so every later reader would be
+	// told a COMPLETED run had been cancelled.
+	done := mkRun(t, st, "default", 50, time.Now().UTC())
+	for _, to := range []core.StateType{core.StateRunning, core.StateCompleted} {
+		if _, err := st.SetFlowRunState(ctx, done.ID,
+			core.NewState(to, string(to), ""), store.StateOpts{}); err != nil {
+			t.Fatalf("drive run to %s: %v", to, err)
+		}
+	}
+	_, err = st.RequestCancel(ctx, done.ID)
+	var bad core.ErrInvalidTransition
+	if !errors.As(err, &bad) {
+		t.Fatalf("cancelling a COMPLETED run should be refused, got %v", err)
+	}
+	if bad.From != core.StateCompleted {
+		t.Fatalf("transition error should name the state it refused: %+v", bad)
+	}
+	after, err := st.GetFlowRun(ctx, done.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != core.StateCompleted || after.CancelRequest {
+		t.Fatalf("refused cancel must leave the run untouched, got %s cancel_requested=%v",
+			after.State, after.CancelRequest)
+	}
+
+	// A missing run is still a 404, not a conflict.
+	if _, err := st.RequestCancel(ctx, uuid.NewString()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("cancelling an unknown run should be ErrNotFound, got %v", err)
+	}
 }
 
 func TestQueueStats(t *testing.T) {

@@ -740,7 +740,11 @@ func (s *Store) ClearRunPin(ctx context.Context, runID string) (*core.FlowRun, e
 
 // RequestCancel flags a run for cancellation. A SCHEDULED run is cancelled
 // immediately; a RUNNING one moves to CANCELLING and the worker's next
-// checkpoint observes the flag and unwinds.
+// checkpoint observes the flag and unwinds. A run that has already finished is
+// refused with ErrInvalidTransition -- there is nothing left to stop, and the
+// flag would otherwise stay on the row forever, claiming a COMPLETED run had
+// been cancelled. CRASHED is not terminal here: the janitor may still reschedule
+// it, so an operator can head that off.
 func (s *Store) RequestCancel(ctx context.Context, runID string) (*core.FlowRun, error) {
 	const stmt = `
 UPDATE pf_flow_runs
@@ -756,9 +760,21 @@ UPDATE pf_flow_runs
        ended_at = CASE WHEN state = 'SCHEDULED' THEN now() ELSE ended_at END,
        updated_at = now()
  WHERE id = $1
+   AND state NOT IN ('COMPLETED','FAILED','CANCELLED')
 RETURNING ` + flowRunCols
 	row := s.db.QueryRowContext(ctx, stmt, runID)
 	r, err := scanFlowRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Either the run is gone, or it finished before the request landed. A
+		// finished run is a conflict rather than a 404, and leaving the flag
+		// set on it would tell every later reader that a COMPLETED run was
+		// cancelled -- so read it back to say which happened.
+		cur, getErr := s.GetFlowRun(ctx, runID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return nil, core.ErrInvalidTransition{From: cur.State, To: core.StateCancelling}
+	}
 	return r, mapErr(err)
 }
 
