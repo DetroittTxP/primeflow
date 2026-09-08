@@ -150,37 +150,133 @@ Full design notes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Quick start
 
 ```bash
-docker compose up --build     # Postgres, NATS, server, 2 workers
-open http://localhost:8080     # log in as admin@primeflow.local / primeflow-admin
+docker compose up --build          # Postgres, NATS, Redis, server, 2 workers, push receiver
+open http://localhost:8080         # log in as admin@primeflow.local / primeflow-admin
 ```
 
-Or run it directly:
+That is the whole local stack. The server applies its own schema on start, seeds
+the admin account from `PRIMEFLOW_ADMIN_EMAIL` / `PRIMEFLOW_ADMIN_PASSWORD` on an
+empty database, and the two `primex-worker` replicas register themselves against
+the `default`, `vcd` and `metering` lanes.
+
+**If a port is already taken.** Every published port is a variable with the
+conventional value as its default, so nothing needs editing to move them — write
+a `.env` beside the compose file (it is gitignored, and Compose reads it
+automatically):
 
 ```bash
-export PRIMEFLOW_DATABASE_URL="postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable"
-export PRIMEFLOW_REDIS_URL="redis://localhost:6379"
-
-go run ./cmd/primeflow server           # API + UI + scheduler + automations
-go run ./examples/primex-worker         # a worker with two example flows
+# .env — host ports only; container-to-container ports are unchanged
+PRIMEFLOW_PG_PORT=5435
+PRIMEFLOW_REDIS_PORT=6380
+PRIMEFLOW_HTTP_PORT=8085
+PRIMEFLOW_NATS_PORT=4223
+PRIMEFLOW_NATS_MON_PORT=8223
 ```
 
-Then create a deployment and run it:
+The console is then on `http://localhost:8085`, and `sites/issue-keys.sh`
+already defaults to that URL. This matters more than it sounds: 5432, 6379,
+8080 and 4222 are the first ports every other local stack claims.
+
+### Talking to it from the CLI
+
+`/api/v1/*` always requires a credential — there is no open-by-default mode. A
+browser gets a session cookie from the login form; a script uses the static
+machine token, which is admin-equivalent and exempt from CSRF. Set it on the
+server first:
+
+```yaml
+# docker-compose.yml, under server.environment (uncomment)
+PRIMEFLOW_API_TOKEN: local-dev-token
+```
 
 ```bash
-curl -X POST localhost:8080/api/v1/deployments -d '{
-  "name": "provision-vm-standard",
-  "flow_name": "provision-vm",
-  "work_queue": "vcd",
-  "priority": 50,
-  "retries": 1,
-  "retry_delay": "30s",
-  "timeout": "30m"
-}'
+docker compose up -d server        # pick up the new token
+
+export PRIMEFLOW_API_URL=http://localhost:8080     # match PRIMEFLOW_HTTP_PORT
+export PRIMEFLOW_API_TOKEN=local-dev-token
+
+curl -sS -X POST $PRIMEFLOW_API_URL/api/v1/deployments \
+  -H "Authorization: Bearer $PRIMEFLOW_API_TOKEN" \
+  -H 'Content-Type: application/json' -d '{
+    "name": "provision-vm-standard",
+    "flow_name": "provision-vm",
+    "work_queue": "vcd",
+    "priority": 50,
+    "retries": 1,
+    "retry_delay": "30s",
+    "timeout": "30m"
+  }'
 
 primeflow run provision-vm-standard -param org_name=acme -param name=web-01
+primeflow runs
 ```
 
+Without the token both the `curl` and the CLI get `401 authentication required`.
+`GET /api/v1/health` and `GET /metrics` are the only open routes; the console
+also accepts `?token=<PRIMEFLOW_API_TOKEN>` on a URL, which is the quick way to
+open a view without typing the seed password.
+
 ---
+
+## Local development
+
+**Build and test without a Go toolchain on the host.** The Dockerfile's build
+stage is an ordinary `golang:1.25-alpine`, so the same image runs `go` directly
+against the working tree — nothing to install, and the version matches CI:
+
+```bash
+docker run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=0 golang:1.25-alpine \
+  go build ./...
+```
+
+With Go installed locally the Makefile is the shorter path:
+
+```bash
+make build            # bin/primeflow (server + CLI) and bin/primex-worker
+make lint             # gofmt -w + go vet
+make test-unit        # every test that needs no database
+```
+
+**Run the pieces outside the container.** A worker needs a database URL and,
+optionally, a bus; it does not have to be a container, so the usual loop is
+compose for infrastructure and a native process for whatever you are editing:
+
+```bash
+export PRIMEFLOW_DATABASE_URL="postgres://primeflow:primeflow@localhost:5435/primeflow?sslmode=disable"
+export PRIMEFLOW_NATS_URL="nats://localhost:4223"
+
+go run ./cmd/primeflow server           # API + UI + scheduler + automations
+go run ./examples/primex-worker         # a worker with the example flows
+```
+
+Quote the DSN: the `?` in `?sslmode=disable` is a glob in zsh. Ports here are
+the `.env` ones above — with no `.env`, use 5432 and 4222.
+
+**Integration tests need their own database.** They reset the schema, so point
+them at a database you do not mind losing rather than the one the stack is
+using:
+
+```bash
+docker compose exec -T postgres psql -U primeflow -c 'CREATE DATABASE primeflow_test'
+
+make test-integration \
+  TEST_DB="postgres://primeflow:primeflow@localhost:5435/primeflow_test?sslmode=disable"
+```
+
+`make test-integration` passes `-p 1`, because the integration packages each
+reset that one database and must not run concurrently. `TestLogPartitionMaintenance`
+is calendar-sensitive and can fail near a month boundary independently of your
+change.
+
+**The console has no build step.** `internal/server/ui/*.html` is compiled into
+the binary with `//go:embed`, so a UI change is `docker compose up -d --build
+server` and a hard refresh — see [For new developers](#for-new-developers) for
+how the SPA is laid out and how to add an endpoint behind it.
+
+**Simulating remote sites.** `docker-compose.sites.yml` runs pool-scoped workers
+that can reach nothing but the server's API, optionally behind a TLS edge —
+the closest thing to a site VM without a VM. See
+[Trying it locally](#trying-it-locally).
 
 ## Writing a worker
 
@@ -430,18 +526,168 @@ key-authenticated, scope-gated projection:
 
 ## Deployment
 
-**Kubernetes** — [`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) has a
-server Deployment (safe to scale: leader election handles the singleton loops)
-and one worker Deployment per queue, so a slow lane scales independently.
+The server is one static binary that needs PostgreSQL and nothing else — 14 or
+newer for the dashboard's time-bucketed charts, which fall back to bare totals
+below that. A bus (NATS or Redis) is an accelerator, never a dependency. Three shapes are
+documented: a single VM below, Kubernetes, and
+[workers at a remote site](#workers-at-a-remote-site) for a VM that should hold
+no database credential.
+
+### On a single VM
+
+Two ways to run it, both ending at the same place. Use Compose if Docker is
+already on the box; use the binary and systemd if you would rather not run a
+container runtime beside your workloads.
+
+**Ship the image or the binary.** Neither needs the source on the VM:
+
+```bash
+make docker                                  # primex/primeflow:$(git describe) and :latest
+docker push primex/primeflow:latest          # to your registry
+
+# or a plain binary, cross-compiled from anywhere:
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+  -o primeflow ./cmd/primeflow
+```
+
+**Postgres.** Managed is one less thing to run. Local is fine too:
+
+```bash
+sudo -u postgres createuser --pwprompt primeflow
+sudo -u postgres createdb --owner=primeflow primeflow
+```
+
+The server applies its schema on start (`-no-migrate` turns that off), so there
+is no separate migration step on a first boot. `primeflow migrate` exists for
+the case where you want the schema applied before anything serves traffic.
+
+**Configuration is one env file.**
+
+```ini
+# /etc/primeflow/server.env — chmod 600, it holds the DSN and the token
+PRIMEFLOW_DATABASE_URL=postgres://primeflow:CHANGE_ME@127.0.0.1:5432/primeflow?sslmode=require
+PRIMEFLOW_HTTP_ADDR=127.0.0.1:8080          # loopback: the proxy takes 443
+PRIMEFLOW_API_TOKEN=CHANGE_ME               # machine clients (CLI, scripts)
+
+# Seeds the first operator account, on an empty database only. Ignored once any
+# user exists, so it is safe to leave in place.
+PRIMEFLOW_ADMIN_EMAIL=admin@example.com
+PRIMEFLOW_ADMIN_PASSWORD=CHANGE_ME
+
+# Believe X-Forwarded-For and forwarded client-cert state from the proxy, and
+# mark session cookies Secure (implied by this, since TLS terminates in front).
+PRIMEFLOW_TRUSTED_PROXY_CIDRS=127.0.0.1/32
+PRIMEFLOW_SESSION_TTL=168h
+PRIMEFLOW_LOG_RETENTION=720h                # the janitor drops aged-out pf_logs partitions
+PRIMEFLOW_LOG_LEVEL=info
+```
+
+**Compose on the VM.** [`docker-compose.yml`](docker-compose.yml) is a
+development file — it builds from source and publishes Postgres to the host.
+For a VM, point the services at a pushed image and stop publishing anything but
+the proxy's upstream:
+
+```yaml
+server:
+  image: primex/primeflow:latest      # instead of `build: .`
+  env_file: [/etc/primeflow/server.env]
+  ports: ["127.0.0.1:8080:8080"]      # loopback only
+  restart: unless-stopped
+```
+
+**Binary and systemd.** The same shape as a site worker — a file, an env file,
+a unit:
+
+```ini
+# /etc/systemd/system/primeflow-server.service
+[Unit]
+Description=PrimeFlow server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=primeflow
+EnvironmentFile=/etc/primeflow/server.env
+ExecStart=/usr/local/bin/primeflow server
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now primeflow-server
+curl -sS localhost:8080/api/v1/health        # open route, no credential
+```
+
+**Workers on the same VM.** A worker is your own binary with your flows compiled
+in, so it gets its own unit — see
+[Deploying to a site VM](#deploying-to-a-site-vm) for the unit itself. Beside
+the database it takes a DSN directly:
+
+```ini
+# /etc/primeflow/worker.env
+PRIMEFLOW_DATABASE_URL=postgres://primeflow:CHANGE_ME@127.0.0.1:5432/primeflow?sslmode=require
+PRIMEFLOW_QUEUES=default,vcd
+PRIMEFLOW_CONCURRENCY=4
+PRIMEFLOW_WORKER_NAME=vm1
+PRIMEFLOW_METRICS_ADDR=127.0.0.1:9090       # keep it off the public interface
+```
+
+One thing to know about a single VM with no bus: the in-process fallback does
+not cross process boundaries, so a separate worker process hears about new work
+on its next poll (`PRIMEFLOW_POLL`, 2s) rather than immediately. That is correct,
+just not instant. Running Redis or NATS on the box and setting
+`PRIMEFLOW_REDIS_URL` / `PRIMEFLOW_NATS_URL` on both processes takes dispatch
+sub-second. So does collapsing the two into one process — but that has to be
+*your* binary, since flows are compiled in: register them and call
+`app.ServeAll` instead of `app.ServeAPI` (`primeflow server -with-worker` runs
+the same mode on the stock binary, which has no flows registered, so it is a
+development convenience rather than a deployment).
+
+**TLS in front.** The server speaks plain HTTP, so something terminates 443.
+[`sites/nginx.conf`](sites/nginx.conf) is the reference, and
+[the proxy notes](#the-proxy-in-front-of-the-server) explain the two things that
+fail silently. Both server-sent-event endpoints are covered there — the worker
+wake-up channel and the console's live feed — which matters here because a VM
+serving the console through the same proxy is the case where a buffered
+`/api/v1/stream` leaves the dashboard frozen while every other page loads fine.
+
+**Firewall.** Inbound 443 for the proxy is the whole public surface. Postgres,
+the server's `PRIMEFLOW_HTTP_ADDR` and every worker's `PRIMEFLOW_METRICS_ADDR`
+belong on loopback or a private interface. Remote sites need no inbound port at
+all; they dial out.
+
+**Upgrades.** Additive, idempotent migrations run on start, so an upgrade is a
+new binary or image tag and a restart. Workers can be restarted at any point:
+an interrupted run's lease expires, the janitor marks it crashed, and it resumes
+from its last checkpoint on whichever worker leases it next. Give
+`TimeoutStopSec` enough room to reach the next checkpoint and the common case
+does not even reach that path.
+
+**Backups.** Postgres holds everything — runs, checkpoints, users, API keys,
+settings. Back it up normally. Nothing on a worker is worth preserving, which is
+what makes replacing one a non-event.
+
+### Kubernetes
+
+[`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) has a server Deployment
+(safe to scale: leader election handles the singleton loops) and one worker
+Deployment per queue, so a slow lane scales independently.
 
 Give workers a `terminationGracePeriodSeconds` long enough to reach the next
 checkpoint. Past it nothing is lost either — the lease expires and another
 worker resumes the run.
 
-**Sizing.** The dispatch query is a single indexed statement per queue per poll.
-One Postgres instance comfortably handles tens of thousands of runs a day; the
-`pf_logs` table is the one that grows, so add a retention job when you turn this
-on for real.
+### Sizing
+
+The dispatch query is a single indexed statement per queue per poll. One
+Postgres instance comfortably handles tens of thousands of runs a day; the
+`pf_logs` table is the one that grows, so set `PRIMEFLOW_LOG_RETENTION` when you
+turn this on for real.
 
 ---
 
@@ -452,8 +698,9 @@ make test-unit          # no database needed
 make test-integration   # everything, against a real Postgres
 ```
 
-The integration packages each reset the same database, so they must not run
-concurrently — `make test-integration` passes `-p 1` for that reason.
+Point `TEST_DB` at a database you do not mind losing — the integration packages
+reset it, and each other, which is why `make test-integration` passes `-p 1`.
+[Local development](#local-development) has the setup.
 
 The suite covers the guarantees that matter: durable resume skipping completed
 tasks, retry budgets, permanent errors bypassing retries, durable sleep
@@ -491,13 +738,10 @@ docker-compose.sites.yml, sites/
 
 ## For new developers
 
-**Get it running.** `docker compose up --build` brings up Postgres, NATS, Redis,
-the server (`:8080`), two workers and a push receiver. Log in with
-`admin@primeflow.local` / `primeflow-admin` (compose defaults). `make build`
-produces `bin/primeflow` (server + CLI) and `bin/primex-worker` for running
-against the compose Postgres/NATS directly — a worker only needs
-`PRIMEFLOW_DATABASE_URL` + `PRIMEFLOW_NATS_URL`, it does not have to be a
-container.
+**Get it running.** [Quick start](#quick-start) brings the stack up;
+[Local development](#local-development) covers host ports, building without a Go
+toolchain, running a process outside the container, and the test database. What
+follows is how the code is laid out once it is running.
 
 **The console is embedded, no build step.** `internal/server/ui/*.html` is
 compiled into the binary via `//go:embed` ([`internal/server/ui.go`](internal/server/ui.go)).
@@ -530,10 +774,8 @@ read path.
 (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`), embedded and applied
 in order on server start unless `-no-migrate`.
 
-**Tests.** `make test-unit` (no DB) and `make test-integration`
-(`PRIMEFLOW_TEST_DATABASE_URL`, `-p 1` because the packages share one DB). Note:
-`TestLogPartitionMaintenance` is calendar-sensitive and can fail near month
-boundaries independent of your change.
+**Tests.** See [Local development](#local-development) for the test database, and
+[Testing](#testing) for what the suite actually pins down.
 
 ---
 
@@ -822,9 +1064,10 @@ Things that bite:
 The server speaks plain HTTP on `PRIMEFLOW_HTTP_ADDR`. Whatever terminates 443
 in front of it has to get two things right, and both fail silently:
 
-- **Do not buffer `/api/v1/worker/stream`.** It is server-sent events. A proxy
-  that holds the bytes turns sub-second dispatch into the 15s poll, and nothing
-  reports an error.
+- **Do not buffer the two SSE endpoints.** `/api/v1/worker/stream` is the worker
+  wake-up channel: a proxy that holds the bytes turns sub-second dispatch into
+  the 15s poll. `/api/v1/stream` is the console's live event feed: holding those
+  bytes freezes the dashboard. Neither reports an error.
 - **Re-resolve the upstream.** nginx resolves a name in `proxy_pass` once, at
   start-up. Behind Docker or any DNS-based discovery the server moves on a
   restart and the proxy keeps the old address.
@@ -835,7 +1078,7 @@ in front of it has to get two things right, and both fail silently:
 resolver 127.0.0.11 valid=10s;              # your resolver outside Docker
 set $upstream http://server:8080;
 
-location /api/v1/worker/stream {
+location ~ ^/api/v1/(worker/)?stream$ {   # both SSE endpoints
     proxy_pass $upstream;
     proxy_http_version 1.1;
     proxy_set_header Connection "";
