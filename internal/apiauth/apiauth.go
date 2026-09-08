@@ -36,6 +36,14 @@ const (
 	ScopeWriteDeployments Scope = "write:deployments"
 	ScopeWriteQueues      Scope = "write:queues"
 	ScopeWriteWorkerSpecs Scope = "write:worker-specs"
+
+	// Worker scopes. A worker claims work and reports on what it claimed; it
+	// never manages deployments, never edits a queue's settings, and — most
+	// importantly — never writes an event. Automations act on the event log, so
+	// a worker able to append to it could trip an automation against a lane it
+	// has no other authority over.
+	ScopeWorkerLease  Scope = "worker:lease"
+	ScopeWorkerReport Scope = "worker:report"
 )
 
 // Role is a named, fixed bundle of scopes. Roles are defined in code, not the
