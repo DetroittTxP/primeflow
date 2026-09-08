@@ -44,7 +44,7 @@ run-worker: build ## Run the example worker
 	PRIMEFLOW_DATABASE_URL="$(TEST_DB)" PRIMEFLOW_QUEUES=default,vcd,metering $(BIN)/primex-worker
 
 docker: ## Build the container image
-	docker build --build-arg VERSION=$(VERSION) -t primex/primeflow:$(VERSION) -t primex/primeflow:latest .
+	docker build --build-arg VERSION=$(VERSION) -t detroitttttxp/primeflow:$(VERSION) -t detroitttttxp/primeflow:latest .
 
 clean:
 	rm -rf $(BIN)

@@ -125,9 +125,9 @@ server holds no flow code and does not need to move.
 ## 4. Build and push
 
 ```bash
-make docker                          # primex/primeflow:$(git describe) and :latest
-docker push primex/primeflow:$(git describe --tags --always)
-docker push primex/primeflow:latest
+make docker                          # detroitttttxp/primeflow:$(git describe) and :latest
+docker push detroitttttxp/primeflow:$(git describe --tags --always)
+docker push detroitttttxp/primeflow:latest
 ```
 
 Deploy the `git describe` tag, not `latest` — `latest` makes a rollback a
@@ -181,7 +181,7 @@ PRIMEFLOW_LOG_LEVEL=info
 ```yaml
 services:
   server:
-    image: primex/primeflow:1.4.0
+    image: detroitttttxp/primeflow:1.4.0
     env_file: [/etc/primeflow/server.env]
     ports: ["127.0.0.1:8080:8080"]     # host loopback only; the proxy holds 443
     restart: unless-stopped
@@ -278,7 +278,7 @@ use.
 ```yaml
 services:
   worker:
-    image: primex/primeflow:1.4.0
+    image: detroitttttxp/primeflow:1.4.0
     entrypoint: ["/usr/local/bin/primex-worker"]   # or your own image, which needs none
     env_file: [/etc/primeflow/worker.env]
     restart: unless-stopped
@@ -293,7 +293,7 @@ docker run -d --name primeflow-worker --restart unless-stopped \
   --stop-timeout 120 \
   --entrypoint /usr/local/bin/primex-worker \
   --env-file /etc/primeflow/worker.env \
-  primex/primeflow:1.4.0
+  detroitttttxp/primeflow:1.4.0
 ```
 
 `stop_grace_period` is the same knob as systemd's `TimeoutStopSec` and

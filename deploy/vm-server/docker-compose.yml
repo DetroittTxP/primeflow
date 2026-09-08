@@ -60,7 +60,7 @@ services:
       - certs:/certs
 
   server:
-    image: ${PRIMEFLOW_IMAGE:-primex/primeflow:latest}
+    image: ${PRIMEFLOW_IMAGE:-detroitttttxp/primeflow:latest}
     env_file: [./server.env]
     networks: [pf]
     depends_on:

@@ -545,8 +545,8 @@ container runtime beside your workloads.
 **Ship the image or the binary.** Neither needs the source on the VM:
 
 ```bash
-make docker                                  # primex/primeflow:$(git describe) and :latest
-docker push primex/primeflow:latest          # to your registry
+make docker                                  # detroitttttxp/primeflow:$(git describe) and :latest
+docker push detroitttttxp/primeflow:latest      # to your registry
 
 # or a plain binary, cross-compiled from anywhere:
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
@@ -592,7 +592,7 @@ the proxy's upstream:
 
 ```yaml
 server:
-  image: primex/primeflow:latest      # instead of `build: .`
+  image: detroitttttxp/primeflow:latest   # instead of `build: .`
   env_file: [/etc/primeflow/server.env]
   ports: ["127.0.0.1:8080:8080"]      # loopback only
   restart: unless-stopped

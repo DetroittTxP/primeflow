@@ -12,7 +12,7 @@ name: primeflow-worker
 
 services:
   worker:
-    image: ${PRIMEFLOW_IMAGE:-primex/primeflow:latest}
+    image: ${PRIMEFLOW_IMAGE:-detroitttttxp/primeflow:latest}
     entrypoint: ["/usr/local/bin/primex-worker"]
     env_file: [./worker.env]
     volumes:

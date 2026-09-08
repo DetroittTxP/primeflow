@@ -19,9 +19,10 @@ Background on why each piece is shaped this way is in
 Both VMs run the same image. Build it once, from anywhere:
 
 ```bash
+docker login                                    # once, on the machine that builds
 docker buildx build --platform linux/amd64 \
-  -t <registry>/primeflow:$(git describe --tags --always) \
-  -t <registry>/primeflow:latest --push .
+  -t detroitttttxp/primeflow:$(git describe --tags --always) \
+  -t detroitttttxp/primeflow:latest --push .
 ```
 
 `--platform` matters. The `Dockerfile` defaults `TARGETARCH` to `amd64`, so a
@@ -31,6 +32,19 @@ confusing later. Naming the platform makes the manifest and the binary agree.
 
 Deploy the `git describe` tag rather than `latest`, so a rollback is a tag and
 not a question about what was pulled when.
+
+**If the repository is private**, both VMs need a credential to pull it. Use a
+Docker Hub access token with **Read-only** scope rather than the account
+password — it can be revoked on its own, and a VM should not hold a credential
+that can also push:
+
+```bash
+# on mainvm and on vm2, once
+echo '<read-only access token>' | docker login -u detroitttttxp --password-stdin
+```
+
+Making the repository public instead removes that step, at the cost of
+publishing a binary of your flows to anyone who looks.
 
 > The image's worker is built from `examples/primex-worker`, and flows are
 > compiled in. Once you have your own flows, build your own worker image —
@@ -51,7 +65,7 @@ $EDITOR server.env                      # every CHANGE_ME
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=<the same password you put in the DSN>
 SERVER_HOST=mainvm.example.com
-PRIMEFLOW_IMAGE=<registry>/primeflow:<tag>
+PRIMEFLOW_IMAGE=detroitttttxp/primeflow:<tag>
 EOF
 chmod 600 .env
 
@@ -113,7 +127,7 @@ cd ~/primeflow
 cp worker.env.example worker.env && chmod 600 worker.env
 $EDITOR worker.env                      # API URL, token, queues
 
-echo "PRIMEFLOW_IMAGE=<registry>/primeflow:<tag>" > .env
+echo "PRIMEFLOW_IMAGE=detroitttttxp/primeflow:<tag>" > .env
 
 docker compose up -d
 docker compose logs -f worker
