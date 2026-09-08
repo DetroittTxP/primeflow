@@ -52,12 +52,23 @@ type FlowRunPayload struct {
 	Tags         []string        `json:"tags,omitempty"`
 	Attempt      int             `json:"attempt"`
 	Result       json.RawMessage `json:"result,omitempty"`
+	// WorkerID records who drove the transition. The run row clears worker_id
+	// when a run settles, so without this the event log is the only place that
+	// could say which worker executed a finished run — and it could not.
+	WorkerID string `json:"worker_id,omitempty"`
 }
 
 // FlowRunStateChanged records a transition. Event names read
 // "flow-run.<State>", e.g. "flow-run.FAILED", which is what automation rules
 // match against (a trailing "*" wildcard is supported there).
 func (e *Emitter) FlowRunStateChanged(ctx context.Context, r *core.FlowRun) {
+	e.FlowRunStateChangedBy(ctx, r, "")
+}
+
+// FlowRunStateChangedBy records a transition and attributes it to a worker.
+// The server uses it on the worker API, where it knows the caller's identity
+// from the credential and the run row may already have released its lease.
+func (e *Emitter) FlowRunStateChangedBy(ctx context.Context, r *core.FlowRun, workerID string) {
 	if e == nil {
 		return
 	}
@@ -68,6 +79,12 @@ func (e *Emitter) FlowRunStateChanged(ctx context.Context, r *core.FlowRun) {
 	}
 	if r.DeploymentID != nil {
 		p.DeploymentID = *r.DeploymentID
+	}
+	switch {
+	case workerID != "":
+		p.WorkerID = workerID
+	case r.WorkerID != nil:
+		p.WorkerID = *r.WorkerID
 	}
 	raw, _ := json.Marshal(p)
 	e.Emit(ctx, "flow-run."+string(r.State), "flow-run", r.ID, raw)
