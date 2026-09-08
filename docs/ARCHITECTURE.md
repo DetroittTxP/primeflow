@@ -106,6 +106,15 @@ and never claim the same run. The partial index
 `(work_queue, queue_position NULLS LAST, priority DESC, scheduled_at) WHERE
 state='SCHEDULED'` keeps it an index scan over waiting work only.
 
+**Capped lanes are the exception.** `active` is counted in the same statement
+that admits, and under `READ COMMITTED` each statement gets its own snapshot, so
+two dispatchers racing both count the same total and both admit up to the full
+headroom — a lane capped at two admits two *per worker*. The fix is one
+transaction-scoped advisory lock on the lane, taken in an earlier statement of
+the same transaction, so the second dispatcher counts under a snapshot that
+already contains the first one's `PENDING` rows. Only lanes that set
+`concurrency_limit` pay for it; everything else keeps the lock-free path.
+
 **Why not Redis as the queue.** A Redis-backed queue means two systems that can
 disagree: a run marked `RUNNING` in Postgres with no matching entry in Redis,
 or a Redis entry for a run that was cancelled. Reconciling them is the kind of
@@ -144,10 +153,15 @@ gets one attempt beyond the configured retry budget before it is called failed.
 
 ### Why workers cannot deadlock each other
 
-- **Dispatch** is a single `SELECT … FOR UPDATE SKIP LOCKED` (see §3). The row
-  lock is acquired and released inside that one statement. There is no second
-  row locked in the same transaction, so there is no lock-ordering problem and
-  no circular wait between workers.
+- **Dispatch** is a `SELECT … FOR UPDATE SKIP LOCKED` (see §3). The row locks
+  are acquired and released inside that one statement, and `SKIP LOCKED` means
+  they never wait, so there is no circular wait between workers.
+- **A capped lane** takes one transaction-scoped advisory lock before that
+  statement, keyed on the lane name. Lock ordering is total and cannot cycle:
+  the advisory lock is always first, no transaction holds two of them (each lane
+  in a worker's list gets its own transaction, committed before the next opens),
+  and everything locked afterwards is `SKIP LOCKED`. Uncapped lanes take no
+  advisory lock, so the common path is unchanged.
 - **Lease renewal, heartbeats, state writes** are each single-row `UPDATE`s,
   independent per run.
 - **Leader election** (`pf_leader`) is one conditional `INSERT … ON CONFLICT`;

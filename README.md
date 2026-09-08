@@ -120,11 +120,14 @@ flow code.
 ```
 
 **Postgres is the only source of truth**, including queue order. Dispatch is a
-single `SELECT … FOR UPDATE SKIP LOCKED` statement, so any number of workers
-pull from the same lane without a broker and without double execution. That
-statement takes and releases one row lock; there is no lock ordering, no
-cross-row wait, and no advisory lock held across calls — workers cannot deadlock
-each other. The only place a cycle could form is sub-flow recursion, which is
+`SELECT … FOR UPDATE SKIP LOCKED` statement, so any number of workers pull from
+the same lane without a broker and without double execution. A lane that carries
+a **concurrency limit** additionally serialises its dispatchers behind one
+transaction-scoped advisory lock, which is what makes that limit exact rather
+than per-worker; an uncapped lane takes no lock at all. Workers still cannot
+deadlock each other: the advisory lock is always taken first, only one is ever
+held at a time, and the row locks that follow use `SKIP LOCKED` and never wait.
+The only structure that could form a cycle is sub-flow recursion, which is
 depth-bounded (see below).
 
 **The bus is an accelerator, never a dependency.** It carries "new work on queue
