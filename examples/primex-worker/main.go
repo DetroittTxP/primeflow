@@ -20,7 +20,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/primex/primeflow/pkg/primeflow"
+	"github.com/primex/primeflow/pkg/primeflow/worker"
 	"github.com/primex/primeflow/pkg/sdk"
 )
 
@@ -705,11 +705,14 @@ func main() {
 	push := flag.Bool("push", os.Getenv("PRIMEFLOW_PUSH") == "1", "run as a push-pool receiver")
 	flag.Parse()
 
-	run := primeflow.RunWorker
+	// pkg/primeflow/worker rather than pkg/primeflow: a worker binary has no
+	// use for the API server, the console or the scheduler, and importing the
+	// parent package would link all three.
+	run := worker.Run
 	if *push {
-		run = primeflow.RunPushWorker
+		run = worker.RunPush
 	}
-	if err := run(context.Background(), primeflow.Options{}); err != nil {
+	if err := run(context.Background(), worker.Options{}); err != nil {
 		log.Fatal(err)
 	}
 }

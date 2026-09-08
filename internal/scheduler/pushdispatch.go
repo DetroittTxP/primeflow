@@ -3,15 +3,13 @@ package scheduler
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/primex/primeflow/internal/core"
+	"github.com/primex/primeflow/internal/pushsig"
 )
 
 // pushDispatchLease is how long a run is held after dispatch, giving the receiver
@@ -67,7 +65,7 @@ func (s *Scheduler) dispatchOne(ctx context.Context, pool core.WorkQueue, run *c
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "primeflow-push-dispatch")
 	if pool.PushSecret != "" {
-		req.Header.Set("X-PrimeFlow-Signature", "sha256="+signPush(pool.PushSecret, body))
+		req.Header.Set(pushsig.Header, pushsig.Sign(pool.PushSecret, body))
 	}
 	resp, err := pushHTTP.Do(req)
 	if err != nil {
@@ -83,31 +81,4 @@ func (s *Scheduler) dispatchOne(ctx context.Context, pool core.WorkQueue, run *c
 	}
 	s.events.Emit(ctx, "flow-run.push-dispatched", "flow-run", run.ID,
 		[]byte(fmt.Sprintf(`{"pool":%q}`, pool.Name)))
-}
-
-// signPush is the HMAC-SHA256 of body, hex-encoded — the receiver recomputes it
-// with the shared secret to authenticate the dispatch.
-func signPush(secret string, body []byte) string {
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write(body)
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-// VerifyPushSignature checks an "sha256=<hex>" signature header against body.
-// Exported for the receiver in pkg/primeflow.
-func VerifyPushSignature(secret, header string, body []byte) bool {
-	if secret == "" {
-		return true // no secret configured => unauthenticated dispatch accepted
-	}
-	const p = "sha256="
-	if len(header) <= len(p) || header[:len(p)] != p {
-		return false
-	}
-	want, err := hex.DecodeString(header[len(p):])
-	if err != nil {
-		return false
-	}
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write(body)
-	return hmac.Equal(want, m.Sum(nil))
 }

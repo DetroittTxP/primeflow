@@ -12,12 +12,9 @@ package primeflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -32,19 +29,17 @@ import (
 	"github.com/primex/primeflow/internal/authn"
 	"github.com/primex/primeflow/internal/automations"
 	"github.com/primex/primeflow/internal/bus"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/engine"
 	"github.com/primex/primeflow/internal/events"
 	"github.com/primex/primeflow/internal/metrics"
 	"github.com/primex/primeflow/internal/oidcauth"
 	"github.com/primex/primeflow/internal/otelinit"
 	"github.com/primex/primeflow/internal/ratelimit"
+	"github.com/primex/primeflow/internal/runner"
 	"github.com/primex/primeflow/internal/scheduler"
 	"github.com/primex/primeflow/internal/server"
 	"github.com/primex/primeflow/internal/store"
 	"github.com/primex/primeflow/internal/store/postgres"
 	"github.com/primex/primeflow/internal/store/remote"
-	"github.com/primex/primeflow/internal/worker"
 	"github.com/primex/primeflow/pkg/sdk"
 )
 
@@ -563,22 +558,39 @@ func (a *App) ServeAPI(ctx context.Context) error {
 
 // ServeWorker runs a worker for the registered flows.
 func (a *App) ServeWorker(ctx context.Context) error {
-	w := worker.New(a.workerStore(), a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
-		Name:            a.Options.WorkerName,
-		Queues:          a.Options.Queues,
-		Concurrency:     a.Options.Concurrency,
-		PollInterval:    a.Options.PollInterval,
-		LeaseDuration:   a.Options.LeaseDuration,
-		Metrics:         a.Metrics,
-		MetricsAddr:     a.Options.WorkerMetricsAddr,
-		MaxSubflowDepth: a.Options.MaxSubflowDepth,
+	return runner.ServeWorker(ctx, a.runnerDeps(), a.runnerConfig())
+}
+
+// runnerDeps and runnerConfig hand this App's infrastructure to the shared
+// execution half. pkg/primeflow/worker builds the same two values from a
+// smaller Options, which is what keeps the two entry points from drifting.
+func (a *App) runnerDeps() runner.Deps {
+	return runner.Deps{
+		Store: a.workerStore(), Bus: a.Bus, Events: a.Events,
+		Metrics: a.Metrics, Log: a.Log,
+	}
+}
+
+func (a *App) runnerConfig() runner.Config {
+	return runner.Config{
+		Name:        a.Options.WorkerName,
+		Queues:      a.Options.Queues,
+		Concurrency: a.Options.Concurrency,
+
+		LeaseDuration: a.Options.LeaseDuration,
+		PollInterval:  a.Options.PollInterval,
 		// A worker on the API hears about cancellation twice already — on the
 		// wake-up stream and in every heartbeat — so the engine's per-run
 		// backstop poll would only add WAN traffic proportional to how busy
 		// the site is.
 		CancelPollInterval: cancelPollFor(a.Options),
-	})
-	return w.Run(ctx)
+
+		MaxSubflowDepth: a.Options.MaxSubflowDepth,
+		MetricsAddr:     a.Options.WorkerMetricsAddr,
+		PushAddr:        a.Options.PushAddr,
+		PushSecret:      a.Options.PushSecret,
+		Registry:        a.Options.Registry,
+	}
 }
 
 // ServeAll runs the API and a worker in one process — the mode to use for
@@ -588,120 +600,18 @@ func (a *App) ServeAll(ctx context.Context) error {
 	return runAll(ctx, a.ServeAPI, a.ServeWorker)
 }
 
-// pushHost is a stable-ish identity for this receiver's leases.
-func (a *App) pushHost() string {
-	host := a.Options.WorkerName
-	if host == "" {
-		host, _ = os.Hostname()
-		if host == "" {
-			host = "push-worker"
-		}
-	}
-	return host + "-" + uuid.NewString()[:8]
-}
-
 // RunOne claims a single scheduled run and executes it with the engine,
 // synchronously. It is the unit of work a push-pool receiver performs per
 // dispatch (and a handy entry point for embedders / tests).
 func (a *App) RunOne(ctx context.Context, runID string) error {
-	claimed, err := a.claimForPush(ctx, runID)
-	if err != nil {
-		return err
-	}
-	a.executePushRun(context.WithoutCancel(ctx), claimed)
-	return nil
-}
-
-func (a *App) claimForPush(ctx context.Context, runID string) (*core.FlowRun, error) {
-	// SCHEDULED -> PENDING under our lease. The engine emits flow-run.RUNNING
-	// when it starts, exactly as for a leased run, so we deliberately do not
-	// emit a state-change event here.
-	claimed, err := a.workerStore().ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
-	if err != nil {
-		return nil, err // ErrConflict => already claimed by another receiver
-	}
-	return claimed, nil
-}
-
-func (a *App) executePushRun(ctx context.Context, run *core.FlowRun) {
-	lease := a.Options.LeaseDuration
-	if lease <= 0 {
-		lease = 60 * time.Second
-	}
-	// Keep the lease alive for the duration, like a pull worker's renew loop, so
-	// a long flow is not reclaimed as CRASHED while it is still running here.
-	done := make(chan struct{})
-	go func() {
-		t := time.NewTicker(lease / 3)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-t.C:
-				_ = a.workerStore().RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
-			}
-		}
-	}()
-	defer close(done)
-
-	eng := engine.New(a.workerStore(), a.Options.Registry, a.Events, a.Log, engine.Config{
-		WorkerID: *run.WorkerID, Metrics: a.Metrics, MaxSubflowDepth: a.Options.MaxSubflowDepth,
-	})
-	eng.Execute(ctx, run)
+	return runner.RunOne(ctx, a.runnerDeps(), a.runnerConfig(), runID)
 }
 
 // ServePushWorker listens on Options.PushAddr for signed dispatch notifications
 // and executes each run synchronously (so a scale-to-zero platform keeps the
 // instance alive for the duration).
 func (a *App) ServePushWorker(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("POST /run", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
-		if !scheduler.VerifyPushSignature(a.Options.PushSecret, r.Header.Get("X-PrimeFlow-Signature"), body) {
-			http.Error(w, "bad signature", http.StatusUnauthorized)
-			return
-		}
-		var b struct {
-			RunID string `json:"run_id"`
-		}
-		if err := json.Unmarshal(body, &b); err != nil || b.RunID == "" {
-			http.Error(w, "run_id required", http.StatusBadRequest)
-			return
-		}
-		// Claim synchronously so the dispatcher's POST returns fast, then execute
-		// in the background. A pod killed mid-flow lets the lease lapse and the
-		// run is re-dispatched / reclaimed as CRASHED — the pull-worker recovery.
-		claimed, err := a.claimForPush(r.Context(), b.RunID)
-		if err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				w.WriteHeader(http.StatusConflict) // already claimed elsewhere
-				return
-			}
-			a.Log.Warn("push claim failed", "run", b.RunID, "err", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		go a.executePushRun(context.WithoutCancel(ctx), claimed)
-		w.WriteHeader(http.StatusAccepted)
-	})
-
-	srv := &http.Server{Addr: a.Options.PushAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		sc, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(sc)
-	}()
-	a.Log.Info("push worker listening", "addr", a.Options.PushAddr,
-		"flows", a.Options.Registry.Names(), "signed", a.Options.PushSecret != "")
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+	return runner.ServePush(ctx, a.runnerDeps(), a.runnerConfig())
 }
 
 // RunPushWorker is the one-call entry point for a push-pool receiver: it opens
