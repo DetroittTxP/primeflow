@@ -168,7 +168,7 @@ func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []core.Flow
+	out := []core.Flow{}
 	for rows.Next() {
 		var f core.Flow
 		var labels []byte
@@ -298,7 +298,7 @@ ORDER BY q.name`
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []store.QueueStat
+	out := []store.QueueStat{}
 	for rows.Next() {
 		var st store.QueueStat
 		if err := rows.Scan(&st.Name, &st.Description, &st.ConcurrencyLimit, &st.Paused,
@@ -398,7 +398,7 @@ func (s *Store) ListDeployments(ctx context.Context) ([]core.Deployment, error) 
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []core.Deployment
+	out := []core.Deployment{}
 	for rows.Next() {
 		d, err := scanDeployment(rows)
 		if err != nil {

@@ -119,7 +119,7 @@ func (s *Store) ListAPIKeys(ctx context.Context, f store.APIKeyFilter) ([]core.A
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []core.APIKey
+	out := []core.APIKey{}
 	for rows.Next() {
 		k, err := scanAPIKey(rows)
 		if err != nil {
@@ -205,7 +205,7 @@ func (s *Store) ListAPIKeyEvents(ctx context.Context, apiKeyID string, limit int
 		return nil, mapErr(err)
 	}
 	defer rows.Close()
-	var out []core.APIKeyEvent
+	out := []core.APIKeyEvent{}
 	for rows.Next() {
 		var e core.APIKeyEvent
 		if err := rows.Scan(&e.ID, &e.APIKeyID, &e.At, &e.Actor, &e.Action, scanJSON(&e.Detail)); err != nil {
