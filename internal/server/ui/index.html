@@ -470,7 +470,32 @@
     <div class="view-head"><h1>Settings</h1></div>
     <div class="subnav" id="settings-subnav">
       <button data-s="external" class="active" onclick="showSettings('external')">External API</button>
+      <button data-s="git" onclick="showSettings('git')">Git connection</button>
       <button data-s="users" onclick="showSettings('users')">Users</button>
+    </div>
+
+    <div id="settings-git" hidden>
+      <div class="panel">
+        <h2>GitOps target repository</h2>
+        <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
+          Where the Add-worker page renders manifests. The token is stored write-only and never
+          returned. <b>Server-side clone / commit / push (the Sync button and auto-sync reconciler)
+          land in a following iteration</b> — for now this connection pre-fills the git fields on the
+          worker page and is the place its value lives.
+        </p>
+        <form class="inline" id="git-form" onsubmit="saveGitConnection(event)">
+          <label class="full">Repo URL<input name="repo_url" placeholder="https://github.com/acme/gitops.git"></label>
+          <label>Branch<input name="branch" value="main"></label>
+          <label>Base path in repo<input name="base_path" placeholder="workers"></label>
+          <label>Provider<input name="provider" readonly placeholder="auto-detected"></label>
+          <label>Commit author name<input name="author_name" placeholder="PrimeFlow"></label>
+          <label>Commit author email<input name="author_email" placeholder="primeflow@example.com"></label>
+          <label class="full">Access token (PAT)<input name="token" type="password" placeholder="leave blank to keep the stored one"></label>
+          <label class="wk-chk full"><input type="checkbox" name="auto_sync">Auto-sync by default (new worker manifests are pushed automatically once the engine ships)</label>
+          <div class="full row"><button class="act primary" type="submit">Save connection</button>
+            <span class="muted" id="git-status"></span></div>
+        </form>
+      </div>
     </div>
 
     <div id="settings-external">
@@ -577,6 +602,14 @@
     <button class="act" onclick="document.getElementById('flow-dialog').close()">Close</button>
   </div>
   <div class="dlg-body" id="fd-body"></div>
+</dialog>
+
+<dialog id="worker-detail">
+  <div class="dlg-head">
+    <strong id="wdt-title">Worker</strong><span class="grow"></span>
+    <button class="act" onclick="document.getElementById('worker-detail').close()">Close</button>
+  </div>
+  <div class="dlg-body" id="wdt-body"></div>
 </dialog>
 
 <dialog id="pool-dialog">
@@ -736,7 +769,7 @@ function refreshCurrent() {
      automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
      events: loadEvents,
-     settings: () => settingsTab === 'external' ? loadKeys() : loadUsers() })[current]();
+     settings: () => settingsTab === 'external' ? loadKeys() : settingsTab === 'git' ? loadGitConnection() : loadUsers() })[current]();
 }
 document.getElementById('nav').innerHTML = VIEWS.map(([v, label, ic]) =>
   `<button data-v="${v}" onclick="show('${v}')"><span class="ic">${ic}</span>${label}</button>`).join('');
@@ -1216,12 +1249,63 @@ async function saveAutomation(ev) {
 async function loadWorkers() {
   const ws = await api('/workers');
   document.getElementById('workers').innerHTML = ws.length ? ws.map(w => `
-    <tr>
+    <tr onclick="openWorkerDetail('${w.id}')" style="cursor:pointer" title="View parameters, config, YAML and packages">
       <td><strong>${esc(w.name)}</strong><div class="muted mono">${esc(w.id.slice(0, 8))}</div></td>
       <td>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</td>
       <td class="mono">${(w.queues || []).map(esc).join(', ')}</td>
       <td>${w.active_runs}</td><td>${w.concurrency}</td><td>${when(w.last_heartbeat)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No workers have checked in.</td></tr>';
+}
+
+async function openWorkerDetail(id) {
+  const dlg = document.getElementById('worker-detail');
+  const body = document.getElementById('wdt-body');
+  body.innerHTML = '<div class="empty">Loading…</div>';
+  dlg.showModal();
+  const [ws, flows, git] = await Promise.all([
+    api('/workers'), api('/flows').catch(() => []), api('/settings/git').catch(() => ({})),
+  ]);
+  const w = (ws || []).find(x => x.id === id);
+  if (!w) { body.innerHTML = '<div class="empty">Worker not found — it may have deregistered.</div>'; return; }
+  document.getElementById('wdt-title').textContent = w.name;
+  const tags = [...new Set((flows || []).flatMap(f => f.tags || []))];
+  const comps = wkComponentsFor(tags);
+  const queues = (w.queues || []).join(',') || 'default';
+  const env = wkEnv(w.name, w.concurrency, queues);
+  const km = wkK8s(w.name, 'primex/primeflow:latest', env);
+  const path = ((git && git.base_path) ? git.base_path + '/' : '') + w.name;
+  body.innerHTML = `
+    <dl class="kv">
+      <dt>Name</dt><dd>${esc(w.name)}</dd>
+      <dt>ID</dt><dd class="mono">${esc(w.id)}</dd>
+      <dt>Status</dt><dd>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</dd>
+      <dt>Pools</dt><dd class="mono">${esc(queues)}</dd>
+      <dt>Concurrency</dt><dd>${w.concurrency}</dd>
+      <dt>Active runs</dt><dd>${w.active_runs}</dd>
+      <dt>Started</dt><dd>${when(w.started_at)}</dd>
+      <dt>Last heartbeat</dt><dd>${when(w.last_heartbeat)}</dd>
+    </dl>
+    <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
+      <h2>Configuration (env)</h2>
+      <pre class="logs" style="margin:0 16px">${esc(env.map(([k, v]) => k + '=' + v).join('\n'))}</pre>
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Deployment YAML <span class="muted">— rendered from this worker's live config</span></h2>
+      <pre class="logs" id="wdt-yaml" style="margin:0 16px">${esc(km.secret + '\n---\n' + km.dep)}</pre>
+      <div class="row" style="padding:10px 16px"><button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wdt-yaml').textContent).then(()=>toast('Copied'))">Copy YAML</button></div>
+    </div>
+    <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Package list <span class="muted">— components this worker's host needs</span></h2>
+      <ul style="margin:0;padding:12px 32px;color:var(--ink);line-height:1.6">${comps.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
+    </div>
+    ${(git && git.repo_url) ? `<div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
+      <h2>Git delivery</h2>
+      <p class="muted" style="padding:0 16px">Target <span class="mono">${esc(git.repo_url)}</span> @ <span class="mono">${esc(git.branch || 'main')}</span>, path <span class="mono">${esc(path)}</span></p>
+      <div class="row" style="padding:10px 16px;gap:10px">
+        <button class="act" disabled title="server-side git sync ships in the next iteration">Sync now</button>
+        <label class="wk-chk"><input type="checkbox" disabled ${git.auto_sync ? 'checked' : ''}>Auto-sync</label>
+      </div>
+    </div>` : ''}`;
 }
 
 // --- add worker wizard --------------------------------------------------
@@ -1249,22 +1333,29 @@ const WK_COMPONENTS = {
   ],
 };
 
-function wkReqComponents() {
-  const tags = window.__wkTags || [];
+function wkComponentsFor(tags) {
   const out = [...WK_COMPONENTS.base];
-  for (const t of tags) if (WK_COMPONENTS[t]) out.push(...WK_COMPONENTS[t]);
+  for (const t of (tags || [])) if (WK_COMPONENTS[t]) out.push(...WK_COMPONENTS[t]);
   return out;
 }
+function wkReqComponents() { return wkComponentsFor(window.__wkTags); }
 
 async function renderNewWorker() {
   const body = document.getElementById('nw-body');
   if (!canWrite()) { body.innerHTML = '<div class="panel"><p class="muted" style="padding:16px">Your account is read-only.</p></div>'; return; }
   body.innerHTML = '<div class="panel"><p class="muted" style="padding:16px">Loading…</p></div>';
-  const [qs, flows] = await Promise.all([api('/queues').catch(() => []), api('/flows').catch(() => [])]);
+  const [qs, flows, git] = await Promise.all([
+    api('/queues').catch(() => []), api('/flows').catch(() => []), api('/settings/git').catch(() => ({})),
+  ]);
   window.__nwPools = (qs || []).filter(q => (q.pool_type || 'pull') === 'pull').map(q => q.name);
   window.__wkTags = [...new Set((flows || []).flatMap(f => f.tags || []))];
+  window.__git = git || {};
   const n = document.querySelectorAll('#workers tr').length + 1;
   const nm = 'primex-worker-' + n;
+  const gRepo = esc(git.repo_url || '');
+  const gBranch = esc(git.branch || 'main');
+  const gBase = (git.base_path || 'workers').replace(/\/+$/, '');
+  const gAuto = git.auto_sync ? ' checked' : '';
   body.innerHTML = `
     <div class="panel">
       <h2>Worker</h2>
@@ -1283,23 +1374,24 @@ async function renderNewWorker() {
       <form class="inline" id="wk-delivery" onsubmit="return false" oninput="wkGen()">
         <label>Method
           <select name="method" onchange="nwDeliveryToggle(); wkGen()">
-            <option value="script">Script — Docker / systemd / kubectl</option>
+            <option value="git">Git commit + PR/MR (GitHub / GitLab)</option>
             <option value="argocd">Argo CD Application (GitOps)</option>
             <option value="flux">Flux Kustomization (GitOps)</option>
-            <option value="git">Git commit + PR/MR (GitHub / GitLab)</option>
+            <option value="script">Script — Docker / systemd / kubectl</option>
           </select>
         </label>
-        <label id="nw-runtime">Runtime target
+        <label id="nw-runtime" style="display:none">Runtime target
           <select name="target" onchange="wkGen()">
             <option value="docker">Docker</option>
             <option value="systemd">systemd (bare host)</option>
             <option value="k8s">Kubernetes</option>
           </select>
         </label>
-        <div class="full nw-git" style="display:none;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
-          <label>Git repo URL<input name="repo" placeholder="https://github.com/acme/gitops.git"></label>
-          <label>Path in repo<input name="path" value="workers/${nm}"></label>
-          <label>Base branch<input name="branch" value="main"></label>
+        <label class="wk-chk full"><input type="checkbox" name="autosync"${gAuto} onchange="wkGen()">Auto-sync — the GitOps controller continuously reconciles this worker (off = one-shot / manual sync)</label>
+        <div class="full nw-git" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
+          <label>Git repo URL<input name="repo" value="${gRepo}" placeholder="https://github.com/acme/gitops.git"></label>
+          <label>Path in repo<input name="path" value="${esc(gBase)}/${nm}"></label>
+          <label>Base branch<input name="branch" value="${gBranch}"></label>
           <label>Feature branch<input name="head" value="add-worker-${nm}"></label>
         </div>
         <div class="full nw-argo" style="display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px">
@@ -1414,6 +1506,7 @@ function wkGen() {
   const pools = [...f.querySelectorAll('input[name=pool]:checked')].map(b => b.value);
   const queues = pools.length ? pools.join(',') : 'default';
   const method = d.elements.method.value;
+  const autosync = d.elements.autosync.checked;
   const env = wkEnv(name, conc, queues);
   const envLines = env.map(([k, v]) => k + '=' + v).join('\n');
   const { secret, dep, kust } = wkK8s(name, image, env);
@@ -1457,19 +1550,23 @@ function wkGen() {
       const ns = (d.elements.namespace.value || 'primeflow').trim();
       const server = (d.elements.server.value || 'https://kubernetes.default.svc').trim();
       const rev = (d.elements.revision.value || 'HEAD').trim();
+      const syncPolicy = autosync
+        ? '  syncPolicy:\n    automated: { prune: true, selfHeal: true }\n    syncOptions: [CreateNamespace=true]\n'
+        : '  syncPolicy:\n    syncOptions: [CreateNamespace=true]   # auto-sync OFF: sync manually\n';
       out += '# ---- Argo CD Application (commit to your app-of-apps, or: kubectl apply -n argocd -f -) ----\n' +
         'apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: ' + name + '\n  namespace: argocd\n' +
         'spec:\n  project: ' + project + '\n  source:\n    repoURL: ' + repo + '\n    path: ' + path + '\n' +
         '    targetRevision: ' + rev + '\n  destination:\n    server: ' + server + '\n    namespace: ' + ns + '\n' +
-        '  syncPolicy:\n    automated: { prune: true, selfHeal: true }\n    syncOptions: [CreateNamespace=true]\n\n' +
+        syncPolicy + '\n' +
         '# or imperatively:\n' +
         'argocd app create ' + name + ' --repo ' + repo + ' --path ' + path + ' --revision ' + rev +
         ' --dest-server ' + server + ' --dest-namespace ' + ns + ' --project ' + project +
-        ' --sync-policy automated --sync-option CreateNamespace=true\n\n';
+        (autosync ? ' --sync-policy automated' : '') + ' --sync-option CreateNamespace=true\n\n';
     } else if (method === 'flux') {
       out += '# ---- Flux Kustomization (in your fleet repo) ----\n' +
         'apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: ' + name + '\n' +
         '  namespace: flux-system\nspec:\n  interval: 5m\n  path: ./' + path + '\n  prune: true\n' +
+        (autosync ? '' : '  suspend: true   # auto-sync OFF: run `flux resume` / `flux reconcile` to apply\n') +
         '  sourceRef: { kind: GitRepository, name: gitops }\n  targetNamespace: primeflow\n\n';
     }
 
@@ -1483,6 +1580,11 @@ function wkGen() {
     if (host === 'github') out += 'gh pr create --base ' + base + ' --head ' + head + ' --fill\n';
     else if (host === 'gitlab') out += 'glab mr create --source-branch ' + head + ' --target-branch ' + base + ' --fill\n';
     else out += '# open a merge / pull request: ' + head + ' -> ' + base + '\n';
+
+    out += '\n# ---- sync ' + (autosync ? '(auto-sync is ON — the controller reconciles on merge) ----\n' : '(auto-sync is OFF — trigger it) ----\n');
+    if (method === 'argocd') out += 'argocd app sync ' + name + (autosync ? '   # optional: force an immediate reconcile\n' : '\n');
+    else if (method === 'flux') out += 'flux reconcile kustomization ' + name + ' --with-source\n';
+    else out += 'argocd app sync ' + name + '   # or: flux reconcile kustomization ' + name + '   # or your CD tool\'s sync trigger\n';
   }
 
   out += '\n# The worker registers on start and appears on the Workers page as "' + name + '".';
@@ -1645,9 +1747,48 @@ function showSettings(s) {
   settingsTab = s;
   document.querySelectorAll('#settings-subnav button').forEach(b => b.classList.toggle('active', b.dataset.s === s));
   document.getElementById('settings-external').hidden = s !== 'external';
+  document.getElementById('settings-git').hidden = s !== 'git';
   document.getElementById('settings-users').hidden = s !== 'users';
   if (s === 'external') { loadExternalSettings(); loadRoles().then(() => { loadKeys(); renderExplorer(); }); }
+  else if (s === 'git') loadGitConnection();
   else loadUsers();
+}
+
+async function loadGitConnection() {
+  try {
+    const g = await api('/settings/git');
+    const el = document.getElementById('git-form').elements;
+    el.repo_url.value = g.repo_url || '';
+    el.branch.value = g.branch || 'main';
+    el.base_path.value = g.base_path || '';
+    el.provider.value = g.provider || '';
+    el.author_name.value = g.author_name || '';
+    el.author_email.value = g.author_email || '';
+    el.auto_sync.checked = !!g.auto_sync;
+    el.token.value = '';
+    el.token.placeholder = g.has_token ? 'a token is stored — blank keeps it' : 'personal access token';
+    document.getElementById('git-status').textContent = g.updated_at ? 'saved ' + when(g.updated_at) : '';
+    window.__git = g;
+  } catch (e) { toast(e.message, true); }
+}
+
+async function saveGitConnection(ev) {
+  ev.preventDefault();
+  const el = ev.target.elements;
+  const body = {
+    repo_url: el.repo_url.value.trim(),
+    branch: el.branch.value.trim() || 'main',
+    base_path: el.base_path.value.trim(),
+    author_name: el.author_name.value.trim(),
+    author_email: el.author_email.value.trim(),
+    auto_sync: el.auto_sync.checked,
+  };
+  if (el.token.value.trim() !== '') body.token = el.token.value.trim();
+  try {
+    await api('/settings/git', { method: 'PUT', body: JSON.stringify(body) });
+    toast('Git connection saved');
+    loadGitConnection();
+  } catch (e) { toast(e.message, true); }
 }
 function showExtTab(t) {
   extTab = t;

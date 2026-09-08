@@ -203,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/settings/external-api", s.putExternalAPISettings)
 	mux.HandleFunc("GET /api/v1/settings/log-retention", s.getLogRetention)
 	mux.HandleFunc("PUT /api/v1/settings/log-retention", s.putLogRetention)
+	mux.HandleFunc("GET /api/v1/settings/git", s.getGitConnection)
+	mux.HandleFunc("PUT /api/v1/settings/git", s.putGitConnection)
 	mux.HandleFunc("GET /api/v1/api-roles", s.apiRoles)
 	mux.HandleFunc("GET /api/v1/api-keys", s.listAPIKeys)
 	mux.HandleFunc("POST /api/v1/api-keys", s.createAPIKey)

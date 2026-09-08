@@ -87,3 +87,20 @@ type LogRetention struct {
 	Enabled     bool `json:"enabled"`
 	MaxAgeHours int  `json:"max_age_hours"`
 }
+
+// GitConnection is the pf_settings row keyed "git_connection". It is the target
+// repository the GitOps worker-delivery flow renders manifests into. Token is
+// write-only: it is stored but never returned to a client (HasToken signals
+// whether one is set).
+type GitConnection struct {
+	RepoURL     string `json:"repo_url"`
+	Branch      string `json:"branch"`
+	BasePath    string `json:"base_path"`
+	Provider    string `json:"provider"` // github | gitlab | other (auto-detected on save)
+	AutoSync    bool   `json:"auto_sync"`
+	AuthorName  string `json:"author_name"`
+	AuthorEmail string `json:"author_email"`
+	Token       string `json:"token,omitempty"` // inbound only; cleared before any read
+	HasToken    bool   `json:"has_token"`       // outbound only
+	UpdatedAt   string `json:"updated_at,omitempty"`
+}

@@ -49,9 +49,114 @@ func (s *Server) externalMux() http.Handler {
 	get("/deployments/{id}", apiauth.ScopeReadDeployments, s.extGetDeployment)
 	post("/deployments/{id}/run", apiauth.ScopeWriteRuns, s.extRunDeployment)
 	get("/queues", apiauth.ScopeReadQueues, s.extListQueues)
+	post("/queues", apiauth.ScopeWriteQueues, s.extUpsertQueue)
 	get("/queues/{name}/pending", apiauth.ScopeReadQueues, s.extQueuePending)
+	get("/workers", apiauth.ScopeReadWorkers, s.extListWorkers)
 	get("/events", apiauth.ScopeReadEvents, s.extListEvents)
 	return m
+}
+
+// extListWorkers projects the live worker heartbeat table for the External API.
+// Workers self-register; this collection is read-only.
+func (s *Server) extListWorkers(w http.ResponseWriter, r *http.Request) {
+	ws, err := s.store.ListWorkers(r.Context())
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	now := time.Now().UTC()
+	type row struct {
+		core.WorkerInfo
+		Online bool `json:"online"`
+	}
+	out := make([]row, 0, len(ws))
+	for _, wk := range ws {
+		out = append(out, row{WorkerInfo: wk, Online: now.Sub(wk.LastHeartbeat) < 45*time.Second})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// extUpsertQueue creates or updates a work pool over the External API. It is the
+// write half of pool management for GitOps / IaC callers; the same validation
+// the operator console applies is enforced here.
+func (s *Server) extUpsertQueue(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Name                 string  `json:"name"`
+		Description           string  `json:"description"`
+		ConcurrencyLimit     *int    `json:"concurrency_limit"`
+		Paused               *bool   `json:"paused"`
+		MinWorkers           *int    `json:"min_workers"`
+		MaxWorkers           *int    `json:"max_workers"`
+		TargetReadyPerWorker *int    `json:"target_ready_per_worker"`
+		Owner                *string `json:"owner"`
+		PoolType             *string `json:"pool_type"`
+		PushEndpoint         *string `json:"push_endpoint"`
+		PushSecret           *string `json:"push_secret"`
+	}
+	if err := decode(r, &b); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(b.Name) == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("name is required"))
+		return
+	}
+	q, err := s.store.GetWorkQueue(r.Context(), b.Name)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			fail(w, err)
+			return
+		}
+		q = &core.WorkQueue{Name: b.Name, TargetReadyPerWorker: 5, PoolType: "pull"}
+	}
+	if b.Description != "" {
+		q.Description = b.Description
+	}
+	if b.ConcurrencyLimit != nil {
+		q.ConcurrencyLimit = b.ConcurrencyLimit
+	}
+	if b.Paused != nil {
+		q.Paused = *b.Paused
+	}
+	if b.MinWorkers != nil {
+		q.MinWorkers = *b.MinWorkers
+	}
+	if b.MaxWorkers != nil {
+		q.MaxWorkers = b.MaxWorkers
+	}
+	if b.TargetReadyPerWorker != nil {
+		q.TargetReadyPerWorker = *b.TargetReadyPerWorker
+	}
+	if b.Owner != nil {
+		q.Owner = *b.Owner
+	}
+	if b.PoolType != nil {
+		if *b.PoolType != "pull" && *b.PoolType != "push" {
+			writeErr(w, http.StatusBadRequest, errors.New(`pool_type must be "pull" or "push"`))
+			return
+		}
+		q.PoolType = *b.PoolType
+	}
+	if b.PushEndpoint != nil {
+		q.PushEndpoint = strings.TrimSpace(*b.PushEndpoint)
+	}
+	if b.PushSecret != nil {
+		q.PushSecret = *b.PushSecret
+	}
+	if q.MinWorkers < 0 || (q.MaxWorkers != nil && *q.MaxWorkers < q.MinWorkers) {
+		writeErr(w, http.StatusBadRequest, errors.New("min_workers must be >= 0 and <= max_workers"))
+		return
+	}
+	if q.PoolType == "push" && q.PushEndpoint == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("a push pool needs a push_endpoint"))
+		return
+	}
+	if err := s.store.UpsertWorkQueue(r.Context(), q); err != nil {
+		fail(w, err)
+		return
+	}
+	q.PushSecret = ""
+	writeJSON(w, http.StatusOK, q)
 }
 
 // ext wraps an External API handler with the whole enforcement chain:
