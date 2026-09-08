@@ -980,6 +980,12 @@ function refreshCurrent(force) {
      deployment: loadDeployment,
      automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
+     // The Add-worker wizard is unsaved form state, not a view of the server:
+     // a background tick has nothing to catch it up on, and rebuilding the pool
+     // checkboxes under the pointer would re-tick "default" after the user had
+     // cleared it. The one thing that can change while the wizard is open -- a
+     // pool created from its own dialog -- calls nwReloadPools() right then.
+     newworker: () => {},
      events: loadEvents,
      settings: () => settingsTab === 'external' ? loadKeys() : settingsTab === 'git' ? loadGitConnection() : loadUsers() })[current]();
 }
@@ -1897,7 +1903,8 @@ async function openWorkerDetail(id) {
   const tags = [...new Set((flows || []).flatMap(f => f.tags || []))];
   const comps = wkComponentsFor(tags);
   const queues = (w.queues || []).join(',') || 'default';
-  const env = wkEnv(w.name, w.concurrency, queues);
+  const spec = (specs || []).find(s => s.name === w.name);
+  const env = wkEnv(w.name, w.concurrency, queues, wkConnOf(spec));
   const km = wkK8s(w.name, 'primex/primeflow:latest', env);
   const path = ((git && git.base_path) ? git.base_path + '/' : '') + w.name;
   body.innerHTML = `
@@ -1924,7 +1931,7 @@ async function openWorkerDetail(id) {
       <h2>Package list <span class="muted">— components this worker's host needs</span></h2>
       <ul style="margin:0;padding:12px 32px;color:var(--ink);line-height:1.6">${comps.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
     </div>
-    ${gitDeliveryPanel(w, git, (specs || []).find(s => s.name === w.name))}`;
+    ${gitDeliveryPanel(w, git, spec)}`;
 }
 
 // gitDeliveryPanel renders the GitOps status for a worker: live Sync now /
@@ -2284,9 +2291,43 @@ async function saveWorkerSpec(alsoSync) {
   show('workers');
 }
 
-function wkEnv(name, conc, queues) {
+// wkConnEnv is the pair of variables a worker needs to reach the orchestrator,
+// and the single place that decides them. Database mode is the classic shape
+// beside Postgres (DSN + notification bus); API mode is a remote site holding a
+// pool-scoped key and no database credential (README -> Workers at a remote
+// site). primex-worker gates on exactly these names: PRIMEFLOW_DATABASE_URL, or
+// PRIMEFLOW_API_URL together with PRIMEFLOW_WORKER_TOKEN. Values the console
+// cannot know stay placeholders, matching what the server commits to git
+// (internal/gitsync/render.go) -- a real credential is never invented here.
+function wkConnEnv(conn) {
+  const c = conn || {};
+  if (c.mode === 'api') {
+    return [
+      ['PRIMEFLOW_API_URL', c.apiURL || location.origin],
+      ['PRIMEFLOW_WORKER_TOKEN', c.token || 'REPLACE_ME'],
+    ];
+  }
   return [
-    ...reach,
+    ['PRIMEFLOW_DATABASE_URL', c.dbURL || 'postgres://primeflow:REPLACE_ME@POSTGRES_HOST:5432/primeflow?sslmode=disable'],
+    ['PRIMEFLOW_NATS_URL', c.busURL || 'nats://NATS_HOST:4222'],
+  ];
+}
+
+// wkConnOf infers how an already-registered worker reaches the orchestrator.
+// A heartbeat (core.WorkerInfo) carries no connection mode, so the env of the
+// worker spec backing it is the only evidence there is; with no spec, assume
+// the database shape and let wkConnEnv render placeholders.
+function wkConnOf(spec) {
+  const e = (spec && spec.env) || {};
+  if (e.PRIMEFLOW_API_URL || e.PRIMEFLOW_WORKER_TOKEN) {
+    return { mode: 'api', apiURL: e.PRIMEFLOW_API_URL || '', token: e.PRIMEFLOW_WORKER_TOKEN || '' };
+  }
+  return { mode: 'database', dbURL: e.PRIMEFLOW_DATABASE_URL || '', busURL: e.PRIMEFLOW_NATS_URL || '' };
+}
+
+function wkEnv(name, conc, queues, conn) {
+  return [
+    ...wkConnEnv(conn),
     ['PRIMEFLOW_QUEUES', queues],
     ['PRIMEFLOW_CONCURRENCY', String(conc)],
     ['PRIMEFLOW_WORKER_NAME', name],
