@@ -359,8 +359,13 @@ func main() {
 		sdk.Timeout(time.Minute),
 	)
 
-	if os.Getenv("PRIMEFLOW_DATABASE_URL") == "" && os.Getenv("DATABASE_URL") == "" {
-		log.Fatal("set PRIMEFLOW_DATABASE_URL, e.g. postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable")
+	// Two ways to reach the orchestrator: a database connection, or — for a
+	// worker at a site that has no route to the database — the worker API.
+	hasDB := os.Getenv("PRIMEFLOW_DATABASE_URL") != "" || os.Getenv("DATABASE_URL") != ""
+	hasAPI := os.Getenv("PRIMEFLOW_API_URL") != "" && os.Getenv("PRIMEFLOW_WORKER_TOKEN") != ""
+	if !hasDB && !hasAPI {
+		log.Fatal("set PRIMEFLOW_DATABASE_URL (e.g. postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable), " +
+			"or PRIMEFLOW_API_URL and PRIMEFLOW_WORKER_TOKEN to run against the API")
 	}
 
 	// -push (or PRIMEFLOW_PUSH=1) runs this binary as a push-pool receiver: it

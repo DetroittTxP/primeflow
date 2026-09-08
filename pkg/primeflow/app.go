@@ -43,6 +43,7 @@ import (
 	"github.com/primex/primeflow/internal/server"
 	"github.com/primex/primeflow/internal/store"
 	"github.com/primex/primeflow/internal/store/postgres"
+	"github.com/primex/primeflow/internal/store/remote"
 	"github.com/primex/primeflow/internal/worker"
 	"github.com/primex/primeflow/pkg/sdk"
 )
@@ -59,6 +60,14 @@ type Options struct {
 	// RedisURL when both are set. Same "accelerator, never a dependency"
 	// contract: a dial failure degrades to polling, it does not stop start-up.
 	NatsURL string
+
+	// APIURL and WorkerToken put a worker in remote mode: it reaches the
+	// orchestrator through the worker API instead of a database connection,
+	// which is what a site allowed nothing but outbound 443 needs. Set both, and
+	// DatabaseURL is neither required nor used. The token is a pool-scoped
+	// api-worker key.
+	APIURL      string
+	WorkerToken string
 
 	// Server options.
 	HTTPAddr   string
@@ -134,6 +143,8 @@ func (o *Options) applyEnv() {
 	o.DatabaseURL = firstNonEmpty(o.DatabaseURL, os.Getenv("PRIMEFLOW_DATABASE_URL"), os.Getenv("DATABASE_URL"))
 	o.RedisURL = firstNonEmpty(o.RedisURL, os.Getenv("PRIMEFLOW_REDIS_URL"), os.Getenv("REDIS_URL"))
 	o.NatsURL = firstNonEmpty(o.NatsURL, os.Getenv("PRIMEFLOW_NATS_URL"), os.Getenv("NATS_URL"))
+	o.APIURL = firstNonEmpty(o.APIURL, os.Getenv("PRIMEFLOW_API_URL"))
+	o.WorkerToken = firstNonEmpty(o.WorkerToken, os.Getenv("PRIMEFLOW_WORKER_TOKEN"))
 	o.HTTPAddr = firstNonEmpty(o.HTTPAddr, os.Getenv("PRIMEFLOW_HTTP_ADDR"), ":8080")
 	o.APIToken = firstNonEmpty(o.APIToken, os.Getenv("PRIMEFLOW_API_TOKEN"))
 	o.CORSOrigin = firstNonEmpty(o.CORSOrigin, os.Getenv("PRIMEFLOW_CORS_ORIGIN"))
@@ -230,11 +241,16 @@ func firstNonEmpty(vs ...string) string {
 // App holds initialised infrastructure so the run modes can share it.
 type App struct {
 	Options Options
-	Store   store.Store
-	Bus     bus.Bus
-	Events  *events.Emitter
-	Metrics *metrics.Metrics
-	Log     *slog.Logger
+	// Store is the full persistence surface, and is nil in remote mode: a
+	// worker reaching the API has no database and nothing that needs one.
+	Store store.Store
+	// WorkerStore is what the engine and the worker run against — either the
+	// Postgres store or the API client. Always set.
+	WorkerStore store.WorkerStore
+	Bus         bus.Bus
+	Events      *events.Emitter
+	Metrics     *metrics.Metrics
+	Log         *slog.Logger
 
 	loginThrottle ratelimit.Throttle
 	keyLimiter    ratelimit.Limiter
@@ -245,11 +261,63 @@ type App struct {
 	otelShutdown otelinit.ShutdownFunc
 }
 
+// Remote reports whether this process should reach the orchestrator through its
+// API instead of a database connection.
+func (o Options) Remote() bool { return o.APIURL != "" && o.WorkerToken != "" }
+
+// openRemote builds a worker that holds no database credential.
+//
+// Everything the local path sets up around the store is deliberately absent.
+// There is no emitter: the server records transitions on the worker's behalf,
+// which is what keeps a site from being able to write the event log automations
+// act on. There is no admin bootstrap, no migration, no leader election — a
+// worker owns none of that. The bus is whatever the environment offers, which
+// at a site reachable only over 443 means the in-process one, so dispatch falls
+// back to polling until the wake-up channel lands.
+func openRemote(ctx context.Context, o Options) (*App, error) {
+	if o.DatabaseURL != "" {
+		o.Logger.Warn("PRIMEFLOW_DATABASE_URL is set but ignored: this worker runs against the API",
+			"api", o.APIURL)
+	}
+	name := o.WorkerName
+	if name == "" {
+		name, _ = os.Hostname()
+	}
+	rs, err := remote.New(remote.Config{
+		BaseURL:  o.APIURL,
+		Token:    o.WorkerToken,
+		WorkerID: name + "-" + uuid.NewString()[:8],
+		Timeout:  o.LeaseDuration,
+		Logger:   o.Logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	o.Logger.Info("worker store: primeflow api", "url", o.APIURL, "queues", o.Queues)
+
+	shutdown, err := otelinit.Setup(ctx, "primeflow-worker", version())
+	if err != nil {
+		shutdown = func(context.Context) error { return nil }
+	}
+	return &App{
+		Options:      o,
+		WorkerStore:  rs,
+		Bus:          bus.NewInMemory(),
+		Metrics:      metrics.New(nil),
+		Log:          o.Logger,
+		holder:       name + "-" + uuid.NewString()[:8],
+		otelShutdown: shutdown,
+	}, nil
+}
+
 // Open connects to Postgres and (if configured) Redis.
 func Open(ctx context.Context, o Options) (*App, error) {
 	o.applyEnv()
+	if o.Remote() {
+		return openRemote(ctx, o)
+	}
 	if o.DatabaseURL == "" {
-		return nil, errors.New("primeflow: DatabaseURL (PRIMEFLOW_DATABASE_URL) is required")
+		return nil, errors.New("primeflow: set PRIMEFLOW_DATABASE_URL, or PRIMEFLOW_API_URL and PRIMEFLOW_WORKER_TOKEN to run against the API")
 	}
 	st, err := postgres.Open(ctx, o.DatabaseURL, 0)
 	if err != nil {
@@ -409,11 +477,20 @@ func (a *App) Close() error {
 	if a.Bus != nil {
 		_ = a.Bus.Close()
 	}
+	if a.Store == nil {
+		if c, ok := a.WorkerStore.(interface{ Close() error }); ok {
+			return c.Close()
+		}
+		return nil
+	}
 	return a.Store.Close()
 }
 
 // Migrate applies the schema.
 func (a *App) Migrate(ctx context.Context) error {
+	if a.Store == nil {
+		return errors.New("primeflow: migrations require a database; remote mode runs workers only")
+	}
 	pg, ok := a.Store.(*postgres.Store)
 	if !ok {
 		return errors.New("primeflow: migrations require the postgres store")
@@ -423,6 +500,9 @@ func (a *App) Migrate(ctx context.Context) error {
 
 // ServeAPI runs the API, UI, scheduler and automation evaluator.
 func (a *App) ServeAPI(ctx context.Context) error {
+	if a.Store == nil {
+		return errors.New("primeflow: the API server needs a database; remote mode runs workers only")
+	}
 	cookieSecure := false
 	if a.Options.CookieSecure != nil {
 		cookieSecure = *a.Options.CookieSecure
@@ -447,6 +527,9 @@ func (a *App) ServeAPI(ctx context.Context) error {
 		OIDCLabel:         a.Options.OIDCLabel,
 		ResetTTL:          a.Options.ResetTTL,
 	})
+	if a.Store == nil {
+		return errors.New("primeflow: the scheduler needs a database; remote mode runs workers only")
+	}
 	sch := scheduler.New(a.Store, a.Events, a.Log, scheduler.Config{Holder: a.holder})
 	autos := automations.New(a.Store, a.Events, a.Log, automations.Config{Holder: a.holder})
 
@@ -459,7 +542,7 @@ func (a *App) ServeAPI(ctx context.Context) error {
 
 // ServeWorker runs a worker for the registered flows.
 func (a *App) ServeWorker(ctx context.Context) error {
-	w := worker.New(a.Store, a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
+	w := worker.New(a.WorkerStore, a.Bus, a.Options.Registry, a.Events, a.Log, worker.Config{
 		Name:            a.Options.WorkerName,
 		Queues:          a.Options.Queues,
 		Concurrency:     a.Options.Concurrency,
@@ -507,7 +590,7 @@ func (a *App) claimForPush(ctx context.Context, runID string) (*core.FlowRun, er
 	// SCHEDULED -> PENDING under our lease. The engine emits flow-run.RUNNING
 	// when it starts, exactly as for a leased run, so we deliberately do not
 	// emit a state-change event here.
-	claimed, err := a.Store.ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
+	claimed, err := a.WorkerStore.ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
 	if err != nil {
 		return nil, err // ErrConflict => already claimed by another receiver
 	}
@@ -530,13 +613,13 @@ func (a *App) executePushRun(ctx context.Context, run *core.FlowRun) {
 			case <-done:
 				return
 			case <-t.C:
-				_ = a.Store.RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
+				_ = a.WorkerStore.RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
 			}
 		}
 	}()
 	defer close(done)
 
-	eng := engine.New(a.Store, a.Options.Registry, a.Events, a.Log, engine.Config{
+	eng := engine.New(a.WorkerStore, a.Options.Registry, a.Events, a.Log, engine.Config{
 		WorkerID: *run.WorkerID, Metrics: a.Metrics, MaxSubflowDepth: a.Options.MaxSubflowDepth,
 	})
 	eng.Execute(ctx, run)

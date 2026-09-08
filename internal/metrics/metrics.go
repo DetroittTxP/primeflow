@@ -169,6 +169,13 @@ func (c *queueCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *queueCollector) Collect(ch chan<- prometheus.Metric) {
+	// A worker that reaches the orchestrator over its API has no store to read
+	// these from — and no business reporting them either: queue depth and fleet
+	// liveness are the server's to publish, from the one place that sees every
+	// lane. Its own flow and task timings still come through.
+	if c.store == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

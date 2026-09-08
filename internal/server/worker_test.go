@@ -4,21 +4,26 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/primex/primeflow/internal/apiauth"
 	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
+	"github.com/primex/primeflow/internal/engine"
 	"github.com/primex/primeflow/internal/events"
 	"github.com/primex/primeflow/internal/server"
 	"github.com/primex/primeflow/internal/store"
 	"github.com/primex/primeflow/internal/store/postgres"
+	"github.com/primex/primeflow/internal/store/remote"
+	"github.com/primex/primeflow/pkg/sdk"
 )
 
 const (
@@ -508,4 +513,180 @@ func TestDeactivatedWorkerKeyIsRefused(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("deactivated key still worked: %d %s", rec.Code, rec.Body.String())
 	}
+}
+
+// --- phase 3: the engine running against the HTTP store ---
+
+// The strongest thing the two halves can be asked to prove together: run the
+// real engine, over the real HTTP client, against the real handlers, and check
+// that a durable resume still skips work that already succeeded. If the client
+// and the server disagreed about any wire shape — a duration, a checkpoint key,
+// a state option — this is where it would show.
+func TestEngineRunsThroughTheRemoteStore(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	if err := a.store.EnsureWorkQueue(ctx, "site"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := a.issueWorkerKey("engine-site", []string{"site"})
+
+	srv := httptest.NewServer(a.h)
+	t.Cleanup(srv.Close)
+
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: secret, WorkerID: "remote-engine",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The flow fails once after its first task succeeds, so the retry has to
+	// replay that task from its checkpoint rather than run it again.
+	var built, attempts atomic.Int32
+	reg := sdk.NewRegistry()
+	reg.Register("resume-me", func(c *sdk.Context) (any, error) {
+		if _, err := sdk.Task(c, "expensive", func(c *sdk.Context) (string, error) {
+			built.Add(1)
+			c.Info("did the expensive thing")
+			return "vm-1", nil
+		}); err != nil {
+			return nil, err
+		}
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("transient")
+		}
+		_ = c.Markdown("done", "second attempt succeeded")
+		return map[string]any{"ok": true}, nil
+	})
+
+	eng := engine.New(rs, reg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		engine.Config{
+			WorkerID:           "remote-engine",
+			CancelPollInterval: 50 * time.Millisecond,
+			SuspendThreshold:   time.Second,
+			LogFlushInterval:   20 * time.Millisecond,
+		})
+
+	run, err := a.store.CreateFlowRun(ctx, store.CreateRunInput{
+		FlowName: "resume-me", WorkQueue: "site", Priority: 50,
+		ScheduledAt: time.Now().UTC().Add(-time.Minute),
+		Retries:     1, RetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two attempts, both leased and executed entirely through HTTP.
+	for i := 0; i < 2; i++ {
+		var leased []core.FlowRun
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			leased, err = rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+				Queues: []string{"site"}, Max: 1, LeaseFor: time.Minute,
+			})
+			if err != nil {
+				t.Fatalf("attempt %d lease: %v", i+1, err)
+			}
+			if len(leased) == 1 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(20 * time.Millisecond) // waiting out the retry delay
+		}
+		if len(leased) != 1 {
+			t.Fatalf("attempt %d: nothing leased", i+1)
+		}
+		eng.Execute(ctx, &leased[0])
+	}
+
+	got, err := a.store.GetFlowRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StateCompleted {
+		t.Fatalf("state = %s (%s), want COMPLETED", got.State, got.StateMessage)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("flow body ran %d times, want 2", attempts.Load())
+	}
+	// The guarantee the whole durability model rests on, now over HTTP.
+	if built.Load() != 1 {
+		t.Fatalf("the expensive task ran %d times; the checkpoint did not survive the retry", built.Load())
+	}
+
+	tasks, err := a.store.ListTaskRuns(ctx, run.ID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("checkpoints: %v (%d)", err, len(tasks))
+	}
+	arts, err := a.store.ListArtifacts(ctx, run.ID)
+	if err != nil || len(arts) != 1 {
+		t.Fatalf("artifacts: %v (%d)", err, len(arts))
+	}
+	logs, err := a.store.ListLogs(ctx, run.ID, 0, 10)
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("logs: %v (%d)", err, len(logs))
+	}
+}
+
+// A refusal is an answer. Retrying a 4xx would turn a clear rejection into a
+// slow one, and — for a lease refused on pool grounds — would hammer the server
+// on every poll.
+func TestRemoteStoreDoesNotRetryARefusal(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeTestErr(w, http.StatusForbidden, "out of scope")
+	}))
+	defer srv.Close()
+
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: "pmx_x", WorkerID: "w",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.LeaseFlowRuns(context.Background(), store.LeaseRequest{
+		Queues: []string{"nope"}, Max: 1, LeaseFor: time.Minute,
+	}); err == nil {
+		t.Fatal("expected the refusal to surface as an error")
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("a 4xx was retried %d times; it should be asked once", n)
+	}
+}
+
+// A 5xx is worth another try: the server may simply have been restarting.
+func TestRemoteStoreRetriesAServerError(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) < 3 {
+			writeTestErr(w, http.StatusServiceUnavailable, "restarting")
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: "pmx_x", WorkerID: "w",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rs.LeaseFlowRuns(context.Background(), store.LeaseRequest{
+		Queues: []string{"q"}, Max: 1, LeaseFor: time.Minute,
+	}); err != nil {
+		t.Fatalf("the retry did not recover: %v", err)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("expected three attempts, got %d", n)
+	}
+}
+
+func writeTestErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write([]byte(`{"error":"` + msg + `"}`))
 }
