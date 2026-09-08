@@ -28,6 +28,9 @@ func TestRunDeploymentAndWaitClosesLaneOnCompletion(t *testing.T) {
 	if got := rt.cps[auditKey].Status; got != sdk.CheckpointRunning {
 		t.Fatalf("lane status while waiting = %q, want RUNNING", got)
 	}
+	if rt.cps[auditKey].Started == nil {
+		t.Fatal("the trigger left the lane without a start time")
+	}
 
 	rt.runStates["child-1"] = sdk.RunState{Status: "COMPLETED", Result: json.RawMessage(`{"ok":true}`)}
 	got, err := replayCtx(rt).RunDeploymentAndWait("site-audit-site-a", nil)
@@ -47,6 +50,16 @@ func TestRunDeploymentAndWaitClosesLaneOnCompletion(t *testing.T) {
 	var childID string
 	if err := json.Unmarshal(cp.Result, &childID); err != nil || childID != "child-1" {
 		t.Fatalf("settled checkpoint result = %s, want the child run id", cp.Result)
+	}
+	// Settling carries no Started of its own: the store keeps the one the
+	// trigger stamped, and the engine times a task's span from the Started on
+	// the terminal checkpoint, so a fresh one here would report ~0s for a wait
+	// that took minutes.
+	if cp.Started != nil {
+		t.Fatalf("settling stamped a second start time: %v", cp.Started)
+	}
+	if cp.Ended == nil {
+		t.Fatal("settled lane has no end time")
 	}
 	if len(rt.triggers) != 1 {
 		t.Fatalf("triggered %d times across the replay, want exactly 1", len(rt.triggers))

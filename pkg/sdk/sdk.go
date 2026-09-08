@@ -411,6 +411,9 @@ func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerO
 		for _, f := range opts {
 			f(&o)
 		}
+		// The lane starts when the parent asks for the child, not when the
+		// trigger returns: the wait it draws covers the request too.
+		started := time.Now().UTC()
 		id, tErr := c.rt.TriggerDeployment(c.ctx, name, raw, o)
 		if tErr != nil {
 			return ChildResult{}, tErr
@@ -419,6 +422,7 @@ func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerO
 		idRaw, _ := json.Marshal(childID)
 		if sErr := c.rt.SaveCheckpoint(c.ctx, Checkpoint{
 			Key: key, Name: "subflow:" + name, Status: CheckpointRunning, Result: idRaw,
+			Started: &started,
 		}); sErr != nil {
 			return ChildResult{}, sErr
 		}
@@ -454,11 +458,12 @@ func (c *Context) RunDeploymentAndWait(name string, params any, opts ...TriggerO
 // It records a display fact, not a memo of the child's result: Result stays the
 // child run id so replay still recovers it, and the caller re-reads the child's
 // state on every replay rather than trusting this status. Started is left unset
-// on purpose — the engine emits a task span and metric only for a terminal
-// checkpoint carrying one, and the trigger's start time does not survive the
-// parent's suspension, so there is no honest duration to report. A save that
-// fails costs only the displayed status, which is not worth failing an
-// otherwise finished wait over.
+// here: the trigger already stamped it and the store keeps that first value, but
+// the SDK cannot read it back — LoadCheckpoint does not return it — and the
+// engine times a task's span and metric off the Started on its terminal
+// checkpoint, so inventing a fresh one would report a duration of nearly zero
+// for a wait that took minutes. A save that fails costs only the displayed
+// status, which is not worth failing an otherwise finished wait over.
 func (c *Context) settleSubflow(key, name, childID string, status CheckpointStatus, msg string) {
 	idRaw, err := json.Marshal(childID)
 	if err != nil {
