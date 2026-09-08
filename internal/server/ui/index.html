@@ -267,6 +267,15 @@
     background: var(--accent-soft); border: 1px solid var(--line); border-radius: 8px;
   }
   .secretbox code { flex: 1; word-break: break-all; }
+
+  /* deployment detail: the work on the left, the facts about it on the right */
+  .detail { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 16px; align-items: start; }
+  @media (max-width: 1080px) { .detail { grid-template-columns: minmax(0, 1fr); } }
+  #dep-side .kv { grid-template-columns: 92px 1fr; gap: 7px 10px; padding: 12px 14px; }
+  #dep-side .kv dd { word-break: break-word; }
+  .subnav.flat { padding: 2px 0 10px; }
+  .bars { padding: 10px 14px 6px; }
+  .bars rect { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -406,6 +415,20 @@
         <label class="full">Parameters (JSON)<textarea name="parameters" placeholder='{"org":"acme"}'></textarea></label>
         <div class="full row"><button class="act primary" type="submit">Save deployment</button></div>
       </form>
+    </div>
+  </section>
+
+  <section id="v-deployment">
+    <div class="view-head">
+      <button class="act" onclick="show('deployments')">&larr; Deployments</button>
+      <h1 id="dep-title">Deployment</h1>
+      <span id="dep-state"></span>
+      <span class="grow"></span>
+      <span class="row" id="dep-acts"></span>
+    </div>
+    <div class="detail">
+      <div id="dep-main"></div>
+      <div id="dep-side"></div>
     </div>
   </section>
 
@@ -726,6 +749,23 @@ function when(ts) {
     : Math.round(Math.abs(diff) / 86400) + 'd';
   return `<span title="${esc(d.toLocaleString())}">${diff >= 0 ? rel + ' ago' : 'in ' + rel}</span>`;
 }
+// A span in units a human reads at a glance. Used by the deployment page's
+// run table and its duration bars, where "1847s" is not an answer.
+function dur(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '—';
+  const s = ms / 1000;
+  if (s < 90) return s.toFixed(s < 10 ? 2 : 0) + 's';
+  if (s < 5400) return Math.round(s / 60) + 'm';
+  return (s / 3600).toFixed(1) + 'h';
+}
+// When a run actually happened. Not scheduled_at: a delayed or a cancelled
+// run carries a scheduled_at that never arrived, and dating it by that puts
+// finished work in the future.
+const runAt = r => r.started_at || r.created_at;
+// A run's wall-clock time, null until it has both ends.
+const runMS = r => r && r.started_at && r.ended_at ? new Date(r.ended_at) - new Date(r.started_at) : null;
+// Go durations cross the wire as nanoseconds.
+const goDur = v => v ? dur(v / 1e6) : '—';
 const state = s => `<span class="pill s-${esc(s)}">${esc(s)}</span>`;
 const prio = r => `<span class="prio">${r.queue_position != null ? '<span class="pin" title="pinned to front">▲</span>' : ''}` +
   `<b>${r.priority}</b><span class="bar"><i style="width:${r.priority}%"></i></span></span>`;
@@ -831,9 +871,16 @@ const EXT_TABS = ['keys', 'explorer'];
 const settingsPath = () =>
   '/settings/' + settingsTab + (settingsTab === 'external' ? '/' + extTab : '');
 const pathOf = v =>
-  v === 'settings' ? settingsPath() : v === 'dashboard' ? '/' : '/' + v;
+  v === 'settings' ? settingsPath()
+    : v === 'deployment' ? '/deployments/' + encodeURIComponent(depID) + '/' + depTab
+    : v === 'dashboard' ? '/' : '/' + v;
 function routeFromPath() {
   const [v, sub, ext] = location.pathname.replace(/^\/+|\/+$/g, '').split('/');
+  // One deployment's own page hangs off the list it was opened from --
+  // /deployments/<id> -- with the open tab as a third segment.
+  if (v === 'deployments' && sub) {
+    return { v: 'deployment', dep: decodeURIComponent(sub), depTab: DEP_TABS.includes(ext) ? ext : 'runs' };
+  }
   if (!VIEW_PATHS.includes(v)) return { v: 'dashboard' };
   if (v !== 'settings' || !SETTINGS_TABS.includes(sub)) return { v };
   return { v, tab: sub, ext: sub === 'external' && EXT_TABS.includes(ext) ? ext : undefined };
@@ -845,6 +892,7 @@ function showPath(replace) {
   const r = routeFromPath();
   if (r.tab) settingsTab = r.tab;
   if (r.ext) extTab = r.ext;
+  if (r.dep) { depID = r.dep; depTab = r.depTab; }
   show(r.v, replace);
 }
 function syncURL(v, replace) {
@@ -861,23 +909,30 @@ function show(v, replace) {
   current = v;
   syncURL(v, replace);
   document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === 'v-' + v));
-  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === v));
+  // A detail page keeps the list it belongs to lit in the sidebar.
+  const navFor = v === 'deployment' ? 'deployments' : v;
+  document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('active', b.dataset.v === navFor));
   document.getElementById('win-switch').hidden = v !== 'dashboard';
   if (v === 'settings') { loadSettings(); return; }
   if (v === 'newworker') { renderNewWorker(); return; }
-  refreshCurrent();
+  refreshCurrent(true);
 }
-function refreshCurrent() {
-  // A refresh rebuilds the table's rows, which would yank an open "⋯" menu
-  // out from under the pointer -- and live events can land at any moment. Let
-  // the menu win: closing it is one click, and the next tick catches the view
-  // up. Actions taken from the menu close it before their refresh lands.
-  if (document.querySelector('.menu:popover-open')) return;
+// force: a deliberate navigation, which must load whatever the pointer is
+// doing -- opening a page from a row's own "⋯" menu arrives here with that
+// menu still open, and would otherwise land on an empty view.
+function refreshCurrent(force) {
+  // A background refresh rebuilds the table's rows, which would yank an open
+  // "⋯" menu out from under the pointer -- and live events can land at any
+  // moment. Let the menu win: closing it is one click, and the next tick
+  // catches the view up. Actions taken from the menu close it before their
+  // refresh lands.
+  if (!force && document.querySelector('.menu:popover-open')) return;
   ({ dashboard: loadDashboard,
      runs: loadRuns,
      flows: loadFlowsPage,
      queues: async () => { await loadQueues(); await loadPending(); },
      deployments: loadDeployments,
+     deployment: loadDeployment,
      automations: loadAutomations,
      workers: async () => { await loadWorkers(); await loadFlows(); },
      events: loadEvents,
@@ -1367,7 +1422,7 @@ function rowMenu(btn) {
 async function loadDeployments() {
   const [ds, ctx] = await Promise.all([api('/deployments').then(x => x || []), poolContext()]);
   document.getElementById('deployments').innerHTML = ds.length ? ds.map(d => `
-    <tr>
+    <tr onclick="openDeployment(event, '${esc(d.id)}')" style="cursor:pointer">
       <td><strong>${esc(d.name)}</strong><div class="muted">${esc(d.description || '')}</div></td>
       <td>${esc(d.flow_name)}</td>
       <td class="mono">${d.schedule ? esc(d.schedule_kind + ' ' + d.schedule) + ' <span class="muted">' + esc(d.timezone || 'UTC') + '</span>' : '<span class="muted">manual</span>'}</td>
@@ -1375,6 +1430,7 @@ async function loadDeployments() {
       <td>${d.priority}</td>
       <td>${d.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
       ${menuCell([
+        ['Open', `openDeployment(null, '${d.id}')`],
         ['Run now', `act('/deployments/${d.id}/run',{method:'POST',body:'{}'})`],
         ['Run…', `openDeploymentRun('${d.id}')`],
         [d.paused ? 'Resume' : 'Pause', `act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})`],
@@ -1441,6 +1497,271 @@ async function runDeployment(ev, id) {
     document.getElementById('dep-run-dialog').close();
     show('runs');
   } catch (e) { toast(e.message, true); }
+}
+
+// --- deployment detail ----------------------------------------------------
+// Clicking a row on the Deployments list opens the deployment's own page: what
+// it does on the left -- the runs it has produced, the ones queued next, the
+// parameters it carries, the settings its runs inherit -- and what it is on the
+// right. The address is /deployments/<id>/<tab>, so a tab can be linked to and
+// the back button walks out of it the way it walked in.
+const DEP_TABS = ['runs', 'upcoming', 'parameters', 'configuration', 'description'];
+// Everything but SCHEDULED: the work already handed over, as opposed to the
+// work the scheduler has only queued. The two tabs ask for them separately so
+// a per-minute cron cannot push its own history off the end of one page.
+const DEP_PAST = 'PENDING,RUNNING,COMPLETED,FAILED,CRASHED,CANCELLING,CANCELLED,PAUSED';
+let depID = null, depTab = 'runs';
+
+// A deployments row carries a "⋯" menu of its own, so a click that landed on a
+// control belongs to that control rather than to the row around it.
+function openDeployment(ev, id) {
+  if (ev && ev.target.closest('button, .menu, a')) return;
+  if (id !== depID) depTab = 'runs';
+  depID = id;
+  show('deployment');
+}
+
+function showDepTab(t) {
+  depTab = t;
+  syncURL('deployment');
+  document.querySelectorAll('#dep-subnav button').forEach(b => b.classList.toggle('active', b.dataset.t === t));
+  DEP_TABS.forEach(x => {
+    const el = document.getElementById('dep-t-' + x);
+    if (el) el.hidden = x !== t;
+  });
+}
+
+const depStatus = d => d.paused
+  ? '<span class="pill s-PAUSED">paused</span>'
+  : '<span class="pill s-COMPLETED">active</span>';
+const depPrio = d => `<span class="prio"><b>${d.priority}</b><span class="bar"><i style="width:${d.priority}%"></i></span></span>`;
+const depTags = d => (d.tags || []).length
+  ? d.tags.map(t => `<span class="chip">${esc(t)}</span>`).join(' ')
+  : '<span class="muted">none</span>';
+
+function removeDeployment(id, name) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  if (!confirm('Delete deployment ' + name + '?')) return;
+  // Not act(): its refresh would reload the page of a deployment that is gone.
+  api('/deployments/' + encodeURIComponent(id), { method: 'DELETE' })
+    .then(() => { toast('Deleted ' + name); depID = null; show('deployments'); })
+    .catch(e => toast(e.message, true));
+}
+
+// A bar per recent run, oldest on the left: height is its duration against the
+// slowest in view, colour is its state. It answers "is this deployment getting
+// slower, and when did it start failing?" without opening a single run.
+function runBars(runs, h = 76) {
+  const rs = runs.slice(0, 40).reverse();
+  if (!rs.length) return '<div class="empty" style="padding:14px 0">Nothing has run yet.</div>';
+  const max = Math.max(1, ...rs.map(r => runMS(r) || 0));
+  const W = 1000, bw = W / rs.length;
+  const bars = rs.map((r, i) => {
+    const ms = runMS(r);
+    // A run still going, or one that never started, has no length to draw:
+    // give it a stub so the gap in the row is not mistaken for no run at all.
+    const bh = Math.max(5, ((ms || 0) / max) * (h - 5));
+    return `<rect x="${(i * bw + bw * 0.15).toFixed(1)}" y="${(h - bh).toFixed(1)}" ` +
+      `width="${(bw * 0.7).toFixed(1)}" height="${bh.toFixed(1)}" rx="2" ` +
+      `fill="${STCOL(r.state)}" opacity="${ms == null ? '0.45' : '0.9'}" onclick="openRun('${r.id}')">` +
+      `<title>${esc(r.name)} — ${esc(r.state)}${ms == null ? '' : ' — ' + dur(ms)} · ` +
+      `${esc(new Date(runAt(r)).toLocaleString())}</title></rect>`;
+  }).join('');
+  return svg(bars, W, h) +
+    `<div class="muted" style="font-size:10.5px;display:flex;justify-content:space-between">
+       <span>${esc(new Date(runAt(rs[0])).toLocaleString())}</span>
+       <span>${esc(new Date(runAt(rs[rs.length - 1])).toLocaleString())}</span></div>`;
+}
+
+// The stored parameters read against the flow's published schema, so a value
+// the flow no longer takes -- a renamed field -- shows up as an extra instead
+// of being silently dropped at run time.
+function depParams(d, flow) {
+  const vals = d.parameters || {};
+  const fields = flow && flow.params_schema && flow.params_schema.fields || [];
+  const keys = Object.keys(vals);
+  const fmt = v => typeof v === 'object' ? JSON.stringify(v) : String(v);
+  if (!fields.length) {
+    return keys.length ? `<pre class="logs">${esc(JSON.stringify(vals, null, 2))}</pre>`
+      : '<div class="empty">No parameters set, and the flow published no schema to fill in.</div>';
+  }
+  const extra = keys.filter(k => !fields.some(f => f.name === k));
+  return `<div class="scroll"><table>
+    <thead><tr><th>Parameter</th><th>Type</th><th>Value</th></tr></thead>
+    <tbody>
+      ${fields.map(f => `<tr>
+        <td class="mono">${esc(f.name)}${f.required ? ' <span class="muted" title="required">*</span>' : ''}</td>
+        <td class="muted">${esc(f.type)}</td>
+        <td class="mono">${vals[f.name] !== undefined ? esc(fmt(vals[f.name]))
+          : `<span class="muted">flow default${f.example != null ? ' · e.g. ' + esc(fmt(f.example)) : ''}</span>`}</td>
+      </tr>`).join('')}
+      ${extra.map(k => `<tr>
+        <td class="mono">${esc(k)}</td>
+        <td><span class="pill s-CANCELLED plain">not in schema</span></td>
+        <td class="mono">${esc(fmt(vals[k]))}</td>
+      </tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+async function loadDeployment() {
+  if (!depID) return show('deployments', true);
+  const main = document.getElementById('dep-main'), side = document.getElementById('dep-side');
+  // Only blank the page when it is a different deployment: the 15s refresh and
+  // every live event land here too, and they should not flash the whole view.
+  if (main.dataset.id !== depID) {
+    main.innerHTML = '<div class="panel"><div class="empty">Loading…</div></div>';
+    side.innerHTML = '';
+    document.getElementById('dep-title').textContent = 'Deployment';
+    document.getElementById('dep-state').innerHTML = '';
+    document.getElementById('dep-acts').innerHTML = '';
+  }
+  let d;
+  try {
+    d = await api('/deployments/' + encodeURIComponent(depID));
+  } catch (e) {
+    // Deleted from under us, or a link to an id that never existed.
+    main.dataset.id = '';
+    main.innerHTML = `<div class="panel"><div class="empty">${esc(e.message)}</div></div>`;
+    return;
+  }
+  main.dataset.id = d.id;
+  const [hist, up, ctx, flow] = await Promise.all([
+    api(`/runs?deployment_id=${encodeURIComponent(d.id)}&state=${DEP_PAST}&limit=60`),
+    api(`/runs?deployment_id=${encodeURIComponent(d.id)}&state=SCHEDULED&limit=40`),
+    poolContext(),
+    // A flow whose worker has never started is not in the catalogue; the page
+    // still has everything else to show.
+    api('/flows/' + encodeURIComponent(d.flow_name)).catch(() => null),
+  ]);
+  const runs = hist.runs || [];
+  const upcoming = (up.runs || []).slice().sort((a, b) => new Date(a.scheduled_at) - new Date(b.scheduled_at));
+  const fin = runs.filter(r => ['COMPLETED', 'FAILED', 'CRASHED', 'CANCELLED'].includes(r.state));
+  const ok = fin.filter(r => r.state === 'COMPLETED').length;
+  const timed = runs.map(runMS).filter(x => x != null);
+  const avg = timed.length ? timed.reduce((a, b) => a + b, 0) / timed.length : null;
+  const blocker = poolBlocker(ctx.pool[d.work_queue], ctx.online(d.work_queue));
+  const sched = d.schedule ? d.schedule_kind + ' ' + d.schedule : '';
+
+  document.getElementById('dep-title').textContent = d.name;
+  document.getElementById('dep-state').innerHTML = depStatus(d) + poolPill(blocker);
+  document.getElementById('dep-acts').innerHTML = canWrite() ? `
+    <button class="act primary" onclick="act('/deployments/${d.id}/run',{method:'POST',body:'{}'})">Run now</button>
+    <button class="act" onclick="openDeploymentRun('${d.id}')">Run…</button>
+    <button class="act" onclick="act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})">${d.paused ? 'Resume' : 'Pause'}</button>
+    <button class="act" onclick="removeDeployment('${d.id}', ${esc(JSON.stringify(d.name))})">Delete</button>` : '';
+
+  main.innerHTML = `
+    <div class="cards">
+      <div class="card mini"><div class="k">Runs</div><div class="n">${hist.total}</div>
+        <div class="muted" style="font-size:12px">${upcoming.length ? upcoming.length + ' queued ahead' : 'none queued'}</div></div>
+      <div class="card mini"><div class="k">Success rate</div>
+        <div class="n">${fin.length ? Math.round(ok / fin.length * 100) + '%' : '—'}</div>
+        <div class="muted" style="font-size:12px">${fin.length ? 'last ' + fin.length + ' finished' : 'nothing finished yet'}</div></div>
+      <div class="card mini"><div class="k">Avg duration</div><div class="n">${avg == null ? '—' : dur(avg)}</div>
+        <div class="muted" style="font-size:12px">${timed.length} timed run${timed.length === 1 ? '' : 's'}</div></div>
+      <div class="card mini"><div class="k">Next run</div>
+        <div class="n" style="font-size:19px">${upcoming[0] ? when(upcoming[0].scheduled_at)
+          : d.paused ? 'paused' : sched ? 'not queued yet' : 'on demand'}</div>
+        <div class="muted" style="font-size:12px">${sched ? esc(sched) + ' · ' + esc(d.timezone || 'UTC') : 'no schedule'}</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Run history<span class="grow"></span>
+        <span class="muted" style="font-weight:400">${runs.length ? 'last ' + Math.min(runs.length, 40) + ' runs — bar height is duration' : ''}</span></h2>
+      <div class="bars">${runBars(runs)}</div>
+    </div>
+
+    <div class="subnav flat" id="dep-subnav">${DEP_TABS.map(t => {
+      const n = t === 'runs' ? hist.total : t === 'upcoming' ? upcoming.length : 0;
+      return `<button data-t="${t}" onclick="showDepTab('${t}')">${t[0].toUpperCase() + t.slice(1)}` +
+        `${n ? ' <span class="muted">' + n + '</span>' : ''}</button>`;
+    }).join('')}</div>
+
+    <div id="dep-t-runs" hidden><div class="panel">
+      <h2>Flow runs<span class="grow"></span><span class="muted" style="font-weight:400">newest first</span></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Run</th><th>State</th><th>Pool</th><th>Started</th><th>Duration</th><th>Attempt</th></tr></thead>
+        <tbody>${runs.length ? runs.map(r => `<tr onclick="openRun('${r.id}')" style="cursor:pointer">
+          <td class="mono">${esc(r.name)}</td>
+          <td>${state(r.state)}${r.state_message ? ` <span class="muted" title="${esc(r.state_message)}">ⓘ</span>` : ''}</td>
+          <td>${esc(r.work_queue)}</td>
+          <td>${when(r.started_at)}</td>
+          <td>${dur(runMS(r))}</td>
+          <td>${r.run_count}${r.retries ? ' / ' + (r.retries + 1) : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="6" class="empty">This deployment has not run yet.</td></tr>'}</tbody>
+      </table></div>
+    </div></div>
+
+    <div id="dep-t-upcoming" hidden><div class="panel">
+      <h2>Upcoming runs<span class="grow"></span>
+        <span class="muted" style="font-weight:400">the scheduler materialises about an hour ahead</span></h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Run</th><th>Pool</th><th>Priority</th><th>Scheduled</th><th></th></tr></thead>
+        <tbody>${upcoming.length ? upcoming.map(r => `<tr>
+          <td><a href="#" class="mono" onclick="openRun('${r.id}');return false">${esc(r.name)}</a></td>
+          <td>${esc(r.work_queue)}${poolPill(runBlocker(r, ctx))}</td>
+          <td>${prio(r)}</td>
+          <td>${when(r.scheduled_at)} <span class="muted">${esc(new Date(r.scheduled_at).toLocaleString())}</span></td>
+          <td class="writer-only" style="text-align:right">
+            <button class="act" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button></td>
+        </tr>`).join('') : `<tr><td colspan="5" class="empty">${
+          !sched ? 'No schedule — this deployment runs only when something triggers it.'
+            : d.paused ? 'Paused: nothing is queued while a deployment is paused.'
+            : 'Nothing queued yet.'}</td></tr>`}</tbody>
+      </table></div>
+    </div></div>
+
+    <div id="dep-t-parameters" hidden><div class="panel">
+      <h2>Parameters<span class="grow"></span>
+        <span class="muted" style="font-weight:400">what every run starts with unless it overrides them</span></h2>
+      ${depParams(d, flow)}
+    </div></div>
+
+    <div id="dep-t-configuration" hidden><div class="panel">
+      <h2>Configuration<span class="grow"></span>
+        <span class="muted" style="font-weight:400">every run this deployment creates inherits these</span></h2>
+      <dl class="kv">
+        <dt>Flow</dt><dd class="mono">${esc(d.flow_name)}${flow ? ''
+          : ' <span class="pill s-FAILED" title="No worker has registered this flow, so its runs have nowhere to go.">unregistered</span>'}</dd>
+        <dt>Work pool</dt><dd>${esc(d.work_queue)}${poolPill(blocker)}</dd>
+        <dt>Priority</dt><dd>${depPrio(d)}</dd>
+        <dt>Schedule</dt><dd>${sched ? `<span class="mono">${esc(sched)}</span> <span class="muted">${esc(d.timezone || 'UTC')}</span>`
+          : '<span class="muted">manual — nothing schedules it</span>'}</dd>
+        <dt>Catch up</dt><dd>${d.catchup ? 'on — windows missed during downtime are backfilled'
+          : '<span class="muted">off — a missed window is skipped, not backfilled</span>'}</dd>
+        <dt>Retries</dt><dd>${d.retries || 0}${d.retries ? ' · ' + goDur(d.retry_delay) + ' apart' : ''}</dd>
+        <dt>Timeout</dt><dd>${d.timeout ? goDur(d.timeout) : '<span class="muted">none</span>'}</dd>
+        <dt>Tags</dt><dd>${depTags(d)}</dd>
+      </dl>
+    </div></div>
+
+    <div id="dep-t-description" hidden><div class="panel">
+      <h2>Description</h2>
+      ${d.description ? `<p style="padding:13px 15px;margin:0;white-space:pre-wrap">${esc(d.description)}</p>`
+        : '<div class="empty">No description. Add one on the Deployments form.</div>'}
+    </div></div>`;
+
+  side.innerHTML = `
+    <div class="panel">
+      <h2>Deployment</h2>
+      <dl class="kv">
+        <dt>Flow</dt><dd><a href="#" onclick="openFlow('${esc(d.flow_name)}');return false">${esc(d.flow_name)}</a></dd>
+        <dt>Status</dt><dd>${depStatus(d)}</dd>
+        <dt>Work pool</dt><dd>${esc(d.work_queue)}${poolPill(blocker)}</dd>
+        <dt>Priority</dt><dd>${depPrio(d)}</dd>
+        <dt>Schedule</dt><dd>${sched ? `<span class="mono">${esc(sched)}</span><div class="muted">${esc(d.timezone || 'UTC')}</div>`
+          : '<span class="muted">manual</span>'}</dd>
+        <dt>Next run</dt><dd>${upcoming[0] ? when(upcoming[0].scheduled_at) : '<span class="muted">—</span>'}</dd>
+        <dt>Last run</dt><dd>${runs[0] ? state(runs[0].state) + ' ' + when(runAt(runs[0]))
+          : '<span class="muted">never</span>'}</dd>
+        <dt>Tags</dt><dd>${depTags(d)}</dd>
+        <dt>Created</dt><dd>${when(d.created_at)}</dd>
+        <dt>Updated</dt><dd>${when(d.updated_at)}</dd>
+        <dt>ID</dt><dd class="mono" style="font-size:11px;word-break:break-all">${esc(d.id)}</dd>
+      </dl>
+    </div>`;
+
+  showDepTab(DEP_TABS.includes(depTab) ? depTab : 'runs');
 }
 
 async function loadFlows() {
