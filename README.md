@@ -151,7 +151,21 @@ go run ./cmd/primeflow server           # API + UI + scheduler + automations
 go run ./examples/primex-worker         # worker ที่มี flow ตัวอย่างสองตัว
 ```
 
-จากนั้นสร้าง deployment แล้วรัน:
+จากนั้นเติมข้อมูลตัวอย่างให้ครบชุด — queue, deployment และบัญชี demo:
+
+```bash
+make seed-compose                # ใช้ image ของ compose ไม่ต้องมี Go บนเครื่อง
+make seed-compose SEED_RUNS=4    # เติม run ตัวอย่างให้คอนโซลมีของให้ดูด้วย
+```
+
+`seed` เขียนลงฐานข้อมูลตรง ๆ เหมือน `migrate` และ `user` จึงใช้ได้ตั้งแต่ก่อน server ขึ้น
+และไม่ต้องถือ API token สิ่งที่ได้คือ work queue สามเส้น (`default`, `vcd` ที่คุมไว้ที่ 2 งาน,
+`metering`), deployment ครอบคลุมทุก flow ในตัวอย่าง worker และบัญชี demo หนึ่งบัญชีต่อหนึ่งบทบาท
+รันซ้ำได้ปลอดภัย: ไม่สร้างของซ้ำ ไม่ปลด pause ที่คุณตั้งไว้ และไม่รีเซ็ตรหัสผ่านของบัญชีที่มีอยู่แล้ว
+— รวมถึง `admin@primeflow.local` ที่ `PRIMEFLOW_ADMIN_PASSWORD` สร้างไว้ตอน server บูตครั้งแรก
+ถ้ามี Go toolchain บนเครื่องใช้ `make seed` ได้ ซึ่งยิงไปที่ `TEST_DB`
+
+หรือจะสร้าง deployment เองผ่าน API:
 
 ```bash
 docker compose up -d server        # pick up the new token
@@ -178,7 +192,7 @@ primeflow runs
 Without the token both the `curl` and the CLI get `401 authentication required`.
 `GET /api/v1/health` and `GET /metrics` are the only open routes; the console
 also accepts `?token=<PRIMEFLOW_API_TOKEN>` on a URL, which is the quick way to
-open a view without typing the seed password.
+open a view without typing the admin password.
 
 ---
 
