@@ -93,6 +93,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			}
 			s.materialise(ctx)
 			s.reclaim(ctx)
+			s.pushDispatch(ctx)
 			s.sweep(ctx)
 		}
 	}
@@ -111,13 +112,28 @@ func (s *Scheduler) sweep(ctx context.Context) {
 	} else if n > 0 {
 		s.log.Debug("pruned expired sessions", "count", n)
 	}
+	if n, err := s.store.DeleteExpiredPasswordResets(ctx, time.Now().UTC()); err != nil {
+		s.log.Warn("password-reset sweep failed", "err", err)
+	} else if n > 0 {
+		s.log.Debug("pruned password-reset tokens", "count", n)
+	}
 	if n, err := s.store.TrimAPIKeyEvents(ctx, 200); err != nil {
 		s.log.Warn("api-key event trim failed", "err", err)
 	} else if n > 0 {
 		s.log.Debug("trimmed api-key events", "count", n)
 	}
+	// Keep pf_logs partitions ahead of "now", regardless of the retention
+	// policy, so an INSERT never hits a missing partition.
+	if err := s.store.EnsureLogPartitions(ctx, 2); err != nil {
+		s.log.Warn("ensure log partitions failed", "err", err)
+	}
 	if lr, err := s.store.GetLogRetention(ctx); err == nil && lr.Enabled && lr.MaxAgeHours > 0 {
 		cutoff := time.Now().Add(-time.Duration(lr.MaxAgeHours) * time.Hour)
+		if dropped, err := s.store.DropLogPartitionsOlderThan(ctx, cutoff); err != nil {
+			s.log.Warn("log partition drop failed", "err", err)
+		} else if len(dropped) > 0 {
+			s.log.Info("dropped old log partitions", "partitions", dropped, "older_than", cutoff)
+		}
 		if n, more, err := s.store.DeleteLogsOlderThan(ctx, cutoff, 100000); err != nil {
 			s.log.Warn("log retention sweep failed", "err", err)
 		} else if n > 0 {

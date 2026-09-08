@@ -8,13 +8,15 @@ import (
 // User is an operator account. Password material never leaves the store layer,
 // so it is not a field here.
 type User struct {
-	ID          string     `json:"id"`
-	Email       string     `json:"email"`
-	Role        string     `json:"role"` // authn.Role: admin | operator | viewer
-	Active      bool       `json:"active"`
-	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID     string `json:"id"`
+	Email  string `json:"email"`
+	Role   string `json:"role"` // authn.Role: admin | operator | viewer
+	Active bool   `json:"active"`
+	// AuthProvider is "local" (password) or "oidc" (SSO, JIT-provisioned).
+	AuthProvider string     `json:"auth_provider"`
+	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 // Session is a browser login. The ID is the opaque secret stored in the

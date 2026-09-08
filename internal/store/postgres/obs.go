@@ -193,10 +193,12 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, raw
 	return mapErr(err)
 }
 
-// DeleteLogsOlderThan removes pf_logs rows written before cutoff. It deletes in
-// bounded batches so it never holds a long lock, and stops after maxRows so one
-// janitor pass cannot monopolise a connection. It returns the number deleted and
-// whether more remain.
+// DeleteLogsOlderThan removes pf_logs rows written before cutoff. With native
+// monthly partitioning most old logs are removed by DropLogPartitionsOlderThan;
+// this cleans the sub-partition tail (rows in a still-live partition that are
+// already past retention). It deletes in bounded batches keyed on the (id, ts)
+// primary key so it works on both the partitioned parent and a plain table, and
+// stops after maxRows so one janitor pass cannot monopolise a connection.
 func (s *Store) DeleteLogsOlderThan(ctx context.Context, cutoff time.Time, maxRows int) (deleted int, more bool, err error) {
 	const batch = 5000
 	if maxRows <= 0 {
@@ -204,9 +206,11 @@ func (s *Store) DeleteLogsOlderThan(ctx context.Context, cutoff time.Time, maxRo
 	}
 	for deleted < maxRows {
 		res, e := s.db.ExecContext(ctx, `
-DELETE FROM pf_logs WHERE id IN (
-    SELECT id FROM pf_logs WHERE ts < $1 ORDER BY id LIMIT $2
-)`, cutoff.UTC(), batch)
+WITH doomed AS (
+    SELECT id, ts FROM pf_logs WHERE ts < $1 ORDER BY ts LIMIT $2
+)
+DELETE FROM pf_logs t USING doomed d WHERE t.id = d.id AND t.ts = d.ts`,
+			cutoff.UTC(), batch)
 		if e != nil {
 			return deleted, false, mapErr(e)
 		}
@@ -223,6 +227,120 @@ DELETE FROM pf_logs WHERE id IN (
 	}
 	return deleted, true, nil
 }
+
+// EnsureLogPartitions guarantees a monthly pf_logs partition exists for every
+// month from the current one through monthsAhead months out, so a write never
+// hits a gap (e.g. after DropLogPartitionsOlderThan removes the legacy p0). A
+// month already covered by another partition is skipped. No-op and cheap when
+// pf_logs is not partitioned, so it is safe to call unconditionally.
+func (s *Store) EnsureLogPartitions(ctx context.Context, monthsAhead int) error {
+	if !s.logsPartitioned(ctx) {
+		return nil
+	}
+	if monthsAhead < 0 {
+		monthsAhead = 0
+	}
+	now := time.Now().UTC()
+	lo := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i <= monthsAhead; i++ {
+		hi := lo.AddDate(0, 1, 0)
+		stmt := fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s PARTITION OF pf_logs FOR VALUES FROM ('%s') TO ('%s')`,
+			quoteIdent("pf_logs_"+lo.Format("2006_01")),
+			lo.Format("2006-01-02"), hi.Format("2006-01-02"))
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			// The month is already covered by another partition (e.g. the legacy
+			// p0). That is fine — anything else is a real error.
+			if strings.Contains(err.Error(), "would overlap") {
+				lo = hi
+				continue
+			}
+			return mapErr(err)
+		}
+		lo = hi
+	}
+	return nil
+}
+
+// DropLogPartitionsOlderThan drops every pf_logs partition whose entire range is
+// before cutoff — an O(1) alternative to deleting rows. It returns the dropped
+// partition names. Partitions that only partly precede cutoff are left for
+// DeleteLogsOlderThan.
+func (s *Store) DropLogPartitionsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
+	if !s.logsPartitioned(ctx) {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT c.relname, pg_get_expr(c.relpartbound, c.oid)
+  FROM pg_inherits i
+  JOIN pg_class c   ON c.oid = i.inhrelid
+  JOIN pg_class p   ON p.oid = i.inhparent
+ WHERE p.relname = 'pf_logs'`)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+
+	var doomed []string
+	for rows.Next() {
+		var name, bound string
+		if err := rows.Scan(&name, &bound); err != nil {
+			return nil, err
+		}
+		// bound looks like: FOR VALUES FROM ('MINVALUE') TO ('2026-09-01 00:00:00+00')
+		hi := partitionUpperBound(bound)
+		if hi.IsZero() || !hi.Before(cutoff.UTC()) {
+			continue
+		}
+		doomed = append(doomed, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, name := range doomed {
+		if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS `+quoteIdent(name)); err != nil {
+			return doomed, mapErr(err)
+		}
+	}
+	return doomed, nil
+}
+
+func (s *Store) logsPartitioned(ctx context.Context) bool {
+	var ok bool
+	_ = s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pg_partitioned_table pt
+  JOIN pg_class c ON c.oid = pt.partrelid WHERE c.relname = 'pf_logs')`).Scan(&ok)
+	return ok
+}
+
+// partitionUpperBound pulls the TO (...) timestamp out of a relpartbound
+// expression. Returns the zero time when the upper bound is MAXVALUE or
+// unparseable.
+func partitionUpperBound(expr string) time.Time {
+	i := strings.LastIndex(expr, "TO (")
+	if i < 0 {
+		return time.Time{}
+	}
+	rest := expr[i+4:]
+	j := strings.Index(rest, ")")
+	if j < 0 {
+		return time.Time{}
+	}
+	v := strings.TrimSpace(rest[:j])
+	v = strings.Trim(v, "'")
+	if strings.EqualFold(v, "MAXVALUE") {
+		return time.Time{}
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05-07", "2006-01-02 15:04:05Z07:00", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 // Stats returns time-bucketed activity for the console Dashboard. It runs three
 // date_bin GROUP BY queries (Postgres 14+); on an older server the queries error

@@ -28,6 +28,11 @@ stringData:
   # Rotate the password from the console once you are in.
   PRIMEFLOW_ADMIN_EMAIL: admin@example.com
   PRIMEFLOW_ADMIN_PASSWORD: CHANGE_ME
+  # OIDC client secret (issuer / client id are in the ConfigMap).
+  # PRIMEFLOW_OIDC_CLIENT_SECRET: CHANGE_ME
+  # HMAC secret the server signs push-pool dispatches with, shared with the
+  # push-worker Deployment at the bottom of this file.
+  # PRIMEFLOW_PUSH_SECRET: CHANGE_ME
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -44,11 +49,20 @@ data:
   PRIMEFLOW_SESSION_TTL: "168h"
   # Notification bus. Point at a NATS or Redis service; omit for polling-only.
   PRIMEFLOW_NATS_URL: "nats://nats.primeflow.svc.cluster.local:4222"
-  # Bounded pf_logs. The leader prunes older run logs every 30 min.
+  # A Redis URL (even with NATS as the bus) makes the login throttle and
+  # per-API-key rate limiter cluster-wide instead of per-replica.
+  # PRIMEFLOW_REDIS_URL: "redis://redis.primeflow.svc.cluster.local:6379"
+  # Bounded pf_logs: leader prunes/drops old monthly partitions every 30 min.
   PRIMEFLOW_LOG_RETENTION: "720h"
   # Uncomment to export traces (server AND workers pick this up).
   # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc:4318"
   # OTEL_SERVICE_NAME: "primeflow"
+  # --- OIDC SSO: set issuer + client id (secret goes in the Secret below). ---
+  # PRIMEFLOW_OIDC_ISSUER: "https://login.example.com"
+  # PRIMEFLOW_OIDC_CLIENT_ID: "primeflow-console"
+  # PRIMEFLOW_OIDC_REDIRECT_URL: "https://primeflow.example.com/api/v1/auth/oidc/callback"
+  # PRIMEFLOW_OIDC_ROLE_CLAIM: "groups"
+  # PRIMEFLOW_OIDC_ROLE_MAP: "platform-admins=admin,platform-ops=operator"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -266,3 +280,47 @@ spec:
 #           name: primeflow_queue_ready
 #           selector: {matchLabels: {queue: vcd}}
 #         target: {type: AverageValue, averageValue: "5"}
+---
+# ---------------------------------------------------------------------------
+# Push-pool receiver. Create a work pool with pool_type=push and
+# push_endpoint=http://primeflow-push.primeflow.svc:8090/run and the server
+# dispatches ready runs here. Scale this on HTTP concurrency (a KEDA http-add-on
+# ScaledObject or Knative), not on queue depth. Commented until you need it.
+#
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: primeflow-push
+#   namespace: primeflow
+#   labels: {app: primeflow, component: push-worker}
+# spec:
+#   replicas: 1
+#   selector: {matchLabels: {app: primeflow, component: push-worker}}
+#   template:
+#     metadata: {labels: {app: primeflow, component: push-worker}}
+#     spec:
+#       terminationGracePeriodSeconds: 120
+#       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+#       containers:
+#         - name: push-worker
+#           image: registry.example.com/primex/primeflow:latest
+#           command: ["/usr/local/bin/primex-worker", "-push"]
+#           ports: [{name: push, containerPort: 8090}]
+#           envFrom:
+#             - secretRef: {name: primeflow-secrets}
+#             - configMapRef: {name: primeflow-config}
+#           env:
+#             - {name: PRIMEFLOW_PUSH_ADDR, value: ":8090"}
+#             - {name: PRIMEFLOW_WORKER_NAME, valueFrom: {fieldRef: {fieldPath: metadata.name}}}
+#           readinessProbe: {httpGet: {path: /healthz, port: push}}
+#           securityContext:
+#             allowPrivilegeEscalation: false
+#             readOnlyRootFilesystem: true
+#             capabilities: {drop: ["ALL"]}
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata: {name: primeflow-push, namespace: primeflow}
+# spec:
+#   selector: {app: primeflow, component: push-worker}
+#   ports: [{name: push, port: 8090, targetPort: push}]

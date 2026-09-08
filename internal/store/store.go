@@ -112,6 +112,17 @@ type Store interface {
 	RenewLease(ctx context.Context, runID, workerID string, d time.Duration) error
 	ReclaimExpiredLeases(ctx context.Context, now time.Time) ([]core.FlowRun, error)
 
+	// --- push work pools ---
+	// PushReadyRuns lists dispatchable runs in a push pool; MarkPushDispatched
+	// holds one while its endpoint is notified; ClearPushDispatch releases the
+	// hold on a failed notify; ClaimPushRun is called by the receiver to take
+	// SCHEDULED -> PENDING for a specific run (the engine then drives it to
+	// RUNNING, as for a leased run).
+	PushReadyRuns(ctx context.Context, pool string, limit int) ([]core.FlowRun, error)
+	MarkPushDispatched(ctx context.Context, runID string, leaseFor time.Duration) error
+	ClearPushDispatch(ctx context.Context, runID string) error
+	ClaimPushRun(ctx context.Context, runID, workerID string, leaseFor time.Duration) (*core.FlowRun, error)
+
 	// --- operator queue controls ---
 	SetRunPriority(ctx context.Context, runID string, priority int) (*core.FlowRun, error)
 	MoveRunToFront(ctx context.Context, runID string) (*core.FlowRun, error)
@@ -137,6 +148,11 @@ type Store interface {
 	GetLogRetention(ctx context.Context) (core.LogRetention, error)
 	PutLogRetention(ctx context.Context, in core.LogRetention) error
 	DeleteLogsOlderThan(ctx context.Context, cutoff time.Time, maxRows int) (deleted int, more bool, err error)
+	// EnsureLogPartitions pre-creates monthly pf_logs partitions;
+	// DropLogPartitionsOlderThan drops whole partitions past retention. Both are
+	// no-ops when pf_logs is not partitioned.
+	EnsureLogPartitions(ctx context.Context, monthsAhead int) error
+	DropLogPartitionsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error)
 
 	// --- sub-flows ---
 	// ListChildRuns returns every run whose parent_run_id is parentID.
@@ -191,6 +207,8 @@ type UserInput struct {
 	PasswordHash string
 	Role         string
 	Active       bool
+	// AuthProvider defaults to "local"; set "oidc" for JIT SSO provisioning.
+	AuthProvider string
 }
 
 // APIKeyFilter narrows an API-key listing. Zero values mean "no constraint".
@@ -213,6 +231,11 @@ type AuthStore interface {
 	CountUsers(ctx context.Context) (int, error)
 	UpdateUser(ctx context.Context, id string, role *string, active *bool, passwordHash string) (*core.User, error)
 	TouchUserLogin(ctx context.Context, id string, at time.Time) error
+
+	// Password-reset links (admin-issued; single-use).
+	CreatePasswordReset(ctx context.Context, userID string, ttl time.Duration) (token string, expires time.Time, err error)
+	ConsumePasswordReset(ctx context.Context, token string) (userID string, err error)
+	DeleteExpiredPasswordResets(ctx context.Context, now time.Time) (deleted int, err error)
 
 	CreateSession(ctx context.Context, s *core.Session) error
 	// GetSession returns the session and its user, or ErrNotFound when the

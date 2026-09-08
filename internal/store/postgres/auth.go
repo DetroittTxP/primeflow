@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,11 +15,11 @@ import (
 
 // ------------------------------------------------------------------ users ---
 
-const userCols = `id, email, role, active, last_login_at, created_at, updated_at`
+const userCols = `id, email, role, active, auth_provider, last_login_at, created_at, updated_at`
 
 func scanUser(sc interface{ Scan(...any) error }) (*core.User, error) {
 	var u core.User
-	if err := sc.Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.LastLoginAt,
+	if err := sc.Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.AuthProvider, &u.LastLoginAt,
 		&u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -30,12 +32,16 @@ func (s *Store) CreateUser(ctx context.Context, in store.UserInput) (*core.User,
 	if in.PasswordHash == "" {
 		return nil, errors.New("postgres: CreateUser needs a password hash")
 	}
+	provider := in.AuthProvider
+	if provider == "" {
+		provider = "local"
+	}
 	const q = `
-INSERT INTO pf_users (id, email, password_hash, role, active)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO pf_users (id, email, password_hash, role, active, auth_provider)
+VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING ` + userCols
 	row := s.db.QueryRowContext(ctx, q, in.ID, strings.TrimSpace(in.Email),
-		in.PasswordHash, in.Role, in.Active)
+		in.PasswordHash, in.Role, in.Active, provider)
 	u, err := scanUser(row)
 	return u, mapErr(err)
 }
@@ -62,11 +68,48 @@ func (s *Store) GetUserAuth(ctx context.Context, email string) (*core.User, stri
 		strings.TrimSpace(email))
 	var u core.User
 	var hash string
-	if err := row.Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.LastLoginAt,
+	if err := row.Scan(&u.ID, &u.Email, &u.Role, &u.Active, &u.AuthProvider, &u.LastLoginAt,
 		&u.CreatedAt, &u.UpdatedAt, &hash); err != nil {
 		return nil, "", mapErr(err)
 	}
 	return &u, hash, nil
+}
+
+// CreatePasswordReset issues a single-use reset token valid for ttl.
+func (s *Store) CreatePasswordReset(ctx context.Context, userID string, ttl time.Duration) (string, time.Time, error) {
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		return "", time.Time{}, err
+	}
+	tok := base64.RawURLEncoding.EncodeToString(token)
+	expires := time.Now().Add(ttl).UTC()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO pf_password_resets (token, user_id, expires_at) VALUES ($1,$2,$3)`,
+		tok, userID, expires)
+	return tok, expires, mapErr(err)
+}
+
+// ConsumePasswordReset validates a token (unused, unexpired), marks it used, and
+// returns the user id. store.ErrNotFound for an unknown / spent / expired token.
+func (s *Store) ConsumePasswordReset(ctx context.Context, token string) (string, error) {
+	var userID string
+	err := s.db.QueryRowContext(ctx, `
+UPDATE pf_password_resets
+   SET used_at = now()
+ WHERE token = $1 AND used_at IS NULL AND expires_at > now()
+RETURNING user_id`, token).Scan(&userID)
+	return userID, mapErr(err)
+}
+
+// DeleteExpiredPasswordResets is run by the janitor.
+func (s *Store) DeleteExpiredPasswordResets(ctx context.Context, now time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM pf_password_resets WHERE expires_at <= $1 OR used_at IS NOT NULL`, now.UTC())
+	if err != nil {
+		return 0, mapErr(err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // ListUsers returns every account, oldest first.

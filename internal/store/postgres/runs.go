@@ -270,6 +270,85 @@ SELECT `+flowRunCols+`
 	return out, rows.Err()
 }
 
+// PushReadyRuns returns runs in a push pool that are ready to dispatch: SCHEDULED,
+// their time reached, not cancelled, and not currently held by a lease (a
+// previous dispatch whose receiver has not yet claimed it). Same dispatch order
+// as PendingInQueue.
+func (s *Store) PushReadyRuns(ctx context.Context, pool string, limit int) ([]core.FlowRun, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT `+flowRunCols+`
+  FROM pf_flow_runs
+ WHERE work_queue = $1 AND state = 'SCHEDULED' AND NOT cancel_requested
+   AND scheduled_at <= now()
+   AND (worker_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at < now())
+ ORDER BY queue_position ASC NULLS LAST, priority DESC, scheduled_at ASC, created_at ASC
+ LIMIT $2`, pool, limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []core.FlowRun{}
+	for rows.Next() {
+		r, err := scanFlowRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+// MarkPushDispatched holds a run for leaseFor while its push endpoint is being
+// notified, without changing its state. If the receiver never claims it, the
+// lease lapses and the run is re-dispatched (and eventually reclaimed as CRASHED
+// by the janitor, like any abandoned run).
+func (s *Store) MarkPushDispatched(ctx context.Context, runID string, leaseFor time.Duration) error {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE pf_flow_runs
+   SET worker_id = 'push-dispatch', lease_expires_at = now() + $2::interval, updated_at = now()
+ WHERE id = $1 AND state = 'SCHEDULED'
+   AND (worker_id IS NULL OR lease_expires_at IS NULL OR lease_expires_at < now())`,
+		runID, fmt.Sprintf("%d milliseconds", leaseFor.Milliseconds()))
+	if err != nil {
+		return mapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return store.ErrConflict // already claimed or no longer scheduled
+	}
+	return nil
+}
+
+// ClearPushDispatch releases a dispatch hold so the run is retried next cycle
+// (used when the push POST fails).
+func (s *Store) ClearPushDispatch(ctx context.Context, runID string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE pf_flow_runs SET worker_id = NULL, lease_expires_at = NULL, updated_at = now()
+ WHERE id = $1 AND state = 'SCHEDULED' AND worker_id = 'push-dispatch'`, runID)
+	return mapErr(err)
+}
+
+// ClaimPushRun transitions a specific run SCHEDULED -> PENDING under workerID's
+// lease. It mirrors a pull worker's claim: the engine then drives PENDING ->
+// RUNNING and owns the flow-run.RUNNING event, so a push run produces exactly
+// the same event stream as a leased one. The push receiver calls this before
+// handing the run to the engine. Returns ErrConflict if the run is not
+// claimable.
+func (s *Store) ClaimPushRun(ctx context.Context, runID, workerID string, leaseFor time.Duration) (*core.FlowRun, error) {
+	updated, err := s.SetFlowRunState(ctx, runID,
+		core.NewState(core.StatePending, "Pending", ""),
+		store.StateOpts{WorkerID: &workerID, BumpRun: true})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.RenewLease(ctx, runID, workerID, leaseFor); err != nil {
+		return updated, err
+	}
+	return updated, nil
+}
+
 // CountFlowRuns counts runs matching the filter.
 func (s *Store) CountFlowRuns(ctx context.Context, f store.FlowRunFilter) (int, error) {
 	clause, args := buildFilter(f)

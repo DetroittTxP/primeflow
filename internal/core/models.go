@@ -91,6 +91,13 @@ type WorkQueue struct {
 	Owner                string `json:"owner,omitempty"`
 	PoolType             string `json:"pool_type,omitempty"`
 
+	// Push pools: PoolType == "push". The server dispatches ready runs to
+	// PushEndpoint (HMAC-signed with PushSecret) instead of workers polling.
+	// PushSecret is write-only — reads report HasPushSecret instead.
+	PushEndpoint  string `json:"push_endpoint,omitempty"`
+	PushSecret    string `json:"-"`
+	HasPushSecret bool   `json:"has_push_secret,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

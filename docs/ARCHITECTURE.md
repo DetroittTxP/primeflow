@@ -217,6 +217,17 @@ free of cluster credentials and portable to a plain `docker compose` or a
 systemd unit. External teams run their own worker Deployment against their own
 pool name; the `owner` field is how the console attributes it.
 
+**Push pools** invert the flow for scale-to-zero. A pool with `pool_type='push'`
+has no leased workers; the leader's dispatch loop `POST`s each ready run to the
+pool's `push_endpoint` with an HMAC (`X-PrimeFlow-Signature`) over the body, and
+holds the run with a 2-minute `worker_id='push-dispatch'` lease. The receiver —
+your binary run as `RunPushWorker` — verifies the signature, `ClaimPushRun`
+takes that one run `SCHEDULED → PENDING` under its own lease, and the engine
+drives it to `RUNNING` and executes it exactly as a leased run — same state
+writes, same events. If the receiver never claims, the hold lapses, the run
+is re-dispatched, and eventually the janitor reclaims it as `CRASHED` — the same
+recovery path as an abandoned pull run. No new failure mode.
+
 ### Transports
 
 The wake-up bus (`internal/bus`) has three interchangeable implementations,
@@ -242,10 +253,12 @@ happens next, not replay a month of history as if it were live.
 
 ## 7. What will need attention first
 
-- **`pf_logs` growth.** Now bounded by a leader-run age-based delete
-  (`PRIMEFLOW_LOG_RETENTION`, default 720h, batched 5k rows at a time). Native
-  daily partitioning is the next step for very high volume; the delete job is
-  what ships.
+- **`pf_logs` growth.** `pf_logs` is range-partitioned by month (migration 0004;
+  legacy rows attach as a bounded `pf_logs_p0`). The janitor pre-creates the next
+  two months and `DROP`s whole partitions once their entire range is past
+  `PRIMEFLOW_LOG_RETENTION` — O(1), no vacuum churn — then a small batched delete
+  trims the sub-partition tail. Converting an already-huge `pf_logs` does one
+  validation scan on the ATTACH; do it in a maintenance window.
 - **Poll amplification.** Fine to a few dozen workers per lane. Beyond that,
   `LISTEN/NOTIFY` or a longer poll interval leaning harder on Redis.
 - **Result size.** Task results are stored as `jsonb` inline. Large payloads

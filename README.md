@@ -224,6 +224,15 @@ Configuration comes from the environment, so the same image runs everywhere:
 | `PRIMEFLOW_SESSION_TTL` | operator login lifetime (slides on use) | `168h` |
 | `PRIMEFLOW_COOKIE_SECURE` | mark session cookies `Secure` | auto (on when a proxy is trusted) |
 | `PRIMEFLOW_TRUSTED_PROXY_CIDRS` | networks whose `X-Forwarded-For` / client-cert headers are believed | none |
+| `PRIMEFLOW_PUSH_ADDR` / `PRIMEFLOW_PUSH_SECRET` | push-pool receiver: listen address and dispatch HMAC secret | `:8090` / none |
+| `PRIMEFLOW_OIDC_ISSUER` / `_CLIENT_ID` / `_CLIENT_SECRET` | enable OIDC SSO (issuer + client id required) | none |
+| `PRIMEFLOW_OIDC_REDIRECT_URL` | OIDC callback (else derived from the request) | derived |
+| `PRIMEFLOW_OIDC_DEFAULT_ROLE` / `_ROLE_CLAIM` / `_ROLE_MAP` | JIT role: fallback, claim name, `group=role,…` map | `viewer` / — / — |
+| `PRIMEFLOW_RESET_TTL` | admin-issued password-reset link lifetime | `1h` |
+
+When `PRIMEFLOW_REDIS_URL` is set — even with NATS as the bus — the login
+throttle and per-API-key rate limiter use a **shared Redis token bucket**, so
+limits hold across server replicas; otherwise they are per-process.
 
 ### SDK reference
 
@@ -350,6 +359,13 @@ Two independent surfaces, detailed in [`docs/api_roles_and_permissions.md`](docs
   and settings management). Browser writes carry a double-submit CSRF token. Workers
   and the CLI keep using `PRIMEFLOW_API_TOKEN` as a bearer token, treated as `admin`.
   Seed the first admin with `PRIMEFLOW_ADMIN_*` or `primeflow user add`.
+  - **SSO.** Set `PRIMEFLOW_OIDC_ISSUER` + `_CLIENT_ID` (+ `_CLIENT_SECRET`) and the
+    login page gains a **Sign in with SSO** button. First login JIT-provisions an
+    `oidc` account; its role comes from `_ROLE_MAP` on `_ROLE_CLAIM`, else
+    `_DEFAULT_ROLE`. Local accounts and SSO accounts coexist.
+  - **Password reset.** No SMTP. An admin issues a one-time link — console
+    **Settings → Users → Reset link**, or `primeflow user reset-link -email …` —
+    and the user sets a new password at `/reset.html`.
 - **External API** (`/api/external/v1`). A role-gated, key-authenticated projection
   of runs, deployments, queues and events for external integrations. Managed from
   **Settings → External API** in the console: a global master switch, issued keys
@@ -377,7 +393,9 @@ unauthenticated so probes need no credential.
 | `GET /events`, `GET/POST /automations` | event feed and rules |
 | `POST /webhooks/{deployment}` | external trigger |
 | `GET /stream` | Server-Sent Events, live |
-| `POST /auth/login` · `/auth/logout` · `GET /auth/me` | operator login |
+| `POST /auth/login` · `/auth/logout` · `GET /auth/me` · `GET /auth/config` | operator login |
+| `GET /auth/oidc/login` · `/auth/oidc/callback` | OIDC SSO (when configured) |
+| `POST /auth/reset` · `POST /users/{id}/reset-link` | password-reset links |
 | `GET/POST /users`, `PATCH/DELETE /users/{id}` | operator accounts (admin) |
 | `GET/PUT /settings/external-api` | External API master switch (admin) |
 | `GET/POST /api-keys`, `PATCH/DELETE /api-keys/{id}`, `POST /api-keys/{id}/rotate`, `GET /api-keys/{id}/history` | External API keys (admin) |
@@ -517,6 +535,20 @@ publishes the target, Kubernetes acts. See
 `PRIMEFLOW_QUEUES=<pool>`; the `owner` field groups it in the console. Workers
 never block each other — dispatch is one `SKIP LOCKED` statement per poll.
 
+### Push pools
+
+Set `pool_type: "push"` and a `push_endpoint` (console **Work Pools → Push
+endpoint…**, or `POST /api/v1/queues`) and the pool has no polling workers.
+Instead the leader `POST`s each ready run — `{run_id, flow_name, …}`, HMAC-signed
+with the pool's `push_secret` as `X-PrimeFlow-Signature: sha256=…` — to the
+endpoint. The receiver is your PrimeFlow binary run as
+`primeflow.RunPushWorker` (or `primex-worker -push`): it verifies the signature,
+claims that one run, executes it with the engine, and reports normally. A
+dispatch that is never claimed lapses and is retried, then reclaimed as
+`CRASHED` by the janitor like any abandoned run. Point `push_endpoint` at a
+Knative `Service` / Cloud Run URL for scale-to-zero — the server pings only when
+there is work.
+
 ## Console
 
 Single embedded page, no build step. It opens on a **Dashboard** — time-bucketed
@@ -539,12 +571,16 @@ sdk.Flow("provision-vm", provisionVM,
 
 Honest list of what is not built yet:
 
-- **`pf_logs` partitioning.** A batched age-based delete job ships; native
-  partitioning is the higher-scale option and is not wired.
-- **Push work pools.** The `pool_type` field exists; only `pull` (workers poll)
-  is implemented.
-- **Shared rate limiting.** The login throttle and per-API-key rate limiter are
-  in-process, so limits are per server replica.
-- **Auth extras.** No SSO/OAuth and no self-service password reset — an admin
-  resets passwords via the console or `primeflow user passwd`.
+- **`pf_logs` partitioning migration on a large table.** New installs and small
+  ones convert instantly; converting a `pf_logs` that already holds millions of
+  rows does one validation scan on the `ATTACH` — run it in a maintenance window.
+  After that the janitor `DROP`s whole aged-out monthly partitions.
+- **SMTP.** Password reset is admin-issued one-time links, not a self-service
+  "forgot my password" email flow.
+- **Per-user API keys.** External-API keys belong to the instance and are
+  created by admins.
+- **NATS-backed rate limiting.** Shared limits use Redis or fall back to
+  in-process; there is no NATS/JetStream limiter.
+- **Push pools don't build or ship your code.** The receiver is still your
+  PrimeFlow binary with database access; there is no code-upload step.
 - **Single OTLP exporter.** Traces only; no metrics-over-OTLP, no log export.

@@ -3,6 +3,7 @@ module github.com/primex/primeflow
 go 1.25.0
 
 require (
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
 	github.com/nats-io/nats.go v1.53.1
@@ -14,6 +15,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
+	golang.org/x/oauth2 v0.36.0
 )
 
 require (
@@ -22,6 +24,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect

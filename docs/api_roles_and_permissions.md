@@ -53,8 +53,22 @@ admin cannot be demoted or deactivated.
 **Mutations (`operator`+):** `POST /api/v1/queues` (work-pool settings, including
 the autoscaling envelope).
 
-**Unauthenticated:** `GET /api/v1/health` and `GET /metrics` (Prometheus
-scrapers carry no credential).
+**Unauthenticated:** `GET /api/v1/health`, `GET /metrics` (Prometheus scrapers
+carry no credential), `GET /api/v1/auth/config`, `POST /api/v1/auth/reset` (needs
+a valid one-time token), and `GET /api/v1/auth/oidc/{login,callback}` when OIDC
+is configured.
+
+**SSO.** `PRIMEFLOW_OIDC_ISSUER` + `_CLIENT_ID` (+ `_CLIENT_SECRET`) enable an
+Authorization-Code + PKCE flow. The first SSO login JIT-provisions a user with
+`auth_provider = "oidc"`; its role is `_ROLE_MAP[claim]` on `_ROLE_CLAIM`, else
+`_DEFAULT_ROLE` (`viewer`). On later logins the role re-syncs from the IdP for
+`oidc` accounts, but the last active admin is never demoted. Local
+(password) accounts are untouched by SSO.
+
+**Password reset.** Admin-only `POST /api/v1/users/{id}/reset-link` returns a
+one-time URL (`/reset.html?token=…`, TTL `PRIMEFLOW_RESET_TTL`, default 1h) for a
+`local` account; `POST /api/v1/auth/reset` `{token, password}` consumes it and
+revokes the user's sessions. SSO accounts have no password to reset.
 
 ---
 

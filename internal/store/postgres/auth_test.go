@@ -15,10 +15,63 @@ import (
 func resetAuth(t *testing.T, st *postgres.Store) {
 	t.Helper()
 	if _, err := st.DB().ExecContext(context.Background(),
-		`TRUNCATE pf_api_key_events, pf_api_keys, pf_sessions, pf_users RESTART IDENTITY CASCADE;
+		`TRUNCATE pf_api_key_events, pf_api_keys, pf_sessions, pf_password_resets, pf_users RESTART IDENTITY CASCADE;
 		 UPDATE pf_settings SET value = '{"enabled": false, "default_rate_limit_per_min": 600}'
 		 WHERE key = 'external_api';`); err != nil {
 		t.Fatalf("reset auth tables: %v", err)
+	}
+}
+
+func TestPasswordResetTokens(t *testing.T) {
+	st := newStore(t)
+	resetAuth(t, st)
+	ctx := context.Background()
+
+	u, err := st.CreateUser(ctx, store.UserInput{
+		ID: uuid.NewString(), Email: "reset@x", PasswordHash: "h", Role: "operator", Active: true,
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if u.AuthProvider != "local" {
+		t.Fatalf("default auth_provider = %q, want local", u.AuthProvider)
+	}
+
+	tok, expires, err := st.CreatePasswordReset(ctx, u.ID, time.Hour)
+	if err != nil || tok == "" || !expires.After(time.Now()) {
+		t.Fatalf("CreatePasswordReset: tok=%q exp=%v err=%v", tok, expires, err)
+	}
+
+	// Consume once → returns the user id.
+	got, err := st.ConsumePasswordReset(ctx, tok)
+	if err != nil || got != u.ID {
+		t.Fatalf("ConsumePasswordReset: got=%q err=%v", got, err)
+	}
+	// Second use → gone.
+	if _, err := st.ConsumePasswordReset(ctx, tok); err != store.ErrNotFound {
+		t.Fatalf("token must be single-use, got %v", err)
+	}
+	// Unknown token → not found.
+	if _, err := st.ConsumePasswordReset(ctx, "nope"); err != store.ErrNotFound {
+		t.Fatalf("unknown token: %v", err)
+	}
+
+	// Expired token is rejected and swept.
+	old, _, _ := st.CreatePasswordReset(ctx, u.ID, -time.Minute)
+	if _, err := st.ConsumePasswordReset(ctx, old); err != store.ErrNotFound {
+		t.Fatalf("expired token consumed: %v", err)
+	}
+	if n, err := st.DeleteExpiredPasswordResets(ctx, time.Now().UTC()); err != nil || n < 1 {
+		t.Fatalf("DeleteExpiredPasswordResets: n=%d err=%v", n, err)
+	}
+
+	// A JIT-provisioned SSO user round-trips its provider.
+	sso, err := st.CreateUser(ctx, store.UserInput{
+		ID: uuid.NewString(), Email: "sso@x", PasswordHash: "unusable", Role: "viewer",
+		Active: true, AuthProvider: "oidc",
+	})
+	if err != nil || sso.AuthProvider != "oidc" {
+		t.Fatalf("oidc user: %+v err=%v", sso, err)
 	}
 }
 

@@ -186,15 +186,18 @@ func (s *Store) ListFlows(ctx context.Context) ([]core.Flow, error) {
 
 const workQueueCols = `name, description, concurrency_limit, paused,
 	min_workers, max_workers, target_ready_per_worker, owner, pool_type,
+	push_endpoint, push_secret,
 	created_at, updated_at`
 
 func scanWorkQueue(sc interface{ Scan(...any) error }) (*core.WorkQueue, error) {
 	var q core.WorkQueue
 	if err := sc.Scan(&q.Name, &q.Description, &q.ConcurrencyLimit, &q.Paused,
 		&q.MinWorkers, &q.MaxWorkers, &q.TargetReadyPerWorker, &q.Owner, &q.PoolType,
+		&q.PushEndpoint, &q.PushSecret,
 		&q.CreatedAt, &q.UpdatedAt); err != nil {
 		return nil, err
 	}
+	q.HasPushSecret = q.PushSecret != ""
 	return &q, nil
 }
 
@@ -209,8 +212,8 @@ func (s *Store) UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error {
 	const stmt = `
 INSERT INTO pf_work_queues
   (name, description, concurrency_limit, paused, min_workers, max_workers,
-   target_ready_per_worker, owner, pool_type)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+   target_ready_per_worker, owner, pool_type, push_endpoint, push_secret)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 ON CONFLICT (name) DO UPDATE
    SET description             = EXCLUDED.description,
        concurrency_limit       = EXCLUDED.concurrency_limit,
@@ -220,11 +223,17 @@ ON CONFLICT (name) DO UPDATE
        target_ready_per_worker = EXCLUDED.target_ready_per_worker,
        owner                   = EXCLUDED.owner,
        pool_type               = EXCLUDED.pool_type,
+       push_endpoint           = EXCLUDED.push_endpoint,
+       -- keep the stored secret when the caller sends an empty one
+       push_secret             = COALESCE(NULLIF(EXCLUDED.push_secret, ''), pf_work_queues.push_secret),
        updated_at              = now()
-RETURNING created_at, updated_at`
-	return mapErr(s.db.QueryRowContext(ctx, stmt, q.Name, q.Description, q.ConcurrencyLimit,
-		q.Paused, q.MinWorkers, q.MaxWorkers, q.TargetReadyPerWorker, q.Owner, q.PoolType).
-		Scan(&q.CreatedAt, &q.UpdatedAt))
+RETURNING created_at, updated_at, push_secret`
+	err := s.db.QueryRowContext(ctx, stmt, q.Name, q.Description, q.ConcurrencyLimit,
+		q.Paused, q.MinWorkers, q.MaxWorkers, q.TargetReadyPerWorker, q.Owner, q.PoolType,
+		q.PushEndpoint, q.PushSecret).
+		Scan(&q.CreatedAt, &q.UpdatedAt, &q.PushSecret)
+	q.HasPushSecret = q.PushSecret != ""
+	return mapErr(err)
 }
 
 // GetWorkQueue loads one queue by name.
@@ -271,6 +280,7 @@ func (s *Store) QueueStats(ctx context.Context) ([]store.QueueStat, error) {
 	const stmt = `
 SELECT q.name, q.description, q.concurrency_limit, q.paused,
        q.min_workers, q.max_workers, q.target_ready_per_worker, q.owner, q.pool_type,
+       q.push_endpoint, (q.push_secret <> '') AS has_push_secret,
        q.created_at, q.updated_at,
        COALESCE(c.scheduled,0), COALESCE(c.ready,0), COALESCE(c.running,0), COALESCE(c.failed,0)
 FROM pf_work_queues q
@@ -293,6 +303,7 @@ ORDER BY q.name`
 		var st store.QueueStat
 		if err := rows.Scan(&st.Name, &st.Description, &st.ConcurrencyLimit, &st.Paused,
 			&st.MinWorkers, &st.MaxWorkers, &st.TargetReadyPerWorker, &st.Owner, &st.PoolType,
+			&st.PushEndpoint, &st.HasPushSecret,
 			&st.CreatedAt, &st.UpdatedAt,
 			&st.Scheduled, &st.Ready, &st.Running, &st.Failed24h); err != nil {
 			return nil, err

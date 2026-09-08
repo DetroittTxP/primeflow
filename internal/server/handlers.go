@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/primex/primeflow/internal/bus"
@@ -589,6 +590,8 @@ func (s *Server) upsertQueue(w http.ResponseWriter, r *http.Request) {
 		TargetReadyPerWorker *int    `json:"target_ready_per_worker,omitempty"`
 		Owner                *string `json:"owner,omitempty"`
 		PoolType             *string `json:"pool_type,omitempty"`
+		PushEndpoint         *string `json:"push_endpoint,omitempty"`
+		PushSecret           *string `json:"push_secret,omitempty"` // write-only; "" keeps the stored one
 		ClearMaxWorkers      bool    `json:"clear_max_workers,omitempty"`
 	}
 	if err := decode(r, &b); err != nil {
@@ -637,14 +640,25 @@ func (s *Server) upsertQueue(w http.ResponseWriter, r *http.Request) {
 		}
 		q.PoolType = *b.PoolType
 	}
+	if b.PushEndpoint != nil {
+		q.PushEndpoint = strings.TrimSpace(*b.PushEndpoint)
+	}
+	if b.PushSecret != nil {
+		q.PushSecret = *b.PushSecret // "" => store keeps the existing secret
+	}
 	if q.MinWorkers < 0 || (q.MaxWorkers != nil && *q.MaxWorkers < q.MinWorkers) {
 		writeErr(w, http.StatusBadRequest, errors.New("min_workers must be >= 0 and <= max_workers"))
+		return
+	}
+	if q.PoolType == "push" && q.PushEndpoint == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("a push pool needs a push_endpoint"))
 		return
 	}
 	if err := s.store.UpsertWorkQueue(r.Context(), q); err != nil {
 		fail(w, err)
 		return
 	}
+	q.PushSecret = "" // never echo the secret
 	writeJSON(w, http.StatusOK, q)
 }
 

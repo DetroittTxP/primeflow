@@ -35,6 +35,8 @@ import (
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/events"
 	"github.com/primex/primeflow/internal/metrics"
+	"github.com/primex/primeflow/internal/oidcauth"
+	"github.com/primex/primeflow/internal/ratelimit"
 	"github.com/primex/primeflow/internal/store"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -69,6 +71,19 @@ type Config struct {
 
 	// Metrics, when non-nil, enables the /metrics endpoint and HTTP RED series.
 	Metrics *metrics.Metrics
+
+	// LoginThrottle / KeyRateLimiter override the in-process defaults with a
+	// shared (Redis-backed) implementation. Nil falls back to per-replica limits.
+	LoginThrottle  ratelimit.Throttle
+	KeyRateLimiter ratelimit.Limiter
+
+	// OIDC, when non-nil, enables "Sign in with SSO". OIDCRedirectURL may be
+	// blank to derive it from each request. ResetTTL bounds admin-issued
+	// password-reset links (default 1h).
+	OIDC            *oidcauth.Provider
+	OIDCRedirectURL string
+	OIDCLabel       string
+	ResetTTL        time.Duration
 }
 
 // Server holds the API dependencies.
@@ -79,8 +94,8 @@ type Server struct {
 	log    *slog.Logger
 	cfg    Config
 
-	loginThrottle *authn.Throttle
-	rateLimiter   *apiauth.RateLimiter
+	loginThrottle ratelimit.Throttle
+	rateLimiter   ratelimit.Limiter
 }
 
 // New builds a server.
@@ -94,10 +109,18 @@ func New(s store.Store, b bus.Bus, em *events.Emitter, log *slog.Logger, cfg Con
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = DefaultSessionTTL
 	}
+	lt := cfg.LoginThrottle
+	if lt == nil {
+		lt = authn.NewThrottle()
+	}
+	rl := cfg.KeyRateLimiter
+	if rl == nil {
+		rl = apiauth.NewRateLimiter()
+	}
 	return &Server{
 		store: s, bus: b, events: em, log: log, cfg: cfg,
-		loginThrottle: authn.NewThrottle(),
-		rateLimiter:   apiauth.NewRateLimiter(),
+		loginThrottle: lt,
+		rateLimiter:   rl,
 	}
 }
 
@@ -109,6 +132,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
+	mux.HandleFunc("GET /api/v1/auth/config", s.authConfig)
+	mux.HandleFunc("POST /api/v1/auth/reset", s.resetPassword)
+	if s.cfg.OIDC != nil {
+		mux.HandleFunc("GET /api/v1/auth/oidc/login", s.oidcLogin)
+		mux.HandleFunc("GET /api/v1/auth/oidc/callback", s.oidcCallback)
+	}
 
 	// --- health & catalogue ---
 	mux.HandleFunc("GET /api/v1/health", s.health)
@@ -167,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/users", s.createUser)
 	mux.HandleFunc("PATCH /api/v1/users/{id}", s.updateUser)
 	mux.HandleFunc("DELETE /api/v1/users/{id}", s.deleteUser)
+	mux.HandleFunc("POST /api/v1/users/{id}/reset-link", s.createResetLink)
 
 	// --- admin: External API settings & keys ---
 	mux.HandleFunc("GET /api/v1/settings/external-api", s.getExternalAPISettings)
@@ -307,7 +337,13 @@ func openOperatorPath(method, path string) bool {
 		return true
 	case path == "/api/v1/auth/logout" && method == http.MethodPost:
 		return true
-	case path == "/login.html" || path == "/favicon.ico":
+	case path == "/api/v1/auth/config" && method == http.MethodGet:
+		return true
+	case path == "/api/v1/auth/reset" && method == http.MethodPost:
+		return true
+	case strings.HasPrefix(path, "/api/v1/auth/oidc/"):
+		return true
+	case path == "/login.html" || path == "/reset.html" || path == "/favicon.ico":
 		return true
 	}
 	return false

@@ -36,8 +36,26 @@ func newStore(t *testing.T) *postgres.Store {
 TRUNCATE pf_logs, pf_artifacts, pf_task_runs, pf_flow_runs, pf_events,
          pf_automations, pf_deployments, pf_workers, pf_leader, pf_flows RESTART IDENTITY CASCADE;
 DELETE FROM pf_work_queues WHERE name <> 'default';
-UPDATE pf_work_queues SET paused = false, concurrency_limit = NULL;`); err != nil {
+UPDATE pf_work_queues SET paused = false, concurrency_limit = NULL, push_endpoint = '', push_secret = '';`); err != nil {
 		t.Fatalf("reset: %v", err)
+	}
+	// A prior test may have dropped the legacy pf_logs_p0 partition (which covers
+	// the recent past). Guarantee a wide window so tests can write logs at
+	// now±months; overlaps with surviving partitions are ignored.
+	if _, err := st.DB().ExecContext(ctx, `
+DO $$
+DECLARE lo date;
+BEGIN
+  FOR i IN -3..3 LOOP
+    lo := (date_trunc('month', now()) + make_interval(months => i))::date;
+    BEGIN
+      EXECUTE format('CREATE TABLE IF NOT EXISTS pf_logs_%s PARTITION OF pf_logs FOR VALUES FROM (%L) TO (%L)',
+        to_char(lo,'YYYY_MM'), lo, (lo + interval '1 month')::date);
+    EXCEPTION WHEN others THEN NULL; -- overlaps an existing partition
+    END;
+  END LOOP;
+END $$;`); err != nil {
+		t.Fatalf("ensure log partitions: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st

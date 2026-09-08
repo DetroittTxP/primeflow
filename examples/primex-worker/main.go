@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -316,7 +317,17 @@ func main() {
 	if os.Getenv("PRIMEFLOW_DATABASE_URL") == "" && os.Getenv("DATABASE_URL") == "" {
 		log.Fatal("set PRIMEFLOW_DATABASE_URL, e.g. postgres://primeflow:primeflow@localhost:5432/primeflow?sslmode=disable")
 	}
-	if err := primeflow.RunWorker(context.Background(), primeflow.Options{}); err != nil {
+
+	// -push (or PRIMEFLOW_PUSH=1) runs this binary as a push-pool receiver: it
+	// listens for signed dispatches on PRIMEFLOW_PUSH_ADDR instead of polling.
+	push := flag.Bool("push", os.Getenv("PRIMEFLOW_PUSH") == "1", "run as a push-pool receiver")
+	flag.Parse()
+
+	run := primeflow.RunWorker
+	if *push {
+		run = primeflow.RunPushWorker
+	}
+	if err := run(context.Background(), primeflow.Options{}); err != nil {
 		log.Fatal(err)
 	}
 }

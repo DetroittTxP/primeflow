@@ -12,9 +12,12 @@ package primeflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -29,9 +32,13 @@ import (
 	"github.com/primex/primeflow/internal/authn"
 	"github.com/primex/primeflow/internal/automations"
 	"github.com/primex/primeflow/internal/bus"
+	"github.com/primex/primeflow/internal/core"
+	"github.com/primex/primeflow/internal/engine"
 	"github.com/primex/primeflow/internal/events"
 	"github.com/primex/primeflow/internal/metrics"
+	"github.com/primex/primeflow/internal/oidcauth"
 	"github.com/primex/primeflow/internal/otelinit"
+	"github.com/primex/primeflow/internal/ratelimit"
 	"github.com/primex/primeflow/internal/scheduler"
 	"github.com/primex/primeflow/internal/server"
 	"github.com/primex/primeflow/internal/store"
@@ -74,6 +81,20 @@ type Options struct {
 	AdminEmail    string
 	AdminPassword string
 
+	// OIDC single sign-on. Enabled when OIDCIssuer and OIDCClientID are set.
+	// OIDCRoleMap is "claimValue=role,..." keyed on OIDCRoleClaim.
+	OIDCIssuer       string
+	OIDCClientID     string
+	OIDCClientSecret string
+	OIDCRedirectURL  string
+	OIDCScopes       string
+	OIDCDefaultRole  string
+	OIDCRoleClaim    string
+	OIDCRoleMap      string
+	OIDCLabel        string
+	// ResetTTL bounds admin-issued password-reset links (default 1h).
+	ResetTTL time.Duration
+
 	// LogRetention, when > 0, sets the pf_logs cleanup horizon on a
 	// migrate-on-start process (PRIMEFLOW_LOG_RETENTION, e.g. "720h").
 	LogRetention time.Duration
@@ -86,6 +107,11 @@ type Options struct {
 	PollInterval      time.Duration
 	MaxSubflowDepth   int
 	WorkerMetricsAddr string
+
+	// Push-worker options (RunPushWorker): the address the receiver listens on
+	// for POST /run, and the shared secret the server signs dispatches with.
+	PushAddr   string
+	PushSecret string
 
 	// Registry holds the flows this process can execute. Defaults to sdk.Default.
 	Registry *sdk.Registry
@@ -115,6 +141,20 @@ func (o *Options) applyEnv() {
 	o.TrustedProxyCIDRs = firstNonEmpty(o.TrustedProxyCIDRs, os.Getenv("PRIMEFLOW_TRUSTED_PROXY_CIDRS"))
 	o.AdminEmail = firstNonEmpty(o.AdminEmail, os.Getenv("PRIMEFLOW_ADMIN_EMAIL"))
 	o.AdminPassword = firstNonEmpty(o.AdminPassword, os.Getenv("PRIMEFLOW_ADMIN_PASSWORD"))
+	o.OIDCIssuer = firstNonEmpty(o.OIDCIssuer, os.Getenv("PRIMEFLOW_OIDC_ISSUER"))
+	o.OIDCClientID = firstNonEmpty(o.OIDCClientID, os.Getenv("PRIMEFLOW_OIDC_CLIENT_ID"))
+	o.OIDCClientSecret = firstNonEmpty(o.OIDCClientSecret, os.Getenv("PRIMEFLOW_OIDC_CLIENT_SECRET"))
+	o.OIDCRedirectURL = firstNonEmpty(o.OIDCRedirectURL, os.Getenv("PRIMEFLOW_OIDC_REDIRECT_URL"))
+	o.OIDCScopes = firstNonEmpty(o.OIDCScopes, os.Getenv("PRIMEFLOW_OIDC_SCOPES"))
+	o.OIDCDefaultRole = firstNonEmpty(o.OIDCDefaultRole, envOr("PRIMEFLOW_OIDC_DEFAULT_ROLE", "viewer"))
+	o.OIDCRoleClaim = firstNonEmpty(o.OIDCRoleClaim, os.Getenv("PRIMEFLOW_OIDC_ROLE_CLAIM"))
+	o.OIDCRoleMap = firstNonEmpty(o.OIDCRoleMap, os.Getenv("PRIMEFLOW_OIDC_ROLE_MAP"))
+	o.OIDCLabel = firstNonEmpty(o.OIDCLabel, envOr("PRIMEFLOW_OIDC_LABEL", "SSO"))
+	if o.ResetTTL == 0 {
+		if d, err := time.ParseDuration(envOr("PRIMEFLOW_RESET_TTL", "1h")); err == nil {
+			o.ResetTTL = d
+		}
+	}
 	if o.LogRetention == 0 {
 		if d, err := time.ParseDuration(os.Getenv("PRIMEFLOW_LOG_RETENTION")); err == nil {
 			o.LogRetention = d
@@ -164,6 +204,8 @@ func (o *Options) applyEnv() {
 		}
 	}
 	o.WorkerMetricsAddr = firstNonEmpty(o.WorkerMetricsAddr, envOr("PRIMEFLOW_METRICS_ADDR", ":9090"))
+	o.PushAddr = firstNonEmpty(o.PushAddr, envOr("PRIMEFLOW_PUSH_ADDR", ":8090"))
+	o.PushSecret = firstNonEmpty(o.PushSecret, os.Getenv("PRIMEFLOW_PUSH_SECRET"))
 	if o.Registry == nil {
 		o.Registry = sdk.Default
 	}
@@ -193,6 +235,11 @@ type App struct {
 	Events  *events.Emitter
 	Metrics *metrics.Metrics
 	Log     *slog.Logger
+
+	loginThrottle ratelimit.Throttle
+	keyLimiter    ratelimit.Limiter
+	rlClose       func() error
+	oidc          *oidcauth.Provider
 
 	holder       string
 	otelShutdown otelinit.ShutdownFunc
@@ -257,12 +304,42 @@ func Open(ctx context.Context, o Options) (*App, error) {
 		o.Logger.Info("tracing enabled (OTLP)")
 	}
 
+	// Rate limiting: shared via Redis when a Redis URL is set (independent of the
+	// bus choice), in-process otherwise.
+	lt, rl, rlClose := ratelimit.New(ctx, ratelimit.Config{
+		RedisURL:      o.RedisURL,
+		RedisPassword: os.Getenv("PRIMEFLOW_REDIS_PASSWORD"),
+		Logger:        o.Logger,
+	}, authn.NewThrottle(), apiauth.NewRateLimiter())
+
+	// OIDC discovery, when configured. A failure disables SSO but does not stop
+	// the server — local password login still works.
+	var oidcProvider *oidcauth.Provider
+	if o.OIDCIssuer != "" && o.OIDCClientID != "" {
+		var scopes []string
+		if o.OIDCScopes != "" {
+			scopes = strings.Fields(strings.ReplaceAll(o.OIDCScopes, ",", " "))
+		}
+		p, oerr := oidcauth.New(ctx, oidcauth.Config{
+			Issuer: o.OIDCIssuer, ClientID: o.OIDCClientID, ClientSecret: o.OIDCClientSecret,
+			RedirectURL: o.OIDCRedirectURL, Scopes: scopes, DefaultRole: o.OIDCDefaultRole,
+			RoleClaim: o.OIDCRoleClaim, RoleMap: oidcauth.ParseRoleMap(o.OIDCRoleMap),
+		})
+		if oerr != nil {
+			o.Logger.Warn("OIDC disabled: discovery failed", "issuer", o.OIDCIssuer, "err", oerr)
+		} else {
+			o.Logger.Info("OIDC single sign-on enabled", "issuer", o.OIDCIssuer)
+			oidcProvider = p
+		}
+	}
+
 	return &App{
 		Options: o, Store: st, Bus: b,
-		Events:  events.New(st, b, o.Logger),
-		Metrics: metrics.New(st),
-		Log:     o.Logger,
-		holder:  uuid.NewString(), otelShutdown: shutdown,
+		Events:        events.New(st, b, o.Logger),
+		Metrics:       metrics.New(st),
+		Log:           o.Logger,
+		loginThrottle: lt, keyLimiter: rl, rlClose: rlClose, oidc: oidcProvider,
+		holder: uuid.NewString(), otelShutdown: shutdown,
 	}, nil
 }
 
@@ -323,6 +400,9 @@ func bootstrapAdmin(ctx context.Context, st store.Store, o Options) {
 
 // Close releases resources.
 func (a *App) Close() error {
+	if a.rlClose != nil {
+		_ = a.rlClose()
+	}
 	if a.otelShutdown != nil {
 		_ = a.otelShutdown(context.Background())
 	}
@@ -360,6 +440,12 @@ func (a *App) ServeAPI(ctx context.Context) error {
 		SessionTTL:        a.Options.SessionTTL,
 		CookieSecure:      cookieSecure,
 		Metrics:           a.Metrics,
+		LoginThrottle:     a.loginThrottle,
+		KeyRateLimiter:    a.keyLimiter,
+		OIDC:              a.oidc,
+		OIDCRedirectURL:   a.Options.OIDCRedirectURL,
+		OIDCLabel:         a.Options.OIDCLabel,
+		ResetTTL:          a.Options.ResetTTL,
 	})
 	sch := scheduler.New(a.Store, a.Events, a.Log, scheduler.Config{Holder: a.holder})
 	autos := automations.New(a.Store, a.Events, a.Log, automations.Config{Holder: a.holder})
@@ -391,6 +477,133 @@ func (a *App) ServeWorker(ctx context.Context) error {
 // the PrimeX backend.
 func (a *App) ServeAll(ctx context.Context) error {
 	return runAll(ctx, a.ServeAPI, a.ServeWorker)
+}
+
+// pushHost is a stable-ish identity for this receiver's leases.
+func (a *App) pushHost() string {
+	host := a.Options.WorkerName
+	if host == "" {
+		host, _ = os.Hostname()
+		if host == "" {
+			host = "push-worker"
+		}
+	}
+	return host + "-" + uuid.NewString()[:8]
+}
+
+// RunOne claims a single scheduled run and executes it with the engine,
+// synchronously. It is the unit of work a push-pool receiver performs per
+// dispatch (and a handy entry point for embedders / tests).
+func (a *App) RunOne(ctx context.Context, runID string) error {
+	claimed, err := a.claimForPush(ctx, runID)
+	if err != nil {
+		return err
+	}
+	a.executePushRun(context.WithoutCancel(ctx), claimed)
+	return nil
+}
+
+func (a *App) claimForPush(ctx context.Context, runID string) (*core.FlowRun, error) {
+	// SCHEDULED -> PENDING under our lease. The engine emits flow-run.RUNNING
+	// when it starts, exactly as for a leased run, so we deliberately do not
+	// emit a state-change event here.
+	claimed, err := a.Store.ClaimPushRun(ctx, runID, a.pushHost(), a.Options.LeaseDuration)
+	if err != nil {
+		return nil, err // ErrConflict => already claimed by another receiver
+	}
+	return claimed, nil
+}
+
+func (a *App) executePushRun(ctx context.Context, run *core.FlowRun) {
+	lease := a.Options.LeaseDuration
+	if lease <= 0 {
+		lease = 60 * time.Second
+	}
+	// Keep the lease alive for the duration, like a pull worker's renew loop, so
+	// a long flow is not reclaimed as CRASHED while it is still running here.
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(lease / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				_ = a.Store.RenewLease(context.WithoutCancel(ctx), run.ID, *run.WorkerID, lease)
+			}
+		}
+	}()
+	defer close(done)
+
+	eng := engine.New(a.Store, a.Options.Registry, a.Events, a.Log, engine.Config{
+		WorkerID: *run.WorkerID, Metrics: a.Metrics, MaxSubflowDepth: a.Options.MaxSubflowDepth,
+	})
+	eng.Execute(ctx, run)
+}
+
+// ServePushWorker listens on Options.PushAddr for signed dispatch notifications
+// and executes each run synchronously (so a scale-to-zero platform keeps the
+// instance alive for the duration).
+func (a *App) ServePushWorker(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /run", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		if !scheduler.VerifyPushSignature(a.Options.PushSecret, r.Header.Get("X-PrimeFlow-Signature"), body) {
+			http.Error(w, "bad signature", http.StatusUnauthorized)
+			return
+		}
+		var b struct {
+			RunID string `json:"run_id"`
+		}
+		if err := json.Unmarshal(body, &b); err != nil || b.RunID == "" {
+			http.Error(w, "run_id required", http.StatusBadRequest)
+			return
+		}
+		// Claim synchronously so the dispatcher's POST returns fast, then execute
+		// in the background. A pod killed mid-flow lets the lease lapse and the
+		// run is re-dispatched / reclaimed as CRASHED — the pull-worker recovery.
+		claimed, err := a.claimForPush(r.Context(), b.RunID)
+		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				w.WriteHeader(http.StatusConflict) // already claimed elsewhere
+				return
+			}
+			a.Log.Warn("push claim failed", "run", b.RunID, "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		go a.executePushRun(context.WithoutCancel(ctx), claimed)
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	srv := &http.Server{Addr: a.Options.PushAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	a.Log.Info("push worker listening", "addr", a.Options.PushAddr,
+		"flows", a.Options.Registry.Names(), "signed", a.Options.PushSecret != "")
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// RunPushWorker is the one-call entry point for a push-pool receiver: it opens
+// the app and serves the dispatch endpoint.
+func RunPushWorker(ctx context.Context, o Options) error {
+	app, err := Open(ctx, o)
+	if err != nil {
+		return err
+	}
+	defer app.Close()
+	return app.ServePushWorker(WithSignals(ctx))
 }
 
 func runAll(ctx context.Context, fns ...func(context.Context) error) error {

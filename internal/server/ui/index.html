@@ -832,22 +832,28 @@ function runsStrip(runs) {
 async function loadQueues() {
   const [qs, ws] = await Promise.all([api('/queues'), api('/workers').catch(() => [])]);
   const online = q => ws.filter(w => w.online && (w.queues || []).includes(q)).length;
-  document.getElementById('queues').innerHTML = qs.map(q => `
-    <tr>
-      <td><strong>${esc(q.name)}</strong><div class="muted">${esc(q.description || '')} ${esc(q.pool_type && q.pool_type !== 'pull' ? '· ' + q.pool_type : '')}</div></td>
+  document.getElementById('queues').innerHTML = qs.map(q => {
+    const push = q.pool_type === 'push';
+    return `<tr>
+      <td><strong>${esc(q.name)}</strong> ${push ? '<span class="chip on">push</span>' : ''}
+        <div class="muted">${esc(q.description || '')}${push && q.push_endpoint ? ' · ' + esc(q.push_endpoint) : ''}</div></td>
       <td>${q.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
       <td>${q.concurrency_limit ?? '∞'}</td>
       <td>${q.ready}</td><td>${q.scheduled}</td><td>${q.running}</td>
-      <td>${online(q.name)}</td>
-      <td><b>${desiredWorkers(q)}</b> <span class="muted">${q.min_workers || 0}–${q.max_workers ?? '∞'}</span></td>
+      <td>${push ? '—' : online(q.name)}</td>
+      <td>${push ? '<span class="muted">dispatched</span>' : `<b>${desiredWorkers(q)}</b> <span class="muted">${q.min_workers || 0}–${q.max_workers ?? '∞'}</span>`}</td>
       <td class="muted">${esc(q.owner || '—')}</td>
       <td class="row">
         <button class="act writer-only" onclick="act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})">
           ${q.paused ? 'Resume' : 'Pause'}</button>
         <button class="act writer-only" onclick="setLimit('${esc(q.name)}', ${q.concurrency_limit ?? 'null'})">Limit…</button>
-        <button class="act writer-only" onclick='setAutoscale(${JSON.stringify(q)})'>Autoscale…</button>
+        ${push
+          ? `<button class="act writer-only" onclick='setPushEndpoint(${JSON.stringify(q)})'>Push endpoint…</button>`
+          : `<button class="act writer-only" onclick='setAutoscale(${JSON.stringify(q)})'>Autoscale…</button>
+             <button class="act writer-only" onclick="setPushEndpoint({name:'${esc(q.name)}',pool_type:'pull'})">Make push…</button>`}
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   const pick = document.getElementById('q-pick');
   const keep = pick.value;
   pick.innerHTML = qs.map(q => `<option>${esc(q.name)}</option>`).join('');
@@ -879,6 +885,17 @@ function setAutoscale(q) {
   };
   if (max.trim() === '') body.clear_max_workers = true;
   else body.max_workers = parseInt(max, 10);
+  act('/queues', { method: 'POST', body: JSON.stringify(body) });
+}
+
+function setPushEndpoint(q) {
+  if (!canWrite()) return toast('Your account is read-only', true);
+  const url = prompt('Push endpoint URL for pool "' + q.name + '"\n(the server POSTs each ready run here; blank cancels)', q.push_endpoint || '');
+  if (url === null || url.trim() === '') return;
+  const secret = prompt('Shared secret for HMAC signing (blank keeps the stored one)', '');
+  if (secret === null) return;
+  const body = { name: q.name, pool_type: 'push', push_endpoint: url.trim() };
+  if (secret.trim() !== '') body.push_secret = secret.trim();
   act('/queues', { method: 'POST', body: JSON.stringify(body) });
 }
 
@@ -1445,19 +1462,29 @@ async function keyHistory(id) {
 // --- settings: users ---------------------------------------------------------
 async function loadUsers() {
   const us = await api('/users');
-  document.getElementById('users').innerHTML = us.map(u => `
-    <tr>
-      <td><strong>${esc(u.email)}</strong></td>
+  document.getElementById('users').innerHTML = us.map(u => {
+    const sso = u.auth_provider === 'oidc';
+    return `<tr>
+      <td><strong>${esc(u.email)}</strong> ${sso ? '<span class="chip on">SSO</span>' : ''}</td>
       <td><select onchange="setUserRole('${u.id}', this.value)">
         ${['viewer', 'operator', 'admin'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
       </select></td>
       <td>${u.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">disabled</span>'}</td>
       <td>${when(u.last_login_at)}</td>
       <td class="row">
-        <button class="act" onclick="resetUserPw('${u.id}')">Reset password</button>
+        ${sso ? '' : `<button class="act" onclick="resetUserPw('${u.id}')">Reset password</button>
+        <button class="act" onclick="resetLink('${u.id}')">Reset link</button>`}
         <button class="act" onclick="setUserActive('${u.id}', ${!u.active})">${u.active ? 'Deactivate' : 'Activate'}</button>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
+}
+async function resetLink(id) {
+  try {
+    const res = await api('/users/' + id + '/reset-link', { method: 'POST' });
+    showSecret(res.url && (location.origin + res.url) || '',
+      'Password-reset link — hand it to the user. It expires ' + new Date(res.expires_at).toLocaleString() + ' and works once.');
+  } catch (e) { toast(e.message, true); }
 }
 async function createUser(ev) {
   ev.preventDefault();

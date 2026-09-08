@@ -73,6 +73,7 @@ Operator accounts (talk straight to the database, like migrate):
   primeflow user passwd -email a@x -password new
   primeflow user role   -email a@x -role operator
   primeflow user deactivate -email a@x
+  primeflow user reset-link -email a@x        print a one-time password-reset URL
 
 Admin (talks to a running server over the API):
   primeflow deploy -f deployments.json        create or update deployments
@@ -236,6 +237,22 @@ func cmdUser(ctx context.Context, args []string) error {
 		}
 		_ = st.DeleteUserSessions(ctx, u.ID)
 		fmt.Printf("%s deactivated\n", u.Email)
+		return nil
+
+	case "reset-link":
+		if *email == "" {
+			return fmt.Errorf("-email is required")
+		}
+		u, err := st.GetUserByEmail(ctx, *email)
+		if err != nil {
+			return err
+		}
+		token, expires, err := st.CreatePasswordReset(ctx, u.ID, time.Hour)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("reset link for %s (expires %s):\n  /reset.html?token=%s\n",
+			u.Email, expires.Local().Format("2006-01-02 15:04"), token)
 		return nil
 	}
 	return fmt.Errorf("unknown user subcommand %q", sub)
