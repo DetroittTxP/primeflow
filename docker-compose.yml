@@ -72,6 +72,9 @@ services:
       # PRIMEFLOW_OIDC_ROLE_CLAIM: groups
       # PRIMEFLOW_OIDC_ROLE_MAP: platform-admins=admin,ops=operator
     ports: ["${PRIMEFLOW_HTTP_PORT:-8080}:8080"]
+    # site-link is where docker-compose.sites.yml reaches the server: only the
+    # server joins it, so a simulated site has no route to Postgres, NATS or Redis.
+    networks: [default, site-link]
     depends_on:
       postgres: {condition: service_healthy}
       nats: {condition: service_healthy}
@@ -108,3 +111,6 @@ services:
 
 volumes:
   pgdata:
+
+networks:
+  site-link:
