@@ -424,6 +424,18 @@ func (s *Server) runLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, logs)
 }
 
+// runEvents is one run's own state history: what it moved through, when, and
+// which worker drove each transition. The run row only carries where it ended
+// up, so this is the only place the console can draw the path it took.
+func (s *Server) runEvents(w http.ResponseWriter, r *http.Request) {
+	evs, err := s.store.ListEventsForResource(r.Context(), "flow-run", r.PathValue("id"), intParam(r, "limit", 200))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
+}
+
 func (s *Server) runArtifacts(w http.ResponseWriter, r *http.Request) {
 	as, err := s.store.ListArtifacts(r.Context(), r.PathValue("id"))
 	if err != nil {

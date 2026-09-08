@@ -209,6 +209,10 @@ type Store interface {
 	// --- events & automations ---
 	AppendEvent(ctx context.Context, e *core.Event) error
 	ListEvents(ctx context.Context, limit int) ([]core.Event, error)
+	// ListEventsForResource returns the newest events recorded against one
+	// resource, so a detail page can show that resource's own history rather
+	// than filtering the global feed and hoping it reaches far enough back.
+	ListEventsForResource(ctx context.Context, resourceType, resourceID string, limit int) ([]core.Event, error)
 	// Stats returns time-bucketed flow-run / task-run / event activity over the
 	// window, for the console Dashboard. buckets is the desired slice count.
 	Stats(ctx context.Context, window time.Duration, buckets int) (core.Stats, error)

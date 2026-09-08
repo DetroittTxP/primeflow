@@ -578,6 +578,33 @@ SELECT id, seq, event, resource_type, resource_id, payload, occurred
 	return out, rows.Err()
 }
 
+// ListEventsForResource returns one resource's own events, newest first.
+// pf_events_resource_idx covers the lookup, so a run's history costs an index
+// range scan rather than a walk back through the global feed.
+func (s *Store) ListEventsForResource(ctx context.Context, resourceType, resourceID string, limit int) ([]core.Event, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, seq, event, resource_type, resource_id, payload, occurred
+  FROM pf_events WHERE resource_type = $1 AND resource_id = $2
+ ORDER BY seq DESC LIMIT $3`, resourceType, resourceID, limit)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []core.Event{}
+	for rows.Next() {
+		var e core.Event
+		if err := rows.Scan(&e.ID, &e.Seq, &e.Name, &e.ResourceType, &e.ResourceID,
+			scanJSON(&e.Payload), &e.Occurred); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListEventsAfter reads events with seq greater than afterSeq, oldest first.
 func (s *Store) ListEventsAfter(ctx context.Context, afterSeq int64, limit int) ([]core.Event, error) {
 	if limit <= 0 || limit > 1000 {

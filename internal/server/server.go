@@ -172,6 +172,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/runs/{id}/logs", s.runLogs)
 	mux.HandleFunc("GET /api/v1/runs/{id}/artifacts", s.runArtifacts)
 	mux.HandleFunc("GET /api/v1/runs/{id}/children", s.runChildren)
+	mux.HandleFunc("GET /api/v1/runs/{id}/events", s.runEvents)
 	mux.HandleFunc("POST /api/v1/runs/{id}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/retry", s.retryRun)
 	mux.HandleFunc("POST /api/v1/runs/{id}/reschedule", s.rescheduleRun)
