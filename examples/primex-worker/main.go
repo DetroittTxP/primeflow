@@ -287,6 +287,43 @@ func provisionFleet(c *sdk.Context) (any, error) {
 	return map[string]any{"vm_ids": built}, nil
 }
 
+// ----------------------------------------------------------- add-numbers ---
+
+// AddParams is what an operator supplies to the add-numbers flow.
+type AddParams struct {
+	A int `json:"a"`
+	B int `json:"b"`
+}
+
+// AddResult is the run result. Like every checkpointed value it has to
+// round-trip through JSON.
+type AddResult struct {
+	A   int `json:"a"`
+	B   int `json:"b"`
+	Sum int `json:"sum"`
+}
+
+// addNumbers is the smallest useful flow: no external calls, nothing to undo.
+// The arithmetic is wrapped in a Task only so it appears as its own lane on the
+// console timeline -- a pure computation needs no checkpoint of its own.
+func addNumbers(c *sdk.Context) (any, error) {
+	p, err := sdk.Params[AddParams](c)
+	if err != nil {
+		return nil, err
+	}
+	c.Info("adding", "a", p.A, "b", p.B)
+
+	sum, err := sdk.Task(c, "add", func(c *sdk.Context) (int, error) {
+		return p.A + p.B, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	_ = c.Markdown("result", fmt.Sprintf("`%d + %d` = **%d**", p.A, p.B, sum))
+	return AddResult{A: p.A, B: p.B, Sum: sum}, nil
+}
+
 // ------------------------------------------------------------------ main ---
 
 func main() {
@@ -312,6 +349,14 @@ func main() {
 		sdk.Tags("primex", "vcd", "fleet"),
 		sdk.ParamsSchema(FleetParams{OrgName: "acme", Template: "ubuntu-22.04", Count: 3}),
 		sdk.Timeout(time.Hour),
+	)
+
+	sdk.Flow("add-numbers", addNumbers,
+		sdk.Description("Add two numbers -- the smallest possible flow"),
+		sdk.Tags("demo"),
+		sdk.ParamsSchema(AddParams{A: 2, B: 3}),
+		sdk.Retries(1),
+		sdk.Timeout(time.Minute),
 	)
 
 	if os.Getenv("PRIMEFLOW_DATABASE_URL") == "" && os.Getenv("DATABASE_URL") == "" {

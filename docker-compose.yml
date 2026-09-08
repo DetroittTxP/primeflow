@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: primeflow
       POSTGRES_PASSWORD: primeflow
       POSTGRES_DB: primeflow
-    ports: ["5432:5432"]
+    ports: ["${PRIMEFLOW_PG_PORT:-5432}:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U primeflow"]
@@ -23,7 +23,7 @@ services:
   nats:
     image: nats:2-alpine
     command: ["-m", "8222"]           # monitoring endpoint on :8222
-    ports: ["4222:4222", "8222:8222"]
+    ports: ["${PRIMEFLOW_NATS_PORT:-4222}:4222", "${PRIMEFLOW_NATS_MON_PORT:-8222}:8222"]
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
       interval: 5s
@@ -34,7 +34,7 @@ services:
     image: redis:7-alpine
     # Persistence is off on purpose: the bus carries hints, not state.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
-    ports: ["6379:6379"]
+    ports: ["${PRIMEFLOW_REDIS_PORT:-6379}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -71,7 +71,7 @@ services:
       # PRIMEFLOW_OIDC_CLIENT_SECRET: xxx
       # PRIMEFLOW_OIDC_ROLE_CLAIM: groups
       # PRIMEFLOW_OIDC_ROLE_MAP: platform-admins=admin,ops=operator
-    ports: ["8080:8080"]
+    ports: ["${PRIMEFLOW_HTTP_PORT:-8080}:8080"]
     depends_on:
       postgres: {condition: service_healthy}
       nats: {condition: service_healthy}

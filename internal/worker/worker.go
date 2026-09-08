@@ -288,7 +288,10 @@ func (w *Worker) publishCatalogue(ctx context.Context) {
 		}
 	}
 	for _, q := range w.cfg.Queues {
-		if err := w.store.UpsertWorkQueue(ctx, &core.WorkQueue{Name: q}); err != nil {
+		// Ensure, never upsert: a worker knows only the lane's name, so writing
+		// a full queue definition here would wipe the operator's concurrency
+		// limit, pause switch and autoscaling envelope on every restart.
+		if err := w.store.EnsureWorkQueue(ctx, q); err != nil {
 			w.log.Debug("ensure queue failed", "queue", q, "err", err)
 		}
 	}

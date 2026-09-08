@@ -201,7 +201,24 @@ func scanWorkQueue(sc interface{ Scan(...any) error }) (*core.WorkQueue, error) 
 	return &q, nil
 }
 
-// UpsertWorkQueue creates or updates a queue (a.k.a. work pool) definition.
+// ensureWorkQueueStmt creates a queue row if it is missing and leaves an
+// existing one untouched. Anything that merely needs the lane to exist -- a
+// deployment referencing it, a worker declaring what it polls -- must use this
+// rather than UpsertWorkQueue, whose ON CONFLICT overwrites every column and
+// would otherwise reset an operator's concurrency limit, pause switch and
+// autoscaling envelope on every worker restart.
+const ensureWorkQueueStmt = `INSERT INTO pf_work_queues (name) VALUES ($1) ON CONFLICT DO NOTHING`
+
+// EnsureWorkQueue creates the queue if it does not exist, preserving the
+// configuration of one that does.
+func (s *Store) EnsureWorkQueue(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, ensureWorkQueueStmt, name)
+	return mapErr(err)
+}
+
+// UpsertWorkQueue replaces a queue definition in full: every column is written
+// from q, so callers must send the complete desired state. To create a lane
+// without disturbing an existing one, use EnsureWorkQueue.
 func (s *Store) UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error {
 	if q.TargetReadyPerWorker <= 0 {
 		q.TargetReadyPerWorker = 5
@@ -325,8 +342,7 @@ func (s *Store) UpsertDeployment(ctx context.Context, d *core.Deployment) error 
 	}
 	// A deployment may only reference an existing queue; create it lazily so
 	// declaring infrastructure in code does not need a second API call.
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO pf_work_queues (name) VALUES ($1) ON CONFLICT DO NOTHING`, d.WorkQueue); err != nil {
+	if _, err := s.db.ExecContext(ctx, ensureWorkQueueStmt, d.WorkQueue); err != nil {
 		return mapErr(err)
 	}
 	const stmt = `

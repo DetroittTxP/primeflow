@@ -80,6 +80,10 @@ type Store interface {
 	ListFlows(ctx context.Context) ([]core.Flow, error)
 
 	UpsertWorkQueue(ctx context.Context, q *core.WorkQueue) error
+	// EnsureWorkQueue creates the queue if it is missing and leaves an existing
+	// one exactly as it is. Callers that only need the lane to exist must use
+	// this, not UpsertWorkQueue.
+	EnsureWorkQueue(ctx context.Context, name string) error
 	GetWorkQueue(ctx context.Context, name string) (*core.WorkQueue, error)
 	ListWorkQueues(ctx context.Context) ([]core.WorkQueue, error)
 	SetQueuePaused(ctx context.Context, name string, paused bool) error

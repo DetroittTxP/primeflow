@@ -198,6 +198,62 @@ func TestQueueConcurrencyLimit(t *testing.T) {
 	}
 }
 
+// A worker knows only the names of the lanes it polls, so the call it makes on
+// start-up must never write a queue definition: an Upsert with a bare name
+// would reset the operator's concurrency limit, pause switch and autoscaling
+// envelope every time a worker restarted.
+func TestEnsureWorkQueuePreservesConfiguration(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	limit, max := 3, 9
+	want := &core.WorkQueue{
+		Name: "configured-pool", Description: "owned by the math team",
+		ConcurrencyLimit: &limit, Paused: true,
+		MinWorkers: 2, MaxWorkers: &max, TargetReadyPerWorker: 7,
+		Owner: "math-team", PoolType: "pull",
+	}
+	if err := st.UpsertWorkQueue(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a worker does when it boots watching this lane.
+	if err := st.EnsureWorkQueue(ctx, "configured-pool"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetWorkQueue(ctx, "configured-pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConcurrencyLimit == nil || *got.ConcurrencyLimit != limit {
+		t.Errorf("concurrency limit lost: got %v, want %d", got.ConcurrencyLimit, limit)
+	}
+	if !got.Paused {
+		t.Error("pause switch reset: a lane an operator stopped would restart itself")
+	}
+	if got.MinWorkers != 2 || got.MaxWorkers == nil || *got.MaxWorkers != max {
+		t.Errorf("autoscaling envelope lost: min %d, max %v", got.MinWorkers, got.MaxWorkers)
+	}
+	if got.TargetReadyPerWorker != 7 {
+		t.Errorf("target_ready_per_worker lost: got %d, want 7", got.TargetReadyPerWorker)
+	}
+	if got.Owner != "math-team" || got.Description != "owned by the math team" {
+		t.Errorf("attribution lost: owner %q, description %q", got.Owner, got.Description)
+	}
+
+	// It still creates a lane that does not exist yet.
+	if err := st.EnsureWorkQueue(ctx, "brand-new-pool"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := st.GetWorkQueue(ctx, "brand-new-pool")
+	if err != nil {
+		t.Fatalf("EnsureWorkQueue did not create the lane: %v", err)
+	}
+	if fresh.Paused || fresh.ConcurrencyLimit != nil {
+		t.Errorf("unexpected defaults on a fresh lane: %+v", fresh)
+	}
+}
+
 func TestPausedQueueDispatchesNothing(t *testing.T) {
 	st := newStore(t)
 	ctx := context.Background()
