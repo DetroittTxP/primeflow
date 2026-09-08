@@ -547,12 +547,20 @@ func (s *Store) leaseFromQueue(ctx context.Context, workerID, queue string, max 
 // dispatchStmt claims ready runs from one lane. The concurrency headroom is
 // still computed here; leaseFromQueue is what guarantees only one dispatcher
 // per capped lane evaluates it at a time.
+//
+// "active" is every state that still occupies a worker slot, which is what
+// core.StateType.IsFinished draws the line at. CANCELLING belongs in it:
+// cancellation asks a run to wind down, it does not stop it, and the run keeps
+// renewing its lease until its own code returns. Counting only RUNNING and
+// PENDING would let a lane capped at two admit two more while two cancelled
+// runs were still talking to the endpoint the cap exists to protect.
 var dispatchStmt = `
 WITH cap AS (
     SELECT q.paused,
            q.concurrency_limit,
            (SELECT count(*) FROM pf_flow_runs a
-             WHERE a.work_queue = q.name AND a.state IN ('RUNNING','PENDING')) AS active
+             WHERE a.work_queue = q.name
+               AND a.state IN ('RUNNING','PENDING','CANCELLING')) AS active
       FROM pf_work_queues q
      WHERE q.name = $2
 ),

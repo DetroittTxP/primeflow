@@ -305,7 +305,9 @@ LEFT JOIN (
     SELECT work_queue,
            count(*) FILTER (WHERE state='SCHEDULED')                          AS scheduled,
            count(*) FILTER (WHERE state='SCHEDULED' AND scheduled_at<=now())  AS ready,
-           count(*) FILTER (WHERE state IN ('RUNNING','PENDING'))             AS running,
+           -- Same slot accounting the dispatcher uses: a CANCELLING run is
+           -- winding down, not gone, and still holds its worker.
+           count(*) FILTER (WHERE state IN ('RUNNING','PENDING','CANCELLING')) AS running,
            count(*) FILTER (WHERE state='FAILED' AND updated_at>now()-interval '24 hours') AS failed
     FROM pf_flow_runs GROUP BY work_queue
 ) c ON c.work_queue = q.name

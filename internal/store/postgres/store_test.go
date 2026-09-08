@@ -752,3 +752,86 @@ func TestEventCursor(t *testing.T) {
 		t.Fatalf("wildcard count wrong: %d (%v)", n, err)
 	}
 }
+
+// TestConcurrencyLimitCountsCancellingRuns is the lane cap under cancellation.
+//
+// Cancelling a run asks it to wind down; it does not stop it. The run keeps its
+// worker and keeps renewing its lease until its own code returns, so it still
+// occupies one of the lane's slots. Counting only RUNNING and PENDING let a lane
+// capped at two admit two more, putting four flows at once against the endpoint
+// the cap exists to protect.
+func TestConcurrencyLimitCountsCancellingRuns(t *testing.T) {
+	st := newStore(t)
+	ctx := context.Background()
+	limit := 2
+	if err := st.UpsertWorkQueue(ctx, &core.WorkQueue{Name: "vcd", ConcurrencyLimit: &limit}); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 6; i++ {
+		mkRun(t, st, "vcd", 50, past)
+	}
+
+	held, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+		WorkerID: "w1", Queues: []string{"vcd"}, Max: 10, LeaseFor: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 2 {
+		t.Fatalf("setup: leased %d, want 2", len(held))
+	}
+
+	ids := make([]string, 0, len(held))
+	for _, r := range held {
+		ids = append(ids, r.ID)
+		if _, err := st.SetFlowRunState(ctx, r.ID,
+			core.NewState(core.StateRunning, "Running", ""), store.StateOpts{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.SetFlowRunState(ctx, r.ID,
+			core.NewState(core.StateCancelling, "Cancelling", "operator asked to stop"),
+			store.StateOpts{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Both are winding down but still leased: they have not released their slots.
+	renewed, _, err := st.RenewLeases(ctx, "w1", ids, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(renewed) != 2 {
+		t.Fatalf("cancelling runs stopped renewing (%d/2); this test no longer models a held slot", len(renewed))
+	}
+
+	extra, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+		WorkerID: "w2", Queues: []string{"vcd"}, Max: 10, LeaseFor: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(extra) != 0 {
+		t.Errorf("lane capped at %d admitted %d more while %d cancelling runs held their slots: %d concurrent",
+			limit, len(extra), len(renewed), len(renewed)+len(extra))
+	}
+
+	// Once they actually land, the slots come back.
+	for _, id := range ids {
+		ended := time.Now().UTC()
+		if _, err := st.SetFlowRunState(ctx, id,
+			core.NewState(core.StateCancelled, "Cancelled", ""),
+			store.StateOpts{EndedAt: &ended, ClearLease: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	freed, err := st.LeaseFlowRuns(ctx, store.LeaseRequest{
+		WorkerID: "w2", Queues: []string{"vcd"}, Max: 10, LeaseFor: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(freed) != 2 {
+		t.Errorf("after the cancelled runs settled the lane leased %d, want %d", len(freed), limit)
+	}
+}
