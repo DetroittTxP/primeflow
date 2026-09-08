@@ -16,7 +16,7 @@
 # sites/tls.env sets COMPOSE_PROFILES=tls and SITE_API_URL=https://edge; nothing else changes.
 #
 # Topology
-#   site-a / site-b / site-c   primex-worker in remote mode: an API URL, a pool-scoped key,
+#   site-a … site-d           primex-worker in remote mode: an API URL, a pool-scoped key,
 #                              no DSN, no bus. Attached to `site-link` only.
 #   site-link                  the network docker-compose.yml puts the server on for exactly
 #                              this purpose. postgres, nats and redis are not on it.
@@ -96,6 +96,10 @@ services:
   site-c:
     <<: *site-worker
     env_file: [./sites/site-c.env]
+
+  site-d:
+    <<: *site-worker
+    env_file: [./sites/site-d.env]
 
 networks:
   site-link:
