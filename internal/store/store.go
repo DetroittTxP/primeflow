@@ -302,13 +302,18 @@ type AuthStore interface {
 
 // StateOpts carries the side effects that accompany a state change.
 type StateOpts struct {
-	WorkerID   *string
-	Result     json.RawMessage
-	StartedAt  *time.Time
-	EndedAt    *time.Time
-	ScheduleAt *time.Time // for SCHEDULED transitions (retry backoff, durable sleep)
-	BumpRun    bool       // increment run_count
-	ClearLease bool
+	WorkerID *string
+	// RequireWorkerID applies the change only while this worker still holds the
+	// run, so a worker whose lease was reclaimed cannot finish work another one
+	// has taken over. Nil imposes no such condition, which is what the janitor,
+	// the scheduler and operator actions want.
+	RequireWorkerID *string
+	Result          json.RawMessage
+	StartedAt       *time.Time
+	EndedAt         *time.Time
+	ScheduleAt      *time.Time // for SCHEDULED transitions (retry backoff, durable sleep)
+	BumpRun         bool       // increment run_count
+	ClearLease      bool
 	// Force skips the transition rule table. Reserved for the janitor.
 	Force bool
 }

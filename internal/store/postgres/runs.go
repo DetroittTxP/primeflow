@@ -366,6 +366,13 @@ func (s *Store) SetFlowRunState(ctx context.Context, id string, st core.State, o
 	if err != nil {
 		return nil, err
 	}
+	// Ownership is checked before anything else: a caller that no longer holds
+	// the run has nothing to say about it, not even an idempotent repeat.
+	if opts.RequireWorkerID != nil {
+		if cur.WorkerID == nil || *cur.WorkerID != *opts.RequireWorkerID {
+			return nil, fmt.Errorf("%w: run %s is not held by %s", store.ErrConflict, id, *opts.RequireWorkerID)
+		}
+	}
 	if cur.State == st.Type && st.Type != core.StateScheduled {
 		return cur, nil // idempotent no-op
 	}
@@ -409,8 +416,15 @@ func (s *Store) SetFlowRunState(ctx context.Context, id string, st core.State, o
 		set = append(set, "ended_at = NULL")
 	}
 
+	where := "id = $1 AND state = $2"
+	if opts.RequireWorkerID != nil {
+		// Re-checked in the write itself, so the lease cannot be reclaimed in
+		// the window between the read above and this update.
+		args = append(args, *opts.RequireWorkerID)
+		where += fmt.Sprintf(" AND worker_id = $%d", len(args))
+	}
 	q := `UPDATE pf_flow_runs SET ` + strings.Join(set, ", ") +
-		` WHERE id = $1 AND state = $2 RETURNING ` + flowRunCols
+		` WHERE ` + where + ` RETURNING ` + flowRunCols
 	row := s.db.QueryRowContext(ctx, q, args...)
 	r, err := scanFlowRun(row)
 	if errors.Is(err, sql.ErrNoRows) {

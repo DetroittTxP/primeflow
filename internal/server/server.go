@@ -198,6 +198,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/users/{id}", s.deleteUser)
 	mux.HandleFunc("POST /api/v1/users/{id}/reset-link", s.createResetLink)
 
+	// --- worker API: the execution path over HTTP (see worker.go) ---
+	s.registerWorkerRoutes(mux)
+
 	// --- admin: External API settings & keys ---
 	mux.HandleFunc("GET /api/v1/settings/external-api", s.getExternalAPISettings)
 	mux.HandleFunc("PUT /api/v1/settings/external-api", s.putExternalAPISettings)
