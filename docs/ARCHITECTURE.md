@@ -265,6 +265,56 @@ happens next, not replay a month of history as if it were live.
 
 ---
 
+## 6a. Workers that never see the database
+
+A worker beside the database opens its own connection, which is simple and
+right — until the worker is at another site. Then that VM holds a credential
+that reads `pf_users` and `pf_api_keys`, can modify another site's runs, and
+needs 5432 across a WAN. Revoking it means rotating the password everywhere.
+
+`store.WorkerStore` names the eighteen methods the execution path actually uses,
+and `internal/store/remote` implements them over `/api/v1/worker/*`. The trust
+boundary moves from the database to the API, which is where Prefect has always
+had it.
+
+The handlers are thin on purpose: every rule already lives in the store, and a
+handler that restated one would be a second copy to keep in step. Three things
+are never taken from a request body — the caller's worker id, which comes from
+the credential; `StateOpts.Force`, refused as the janitor's; and the instant a
+cache lookup is measured against, so a skewed site clock cannot extend a cache
+entry. `AppendEvent` is absent by design: automations act on the event log, so a
+site able to write it could forge a failure against another site's flow and trip
+an automation against a lane it has no other authority over. The server emits on
+the worker's behalf, and attributes the caller while it is there — which also
+fixed the older gap where a settled run had cleared `worker_id` and nothing
+recorded who ran it.
+
+**Authority is the key, not the id.** An `api-worker` key names the pools it may
+touch. Lease requests are intersected with that list; run-addressed routes check
+the run's lane, because a route addressed by id never mentions a queue and a
+lease-only guard would miss it. The External API's existing controls apply
+unchanged — IP allow-list, mutual TLS, per-key rate limit, audit trail.
+
+**Wake-ups ride the same connection.** A site cannot reach NATS or Redis, so
+`GET /api/v1/worker/stream` carries work and control notices over SSE, filtered
+to the credential's pools. The bus contract is unchanged: every message is a
+hint, nothing is replayed on reconnect, and a worker that receives none still
+runs every flow at its poll interval. That interval defaults to 15s remotely
+rather than 2s — the stream carries the latency, so the poll is a backstop.
+
+**One conversation per interval.** Liveness, lease renewal and cancellation are
+one call. Renewal used to be one call per held run and cancellation one read per
+running run, which made a worker's request rate scale with how busy it was —
+backwards for a link shared by every site.
+
+**Cost.** Every `sdk.Task` checkpoint is now a round trip. Beside the database
+that is a millisecond; across a WAN it is the link's latency times the number of
+tasks, so a flow with many small tasks pays for them. Measure before moving a
+chatty flow. Batching checkpoint writes would weaken the durability guarantee,
+so it is a decision rather than an optimisation.
+
+---
+
 ## 7. What will need attention first
 
 - **`pf_logs` growth.** `pf_logs` is range-partitioned by month (migration 0004;

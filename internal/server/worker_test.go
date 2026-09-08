@@ -57,7 +57,8 @@ func newAPI(t *testing.T) *api {
 	}
 	if _, err := st.DB().ExecContext(ctx, `
 TRUNCATE pf_logs, pf_artifacts, pf_task_runs, pf_flow_runs, pf_events,
-         pf_automations, pf_deployments, pf_workers, pf_leader, pf_flows RESTART IDENTITY CASCADE;
+         pf_automations, pf_deployments, pf_workers, pf_leader, pf_flows,
+         pf_api_keys, pf_api_key_events RESTART IDENTITY CASCADE;
 DELETE FROM pf_work_queues WHERE name <> 'default';
 UPDATE pf_work_queues SET paused = false, concurrency_limit = NULL;`); err != nil {
 		t.Fatalf("reset: %v", err)
@@ -1006,5 +1007,223 @@ func TestHeartbeatReportsLostLeasesAndCancellations(t *testing.T) {
 	}
 	if len(cancelling) != 1 || cancelling[0] != stop {
 		t.Fatalf("cancelling = %v, want %s", cancelling, stop)
+	}
+}
+
+// --- phase 6: hardening ---
+
+// cuttable proxies to the real handler until it is cut, after which every
+// request fails as it would with the link to the site down.
+type cuttable struct {
+	target http.Handler
+	down   atomic.Bool
+}
+
+func (c *cuttable) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if c.down.Load() {
+		// Hijack and drop the connection: a severed link does not answer
+		// politely, and a worker must handle that, not just a clean 503.
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		http.Error(w, "link down", http.StatusBadGateway)
+		return
+	}
+	c.target.ServeHTTP(w, r)
+}
+
+// The guarantee everything else exists to protect, now across a severed WAN
+// link: a site that loses its connection after doing the expensive work must
+// not do that work again when the run is recovered.
+func TestPartitionedSiteResumesFromItsCheckpoint(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	if err := a.store.EnsureWorkQueue(ctx, "cut"); err != nil {
+		t.Fatal(err)
+	}
+	secret, _ := a.issueWorkerKey("cut-site", []string{"cut"})
+
+	link := &cuttable{target: a.h}
+	srv := httptest.NewServer(link)
+	defer srv.Close()
+
+	rs, err := remote.New(remote.Config{
+		BaseURL: srv.URL, Token: secret, WorkerID: "cut-1",
+		MaxAttempts: 1, // fail fast; the retry policy is covered elsewhere
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var built, cutOnce atomic.Int32
+	reg := sdk.NewRegistry()
+	reg.Register("provision", func(c *sdk.Context) (any, error) {
+		vm, err := sdk.Task(c, "create-vm", func(c *sdk.Context) (string, error) {
+			built.Add(1) // the side effect that must never happen twice
+			return "vm-1", nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		// The link dies once the expensive step is safely checkpointed —
+		// the worst moment for it to happen, which is why it is the one to test.
+		// Only on the first attempt: the recovery has to be allowed to finish.
+		if cutOnce.CompareAndSwap(0, 1) {
+			link.down.Store(true)
+		}
+		return map[string]any{"vm": vm}, nil
+	})
+
+	eng := engine.New(rs, reg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		engine.Config{
+			WorkerID: "cut-1", CancelPollInterval: -1,
+			SuspendThreshold: time.Second, LogFlushInterval: 20 * time.Millisecond,
+		})
+
+	run, err := a.store.CreateFlowRun(ctx, store.CreateRunInput{
+		FlowName: "provision", WorkQueue: "cut", Priority: 50,
+		ScheduledAt: time.Now().UTC().Add(-time.Minute),
+		Retries:     1, RetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A short lease so the janitor can reclaim it without the test waiting.
+	leased, err := rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+		Queues: []string{"cut"}, Max: 1, LeaseFor: time.Second,
+	})
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("lease: %v (%d)", err, len(leased))
+	}
+	eng.Execute(ctx, &leased[0])
+
+	// The completion never reached the server: the run is stranded RUNNING with
+	// a lease nobody is renewing.
+	stranded, err := a.store.GetFlowRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stranded.State == core.StateCompleted {
+		t.Fatal("the link was supposed to be cut before the run could settle")
+	}
+	if built.Load() != 1 {
+		t.Fatalf("the expensive step ran %d times on the first attempt", built.Load())
+	}
+
+	// The link comes back and the janitor does what it always does.
+	link.down.Store(false)
+	time.Sleep(1100 * time.Millisecond) // let the one-second lease lapse
+	crashed, err := a.store.ReclaimExpiredLeases(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(crashed) != 1 || crashed[0].ID != run.ID {
+		t.Fatalf("the janitor reclaimed %d runs, want the stranded one", len(crashed))
+	}
+	if crashed[0].State != core.StateCrashed {
+		t.Fatalf("reclaimed run is %s, want CRASHED", crashed[0].State)
+	}
+
+	// CRASHED is not terminal: a crash is not the flow's fault.
+	if _, err := a.store.SetFlowRunState(ctx, run.ID,
+		core.NewState(core.StateScheduled, "AwaitingRetry", "worker lease expired"),
+		store.StateOpts{ScheduleAt: ptrTime(time.Now().UTC().Add(-time.Second))}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second worker picks it up and finishes it.
+	again, err := rs.LeaseFlowRuns(ctx, store.LeaseRequest{
+		Queues: []string{"cut"}, Max: 1, LeaseFor: time.Minute,
+	})
+	if err != nil || len(again) != 1 {
+		t.Fatalf("re-lease after the crash: %v (%d)", err, len(again))
+	}
+	eng.Execute(ctx, &again[0])
+
+	done, err := a.store.GetFlowRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.State != core.StateCompleted {
+		t.Fatalf("state = %s (%s), want COMPLETED", done.State, done.StateMessage)
+	}
+	if built.Load() != 1 {
+		t.Fatalf("the VM was built %d times; the checkpoint did not survive the partition", built.Load())
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// A site key can be required to present a client certificate, and the worker
+// API has to honour that as the External API does — otherwise mutual TLS would
+// be a setting an operator believes in and nothing enforces.
+func TestWorkerKeyCanRequireMutualTLS(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	secret, keyID := a.issueWorkerKey("mtls-site", []string{"default"})
+	k, err := a.store.GetAPIKey(ctx, keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.RequireMTLS = true
+	if err := a.store.UpdateAPIKey(ctx, k); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := a.callKey(http.MethodPost, "/api/v1/worker/heartbeat",
+		map[string]any{"name": "w", "queues": []string{"default"}}, secret, "w-1")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a key requiring mutual TLS was accepted without one: %d %s", rec.Code, rec.Body.String())
+	}
+	evs, err := a.store.ListAPIKeyEvents(ctx, keyID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged bool
+	for _, e := range evs {
+		if bytes.Contains(e.Detail, []byte("mtls-not-verified")) {
+			logged = true
+		}
+	}
+	if !logged {
+		t.Fatal("the refusal is not in the key's audit trail")
+	}
+}
+
+// Per-key rate limiting is what stops one misconfigured site from becoming
+// everyone's problem.
+func TestWorkerKeyRateLimitApplies(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	secret, keyID := a.issueWorkerKey("chatty-site", []string{"default"})
+	k, err := a.store.GetAPIKey(ctx, keyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := 3
+	k.RateLimitPerMin = &limit
+	if err := a.store.UpdateAPIKey(ctx, k); err != nil {
+		t.Fatal(err)
+	}
+
+	var limited bool
+	for i := 0; i < 10; i++ {
+		rec := a.callKey(http.MethodPost, "/api/v1/worker/heartbeat",
+			map[string]any{"name": "w", "queues": []string{"default"}}, secret, "w-1")
+		if rec.Code == http.StatusTooManyRequests {
+			if rec.Header().Get("Retry-After") == "" {
+				t.Error("a throttled worker was not told when to come back")
+			}
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("the key's rate limit was never applied")
 	}
 }

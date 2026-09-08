@@ -213,9 +213,11 @@ Configuration comes from the environment, so the same image runs everywhere:
 | `PRIMEFLOW_NATS_URL` | NATS URL for live updates (wins over Redis) | optional |
 | `PRIMEFLOW_REDIS_URL` | Redis URL for live updates | optional |
 | `PRIMEFLOW_QUEUES` | comma-separated lanes to poll | `default` |
+| `PRIMEFLOW_API_URL` | run this worker against the API instead of the database | none |
+| `PRIMEFLOW_WORKER_TOKEN` | pool-scoped `api-worker` key, required with `_API_URL` | none |
 | `PRIMEFLOW_CONCURRENCY` | runs executed in parallel | `4` |
 | `PRIMEFLOW_LEASE` | lease duration | `60s` |
-| `PRIMEFLOW_POLL` | fallback poll interval | `2s` |
+| `PRIMEFLOW_POLL` | fallback poll interval | `2s`, or `15s` against the API |
 | `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | how deep `RunDeployment` may nest | `8` |
 | `PRIMEFLOW_LOG_RETENTION` | prune `pf_logs` older than this (Go duration) | `720h` |
 | `PRIMEFLOW_METRICS_ADDR` | worker's own `/metrics` listener (flow/task timings) | `:9090` |
@@ -691,6 +693,59 @@ the apply path. The current flow:
 
 ---
 
+## Workers at a remote site
+
+A worker normally opens its own PostgreSQL connection. That is the right shape
+beside the database and the wrong one across a site boundary: the VM would hold
+a credential that reads every table, including operator password hashes and API
+keys, and it would need 5432 open across the WAN.
+
+Set `PRIMEFLOW_API_URL` and `PRIMEFLOW_WORKER_TOKEN` instead and the worker
+reaches the orchestrator through `/api/v1/worker/*` — outbound HTTPS only, no
+inbound port at the site, no database credential anywhere on the box.
+
+```bash
+export PRIMEFLOW_API_URL="https://primeflow.example.com"
+export PRIMEFLOW_WORKER_TOKEN="pmx_…"     # an api-worker key, scoped to this site's pools
+export PRIMEFLOW_QUEUES="site-bkk"
+./primex-worker                            # no PRIMEFLOW_DATABASE_URL
+```
+
+Issue the key from **Settings → External API**, or:
+
+```bash
+curl -X POST $PRIMEFLOW_API_URL/api/v1/api-keys -d '{
+  "name": "site-bkk worker", "role": "api-worker", "pools": ["site-bkk"]
+}'
+```
+
+The `pools` list is the boundary. A key may lease only from the lanes it names,
+and a run on any other lane is refused even when the caller knows its id;
+refusals land in that key's audit trail, so a site reaching outside its lanes is
+visible in the console. Everything else the External API offers applies too —
+IP allow-list, a required client certificate, a per-key rate limit — and
+disabling one key revokes one site, which a shared database password cannot do.
+
+**What changes at a site.** Wake-ups arrive on `GET /api/v1/worker/stream`, an
+SSE channel on the same connection, so dispatch stays sub-second without NATS or
+Redis; losing it costs latency and nothing else, because the poll is still
+there. The poll itself defaults to 15s rather than 2s, and one heartbeat carries
+liveness, every lease renewal and any cancellation, so a worker's request rate
+does not grow with how much work it is holding.
+
+**What does not change.** Checkpoints, leases, the transition table and the
+dispatch ordering are all still the server's, enforced in exactly one place. A
+site that loses its link mid-run has its lease reclaimed by the janitor, is
+marked `CRASHED`, and resumes from its checkpoints — the expensive step is not
+repeated.
+
+**Rolling it out.** Migrate one pool at a time: issue a key for that pool, start
+a remote worker beside the existing database-connected one, watch both take work
+from the lane, then stop the old one and remove its DSN. Nothing needs to happen
+at once, and the two kinds of worker are interchangeable from the server's side.
+
+---
+
 ## Known gaps
 
 Honest list of what is not built yet:
@@ -705,8 +760,9 @@ Honest list of what is not built yet:
   created by admins.
 - **NATS-backed rate limiting.** Shared limits use Redis or fall back to
   in-process; there is no NATS/JetStream limiter.
-- **Push pools don't build or ship your code.** The receiver is still your
-  PrimeFlow binary with database access; there is no code-upload step.
+- **Push pools don't build or ship your code.** The receiver is still your own
+  PrimeFlow binary — though since the worker API landed it no longer needs
+  database access, only a pool-scoped key. There is still no code-upload step.
 - **Single OTLP exporter.** Traces only; no metrics-over-OTLP, no log export.
 - **GitOps worker delivery is generate-only so far.** *Settings → Git
   connection* is stored and the Add-worker page renders every artifact, but the
