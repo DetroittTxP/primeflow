@@ -205,7 +205,16 @@ func (o *Options) applyEnv() {
 		}
 	}
 	if o.PollInterval == 0 {
-		if d, err := time.ParseDuration(envOr("PRIMEFLOW_POLL", "2s")); err == nil {
+		// Two seconds suits a worker sitting beside the database. A worker
+		// reaching the orchestrator over a WAN multiplies that by every site,
+		// and the wake-up stream is what keeps latency low there, so the poll
+		// becomes a backstop rather than the mechanism. Fifteen seconds is what
+		// Prefect polls at, for the same reason.
+		def := "2s"
+		if o.Remote() {
+			def = "15s"
+		}
+		if d, err := time.ParseDuration(envOr("PRIMEFLOW_POLL", def)); err == nil {
 			o.PollInterval = d
 		}
 	}
@@ -295,6 +304,18 @@ func openRemote(ctx context.Context, o Options) (*App, error) {
 	}
 	o.Logger.Info("worker store: primeflow api", "url", o.APIURL, "queues", o.Queues)
 
+	// The wake-up channel rides the same 443. It is an accelerator: a failure
+	// to build it leaves the worker polling, which is slower and just as
+	// correct, so it never stops start-up.
+	var b bus.Bus = bus.NewInMemory()
+	if rb, berr := remote.NewBus(remote.Config{
+		BaseURL: o.APIURL, Token: o.WorkerToken, WorkerID: name, Logger: o.Logger,
+	}); berr != nil {
+		o.Logger.Warn("wake-up stream unavailable; falling back to polling", "err", berr)
+	} else {
+		b = rb
+	}
+
 	shutdown, err := otelinit.Setup(ctx, "primeflow-worker", version())
 	if err != nil {
 		shutdown = func(context.Context) error { return nil }
@@ -302,7 +323,7 @@ func openRemote(ctx context.Context, o Options) (*App, error) {
 	return &App{
 		Options:      o,
 		WorkerStore:  rs,
-		Bus:          bus.NewInMemory(),
+		Bus:          b,
 		Metrics:      metrics.New(nil),
 		Log:          o.Logger,
 		holder:       name + "-" + uuid.NewString()[:8],

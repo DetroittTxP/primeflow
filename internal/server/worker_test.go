@@ -1,15 +1,18 @@
 package server_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,6 +38,7 @@ type api struct {
 	t     *testing.T
 	h     http.Handler
 	store *postgres.Store
+	bus   bus.Bus
 }
 
 func newAPI(t *testing.T) *api {
@@ -63,7 +67,7 @@ UPDATE pf_work_queues SET paused = false, concurrency_limit = NULL;`); err != ni
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	b := bus.NewInMemory()
 	srv := server.New(st, b, events.New(st, b, log), log, server.Config{APIToken: testToken})
-	return &api{t: t, h: srv.Handler(), store: st}
+	return &api{t: t, h: srv.Handler(), store: st, bus: b}
 }
 
 // call drives one request as a worker would: machine bearer token plus the
@@ -689,4 +693,188 @@ func writeTestErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(`{"error":"` + msg + `"}`))
+}
+
+// --- phase 4: wake-ups over the same 443 ---
+
+// The stream has to carry work notices for the lanes a key owns and stay silent
+// about every other lane: telling a site that some run it cannot see exists is
+// a leak, not a hint.
+func TestWorkerStreamFiltersByPool(t *testing.T) {
+	a := newAPI(t)
+	ctx := context.Background()
+	for _, q := range []string{"mine", "theirs"} {
+		if err := a.store.EnsureWorkQueue(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret, _ := a.issueWorkerKey("streaming", []string{"mine"})
+
+	srv := httptest.NewServer(a.h)
+	defer srv.Close()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/worker/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", secret)
+	req.Header.Set("X-PrimeFlow-Worker-ID", "s-1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream refused: %d", resp.StatusCode)
+	}
+
+	lines := make(chan string, 32)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			lines <- sc.Text()
+		}
+		close(lines)
+	}()
+	waitFor(t, lines, ": connected")
+
+	// Give the subscription a moment to land before publishing to it.
+	time.Sleep(100 * time.Millisecond)
+	_ = a.bus.Publish(ctx, bus.TopicWork, map[string]string{"queue": "theirs"})
+	_ = a.bus.Publish(ctx, bus.TopicWork, map[string]string{"queue": "mine"})
+
+	// The first data frame must be the permitted lane: the other one is not
+	// delayed, it is never sent.
+	data := waitForPrefix(t, lines, "data:")
+	if !strings.Contains(data, `"mine"`) {
+		t.Fatalf("stream leaked another site's lane: %s", data)
+	}
+	if strings.Contains(data, "theirs") {
+		t.Fatalf("stream carried a lane outside the key's pools: %s", data)
+	}
+}
+
+func waitFor(t *testing.T, lines <-chan string, want string) {
+	t.Helper()
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatalf("stream ended before %q", want)
+			}
+			if strings.Contains(l, want) {
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for %q", want)
+		}
+	}
+}
+
+func waitForPrefix(t *testing.T, lines <-chan string, prefix string) string {
+	t.Helper()
+	for {
+		select {
+		case l, ok := <-lines:
+			if !ok {
+				t.Fatal("stream ended before a data frame arrived")
+			}
+			if strings.HasPrefix(l, prefix) {
+				return l
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for a %q line", prefix)
+		}
+	}
+}
+
+// Losing the stream must cost latency and nothing else. The client reconnects
+// on its own, and while it is disconnected the worker's poll is what finds
+// work — which is the contract the whole bus is held to.
+func TestRemoteBusReconnectsAfterTheLinkDrops(t *testing.T) {
+	var opens atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := opens.Add(1)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("test server cannot stream")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: work\ndata: {\"queue\":\"q%d\"}\n\n", n)
+		f.Flush()
+		// Then the link drops mid-flight, exactly as a proxy timing out would.
+	}))
+	defer srv.Close()
+
+	got := make(chan string, 8)
+	b, err := remote.NewBus(remote.Config{
+		BaseURL: srv.URL, Token: "pmx_x", WorkerID: "w",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := b.Subscribe(ctx, []string{bus.TopicWork, bus.TopicControl}, func(m bus.Message) {
+		got <- string(m.Payload)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first := receive(t, got)
+	if !strings.Contains(first, "q1") {
+		t.Fatalf("first wake-up = %s", first)
+	}
+	// Same client, new connection, without anyone asking it to reconnect.
+	second := receive(t, got)
+	if !strings.Contains(second, "q2") {
+		t.Fatalf("did not reconnect after the drop: %s", second)
+	}
+	if n := opens.Load(); n < 2 {
+		t.Fatalf("expected the stream to be reopened, saw %d connections", n)
+	}
+}
+
+// A stream the server refuses must not become a retry storm, and must not stop
+// the worker: it degrades to polling and says so once.
+func TestRemoteBusToleratesARefusedStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeTestErr(w, http.StatusForbidden, "no scope")
+	}))
+	defer srv.Close()
+
+	b, err := remote.NewBus(remote.Config{
+		BaseURL: srv.URL, Token: "pmx_x", WorkerID: "w",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	// Subscribe returns immediately whatever the server thinks of us.
+	if err := b.Subscribe(ctx, []string{bus.TopicWork}, func(bus.Message) {
+		t.Error("a refused stream delivered a message")
+	}); err != nil {
+		t.Fatalf("Subscribe should not fail on a refused stream: %v", err)
+	}
+	<-ctx.Done()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func receive(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("no wake-up arrived")
+		return ""
+	}
 }

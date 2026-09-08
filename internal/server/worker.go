@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/primex/primeflow/internal/apiauth"
+	"github.com/primex/primeflow/internal/bus"
 	"github.com/primex/primeflow/internal/core"
 	"github.com/primex/primeflow/internal/store"
 )
@@ -666,6 +667,93 @@ func (s *Server) workerUnfinishedChildren(w http.ResponseWriter, r *http.Request
 	}{n})
 }
 
+// workerStream is the wake-up channel, carried on the same 443 the rest of the
+// worker API uses.
+//
+// A site cannot reach NATS or Redis, so without this a remote worker learns
+// about new work only on its next poll. The bus contract does not change: every
+// message here is a hint, delivery is never required for correctness, and a
+// worker that loses the stream converges on its poll interval. That is why a
+// slow reader is dropped rather than allowed to back up, and why nothing is
+// replayed on reconnect — the queue in Postgres is still the truth.
+//
+// Messages are filtered to the credential's pools. Work notices carry the lane
+// name, so that is a string comparison. A cancellation names only a run, so a
+// pool-scoped caller costs one lookup — cancellations are rare, and telling a
+// site that some run it cannot see was cancelled would leak the existence of
+// another site's work.
+func (s *Server) workerStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
+		return
+	}
+	id := workerFrom(r)
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+
+	ctx := r.Context()
+	type framed struct {
+		event   string
+		payload []byte
+	}
+	ch := make(chan framed, 64)
+
+	if s.bus != nil {
+		_ = s.bus.Subscribe(ctx, []string{bus.TopicWork, bus.TopicControl}, func(m bus.Message) {
+			f := framed{payload: m.Payload}
+			switch m.Topic {
+			case bus.TopicWork:
+				var p struct {
+					Queue string `json:"queue"`
+				}
+				if json.Unmarshal(m.Payload, &p) != nil || !id.mayUse(p.Queue) {
+					return
+				}
+				f.event = "work"
+			case bus.TopicControl:
+				var c bus.ControlMessage
+				if json.Unmarshal(m.Payload, &c) != nil || c.FlowRunID == "" {
+					return
+				}
+				if len(id.Pools) > 0 {
+					run, err := s.store.GetFlowRun(ctx, c.FlowRunID)
+					if err != nil || !id.mayUse(run.WorkQueue) {
+						return
+					}
+				}
+				f.event = "control"
+			default:
+				return
+			}
+			select {
+			case ch <- f:
+			default: // a reader that cannot keep up falls back to polling
+			}
+		})
+	}
+
+	ping := time.NewTicker(20 * time.Second)
+	defer ping.Stop()
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ping.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		case f := <-ch:
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", f.event, f.payload)
+			flusher.Flush()
+		}
+	}
+}
+
 // registerWorkerRoutes mounts the worker API. Kept in one function so the whole
 // surface a remote worker is allowed to reach can be read at a glance — and so
 // it is obvious that AppendEvent is not on it.
@@ -679,6 +767,7 @@ func (s *Server) registerWorkerRoutes(mux *http.ServeMux) {
 	)
 
 	mux.HandleFunc("POST "+p+"/lease", s.wk(lease, s.workerLease))
+	mux.HandleFunc("GET "+p+"/stream", s.wk(lease, s.workerStream))
 	mux.HandleFunc("POST "+p+"/heartbeat", s.wk(report, s.workerHeartbeat))
 	mux.HandleFunc("POST "+p+"/runs/{id}/renew", s.wkRun(report, s.workerRenewLease))
 
