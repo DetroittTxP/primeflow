@@ -17,8 +17,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // Metrics holds the collectors and the registry they are registered on.

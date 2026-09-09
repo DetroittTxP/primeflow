@@ -14,8 +14,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/primex/primeflow/pkg/primeflow/worker"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/pkg/primeflow/worker"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // version is stamped at build time: -ldflags "-X main.version=$(git describe --tags --always)".

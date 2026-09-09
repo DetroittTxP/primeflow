@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 // RepoPath is where a spec's files live in the repo: its explicit RepoPath, or

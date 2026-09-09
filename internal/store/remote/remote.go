@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // Config describes how to reach the orchestrator.

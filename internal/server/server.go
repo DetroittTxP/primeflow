@@ -29,16 +29,16 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/primex/primeflow/internal/apiauth"
-	"github.com/primex/primeflow/internal/authn"
-	"github.com/primex/primeflow/internal/bus"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/gitsync"
-	"github.com/primex/primeflow/internal/metrics"
-	"github.com/primex/primeflow/internal/oidcauth"
-	"github.com/primex/primeflow/internal/ratelimit"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/apiauth"
+	"github.com/DetroittTxP/primeflow/internal/authn"
+	"github.com/DetroittTxP/primeflow/internal/bus"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/gitsync"
+	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/oidcauth"
+	"github.com/DetroittTxP/primeflow/internal/ratelimit"
+	"github.com/DetroittTxP/primeflow/internal/store"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -46,6 +46,10 @@ import (
 
 // DefaultSessionTTL is used when Config.SessionTTL is zero.
 const DefaultSessionTTL = 7 * 24 * time.Hour
+
+// streamPath is the SSE feed. It is named because resolvePrincipal grants it the
+// single ?token= exception, and that exception must track the route.
+const streamPath = "/api/v1/stream"
 
 // Config configures the HTTP server.
 type Config struct {
@@ -207,7 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/automations", s.upsertAutomation)
 	mux.HandleFunc("DELETE /api/v1/automations/{id}", s.deleteAutomation)
 	mux.HandleFunc("POST /api/v1/webhooks/{deployment}", s.webhook)
-	mux.HandleFunc("GET /api/v1/stream", s.stream)
+	mux.HandleFunc("GET "+streamPath, s.stream)
 
 	// --- admin: operator accounts ---
 	mux.HandleFunc("GET /api/v1/users", s.listUsers)
@@ -452,11 +456,18 @@ func isWrite(method string) bool {
 // no valid credential. The bool is whether a CSRF check passed (always true for
 // machine tokens, which do not need one).
 func (s *Server) resolvePrincipal(r *http.Request) (*principal, bool) {
-	// 1. Static machine token (workers, CLI). Also accepted as ?token= so the
-	//    SSE EventSource, which cannot set headers, still works for scripts.
+	// 1. Static machine token (workers, CLI). Also accepted as ?token=, but on
+	//    the SSE stream alone: that is the one route a browser EventSource
+	//    cannot set a header on. Honouring it everywhere put a credential that
+	//    grants a CSRF-exempt admin principal into access logs, proxy logs,
+	//    Referer headers and browser history.
 	if s.cfg.APIToken != "" {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if got == s.cfg.APIToken || r.URL.Query().Get("token") == s.cfg.APIToken {
+		ok := subtleEqual(got, s.cfg.APIToken)
+		if !ok && r.Method == http.MethodGet && r.URL.Path == streamPath {
+			ok = subtleEqual(r.URL.Query().Get("token"), s.cfg.APIToken)
+		}
+		if ok {
 			return &principal{Machine: true, Email: "machine-token", Role: authn.RoleAdmin}, true
 		}
 	}
@@ -540,9 +551,20 @@ func fail(w http.ResponseWriter, err error) {
 	}
 }
 
+// maxBodyBytes caps a request body on the operator and external APIs. Run
+// parameters, deployment definitions and worker specs are the largest things
+// anyone legitimately posts here and they sit far inside it. The worker routes
+// batch logs and get their own, larger allowance; see decodeBody in worker.go.
+const maxBodyBytes = 1 << 20 // 1 MiB
+
+// decode reads a JSON body into v. The reader is bounded: without a cap any
+// endpoint, including the unauthenticated ones, will buffer whatever a client
+// chooses to send. MaxBytesReader wants the ResponseWriter to hint the
+// connection closed on overflow, which this signature has no access to; the
+// size limit itself does not depend on it.
 func decode(r *http.Request, v any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil && err.Error() != "EOF" {
 		return err

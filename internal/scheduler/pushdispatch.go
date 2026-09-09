@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/pushsig"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/pushsig"
 )
 
 // pushDispatchLease is how long a run is held after dispatch, giving the receiver

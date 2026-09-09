@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // Cancelling a run that already finished is a conflict, not a silent 200 that

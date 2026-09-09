@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 func baseSpec() core.WorkerSpec {

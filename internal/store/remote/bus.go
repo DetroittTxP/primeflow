@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/internal/bus"
+	"github.com/DetroittTxP/primeflow/internal/bus"
 )
 
 // Bus receives wake-ups from the server's worker stream over the same HTTPS the

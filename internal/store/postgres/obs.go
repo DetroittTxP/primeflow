@@ -11,8 +11,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // --------------------------------------------------------- task runs ------
@@ -407,6 +407,9 @@ SELECT `+binExpr(`COALESCE(started_at, scheduled_at, created_at)`)+` AS b,
 		out.FlowRuns.Total += n
 	}
 	stRows.Close()
+	if err := stRows.Err(); err != nil {
+		return out, err
+	}
 
 	// --- task runs ---
 	trRows, err := s.db.QueryContext(ctx, `
@@ -433,6 +436,9 @@ SELECT `+binExpr(`COALESCE(ended_at, created_at)`)+` AS b,
 		out.TaskRuns.Total += c + f
 	}
 	trRows.Close()
+	if err := trRows.Err(); err != nil {
+		return out, err
+	}
 
 	// --- events ---
 	evRows, err := s.db.QueryContext(ctx, `
@@ -453,6 +459,9 @@ SELECT `+binExpr(`occurred`)+` AS b, count(*)
 		out.Events.Total += n
 	}
 	evRows.Close()
+	if err := evRows.Err(); err != nil {
+		return out, err
+	}
 
 	// Materialise a contiguous, aligned bucket list.
 	first := binStart(since, step)

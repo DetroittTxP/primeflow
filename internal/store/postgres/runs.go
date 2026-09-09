@@ -12,8 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 const flowRunCols = `id, name, flow_name, deployment_id, parameters, work_queue,

@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/pkg/primeflow/worker"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/pkg/primeflow/worker"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // ---------------------------------------------------------- provisioning ---

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/internal/apiauth"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/apiauth"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // The External API is a role-gated, key-authenticated projection of PrimeFlow's
@@ -91,7 +91,7 @@ func (s *Server) extListWorkers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) extUpsertQueue(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Name                 string  `json:"name"`
-		Description           string  `json:"description"`
+		Description          string  `json:"description"`
 		ConcurrencyLimit     *int    `json:"concurrency_limit"`
 		Paused               *bool   `json:"paused"`
 		MinWorkers           *int    `json:"min_workers"`

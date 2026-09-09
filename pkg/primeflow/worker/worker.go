@@ -6,7 +6,7 @@
 //	}
 //
 // It is the package to import for a site VM. The parent package,
-// [github.com/primex/primeflow/pkg/primeflow], can run a worker too, but it
+// [github.com/DetroittTxP/primeflow/pkg/primeflow], can run a worker too, but it
 // offers every mode from one package, so importing it links the API server, the
 // console, OIDC, the scheduler and the automation evaluator whether the process
 // reaches them or not.
@@ -37,15 +37,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/primex/primeflow/internal/bus"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/metrics"
-	"github.com/primex/primeflow/internal/otelinit"
-	"github.com/primex/primeflow/internal/runner"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/internal/store/postgres"
-	"github.com/primex/primeflow/internal/store/remote"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/internal/bus"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/otelinit"
+	"github.com/DetroittTxP/primeflow/internal/runner"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/store/postgres"
+	"github.com/DetroittTxP/primeflow/internal/store/remote"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // Options configure a worker process. Any zero field falls back to the matching

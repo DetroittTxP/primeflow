@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // getFlow powers the console's Flows drawer: the newest registered version of a

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 func TestLogPartitionMaintenance(t *testing.T) {

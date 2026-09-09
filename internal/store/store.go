@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 // ErrNotFound is returned by every lookup that finds nothing.

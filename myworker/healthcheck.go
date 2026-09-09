@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // ------------------------------------------------------------ healthcheck ---

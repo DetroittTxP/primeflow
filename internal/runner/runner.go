@@ -21,15 +21,15 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/primex/primeflow/internal/bus"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/engine"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/metrics"
-	"github.com/primex/primeflow/internal/pushsig"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/internal/worker"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/internal/bus"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/engine"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/pushsig"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/worker"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // Deps is the infrastructure a runner borrows. Events may be nil: a remote

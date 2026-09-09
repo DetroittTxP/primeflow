@@ -17,7 +17,7 @@ myworker/
 ## Build
 
 The build context is the repository root, not this directory, because `go.mod`
-carries `replace github.com/primex/primeflow => ..`:
+carries `replace github.com/DetroittTxP/primeflow => ..`:
 
 ```bash
 docker buildx build --platform linux/amd64 -f myworker/Dockerfile -t <registry>/myworker:$(git describe --tags --always) --push .
@@ -29,16 +29,37 @@ image.
 
 ## Why the replace directive
 
-The module declares itself as `github.com/primex/primeflow`, but the code lives
-at `github.com/DetroittTxP/primeflow`. Those disagree, so `go get` cannot
-resolve it and the dependency has to point at a checkout instead. Two ways out,
-whenever you want to take them:
+The module path and the repository now agree, so the dependency resolves on its
+own — `go get github.com/DetroittTxP/primeflow@v0.2.0` — as soon as a tag
+carrying the renamed path is pushed. The replace is kept here because it is the
+useful default while developing a flow and the engine together: it builds
+against the working tree rather than the last release.
 
-- Change the parent `go.mod` to the path it is actually served from, then drop
-  the replace here and `go get` the tag. The Docker context narrows to
-  `myworker/` alone.
-- Or keep the replace and move this directory wherever you like, adjusting `..`
-  to your primeflow checkout.
+Drop it whenever you would rather pin a release:
+
+```bash
+go mod edit -dropreplace github.com/DetroittTxP/primeflow
+go get github.com/DetroittTxP/primeflow@v0.2.0
+go mod tidy
+```
+
+The `go mod tidy` is not optional: `go get` records this module alone, leaving
+no go.sum entries for the indirect dependencies the SDK pulls in, and the build
+stops with `missing go.sum entry`.
+
+That also narrows the Docker build context to `myworker/` alone — see the note
+in the [Dockerfile](Dockerfile). If instead you move this directory out of the
+primeflow tree and keep the replace, adjust `..` to point at your checkout.
+
+The repository is public, so this needs no credentials, no `GOPRIVATE` and no
+SSH rewrite: it resolves through the module proxy like any other dependency.
+Should the repository ever be made private, that is when a resolving machine
+has to be told to bypass the proxy and fetch over SSH instead:
+
+```bash
+go env -w GOPRIVATE=github.com/DetroittTxP/*
+git config --global url."git@github.com:".insteadOf "https://github.com/"
+```
 
 ## Run it
 

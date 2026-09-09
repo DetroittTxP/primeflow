@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/gitsync"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/gitsync"
 )
 
 // workerSpecBody is the create/update payload. On the {id} route, omitted

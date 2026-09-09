@@ -18,7 +18,7 @@ import (
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/memory"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 // ErrNoGitConnection is returned when a sync is attempted with no repo URL set
