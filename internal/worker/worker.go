@@ -60,16 +60,17 @@ type Config struct {
 	// flow every few seconds is the WAN cost the heartbeat exists to remove.
 	CancelPollInterval time.Duration
 
-	// ExecMode is ExecInline (default) or ExecProcess — see exec.go. The three
-	// Exec fields below are only read in process mode, and the caller is
-	// expected to have resolved ExecPath already: a worker that cannot find its
-	// own binary is a start-up failure, not a per-run one.
+	// ExecMode names where runs execute. It is a label for logs and the
+	// console; what actually decides is NewLauncher.
 	ExecMode string
-	ExecPath string
-	ExecArgs []string
-	// ExecEnv is what a child needs to reach the orchestrator when the parent
-	// was configured in Go rather than through the environment.
-	ExecEnv []string
+	// NewLauncher, when set, is asked for the launcher this worker executes
+	// through — a child process, a Kubernetes Job — once its id exists, since
+	// the id is the lease a child runs under. Nil means inline.
+	//
+	// It is a constructor rather than a value because everything that can fail
+	// about a launcher (finding this binary, reading a service-account token,
+	// parsing a template) belongs to start-up, and this is called after it.
+	NewLauncher func(workerID string) Launcher
 }
 
 func (c *Config) applyDefaults() {
@@ -105,9 +106,9 @@ type Worker struct {
 	bus    bus.Bus
 	engine *engine.Engine
 	// exec is nil in inline mode, where the engine above executes every run in
-	// this process. In process mode it starts one child per run instead, and
-	// the engine is left holding only the lease bookkeeping.
-	exec *processLauncher
+	// this process. Otherwise it starts one child per run — a process, a pod —
+	// and the engine is left holding only the lease bookkeeping.
+	exec Launcher
 	reg  *sdk.Registry
 	log  *slog.Logger
 
@@ -138,8 +139,8 @@ func New(s store.WorkerStore, b bus.Bus, reg *sdk.Registry, em *events.Emitter, 
 		leases:  map[string]struct{}{},
 		started: time.Now().UTC(),
 	}
-	if cfg.ExecMode == ExecProcess {
-		w.exec = newProcessLauncher(cfg.ExecPath, cfg.ExecArgs, cfg.ExecEnv, id, log)
+	if cfg.NewLauncher != nil {
+		w.exec = cfg.NewLauncher(id)
 	}
 	return w
 }
@@ -230,8 +231,8 @@ func (w *Worker) execute(ctx context.Context, run *core.FlowRun) {
 		w.engine.Execute(ctx, run)
 		return
 	}
-	if err := w.exec.Launch(run); err != nil {
-		w.log.Warn("run process exited abnormally", "run", run.ID, "err", err)
+	if err := w.exec.Launch(ctx, run); err != nil {
+		w.log.Warn("run did not settle where it was sent", "run", run.ID, "err", err)
 		w.reap(ctx, run, err)
 	}
 }
@@ -270,8 +271,8 @@ func (w *Worker) cancelRun(runID string) bool {
 }
 
 func (w *Worker) execMode() string {
-	if w.exec != nil {
-		return ExecProcess
+	if w.cfg.ExecMode != "" {
+		return w.cfg.ExecMode
 	}
 	return ExecInline
 }

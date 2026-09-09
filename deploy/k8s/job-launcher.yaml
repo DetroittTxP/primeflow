@@ -1,0 +1,149 @@
+# Per-run isolation on Kubernetes.
+#
+# A launcher is an ordinary PrimeFlow worker with PRIMEFLOW_EXEC_MODE=kubernetes:
+# it leases runs exactly as a worker does — same queue, same concurrency limit,
+# same priority order — and then, instead of executing each one in a goroutine,
+# creates a Job for it and waits. The flow runs in a pod of its own, with its own
+# image, limits and service account.
+#
+# Apply after primeflow.yaml. This *replaces* the worker Deployment for the lane
+# it serves, rather than accompanying it: one launcher per work queue, the same
+# shape as one worker Deployment per work queue.
+#
+# What it costs: a pod start per run (seconds, against milliseconds for a
+# goroutine), and flow/task timings no longer reach a scrapeable /metrics,
+# because they now happen in a pod that exits. Keep short, frequent flows on a
+# plain worker Deployment.
+---
+# The launcher's identity. The run pods do not use it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: primeflow-job-launcher
+  namespace: primeflow
+---
+# Exactly the verbs internal/kube calls, in one namespace. No pod, secret or
+# node access: a launcher creates Jobs, reads their status, and deletes them —
+# on a cancellation, and on start-up for Jobs a previous launcher left behind.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: primeflow-job-launcher
+  namespace: primeflow
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: primeflow-job-launcher
+  namespace: primeflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: primeflow-job-launcher
+subjects:
+  - kind: ServiceAccount
+    name: primeflow-job-launcher
+    namespace: primeflow
+---
+# The identity a run pod gets: no permissions, and no token mounted at all. A
+# flow talks to PrimeFlow and to whatever it provisions — never to this cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: primeflow-run
+  namespace: primeflow
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: primeflow-launcher-vcd
+  namespace: primeflow
+  labels: {app: primeflow, component: launcher, queue: vcd}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: primeflow, component: launcher, queue: vcd}
+  template:
+    metadata:
+      labels: {app: primeflow, component: launcher, queue: vcd}
+    spec:
+      serviceAccountName: primeflow-job-launcher
+      # A rolled launcher leaves its Jobs running: each pod renews its own lease,
+      # so nothing is crashed under it and no run is executed twice. The grace
+      # period only has to cover the launcher's own shutdown.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: launcher
+          image: registry.example.com/primex/primeflow:latest
+          # The launcher runs no flows itself, so it can be the plain server
+          # binary; it is the *image below* that must contain your flows.
+          command: ["/usr/local/bin/primex-worker"]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
+          env:
+            - name: PRIMEFLOW_QUEUES
+              value: "vcd"
+            # How many runs may be in flight — that is, how many Jobs at once.
+            - name: PRIMEFLOW_CONCURRENCY
+              value: "10"
+            - name: PRIMEFLOW_WORKER_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: PRIMEFLOW_EXEC_MODE
+              value: "kubernetes"
+
+            # ---- the pod each run gets -------------------------------------
+            # The image with your flows in it. Required.
+            - name: PRIMEFLOW_KUBE_IMAGE
+              value: "registry.example.com/primex/primeflow:latest"
+            - name: PRIMEFLOW_KUBE_COMMAND
+              value: "/usr/local/bin/primex-worker"
+            # How the run pod reaches PrimeFlow. Kubernetes lets an explicit env
+            # entry win over envFrom, so the launcher's own injected variables
+            # (which run, under whose lease) are safe from anything in here.
+            - name: PRIMEFLOW_KUBE_ENV_FROM_SECRET
+              value: "primeflow-secrets"
+            - name: PRIMEFLOW_KUBE_ENV_FROM_CONFIGMAP
+              value: "primeflow-config"
+            - name: PRIMEFLOW_KUBE_SERVICE_ACCOUNT
+              value: "primeflow-run"
+            # Per-run limits: the point of the exercise. A flow that leaks now
+            # meets a limit instead of its neighbours.
+            - name: PRIMEFLOW_KUBE_CPU_REQUEST
+              value: "100m"
+            - name: PRIMEFLOW_KUBE_CPU_LIMIT
+              value: "1"
+            - name: PRIMEFLOW_KUBE_MEMORY_REQUEST
+              value: "256Mi"
+            - name: PRIMEFLOW_KUBE_MEMORY_LIMIT
+              value: "1Gi"
+            # How long a finished Job's record survives for `kubectl describe`.
+            # The run's own history is in PrimeFlow and is not affected.
+            - name: PRIMEFLOW_KUBE_TTL
+              value: "10m"
+            # How long a Job has to get its pod as far as RUNNING before the
+            # launcher gives up and hands the run back. This is what stops an
+            # unpullable image or an unschedulable pod from holding a lease
+            # forever; the run is then retried like any crash.
+            - name: PRIMEFLOW_KUBE_START_DEADLINE
+              value: "5m"
+            # Anything not modelled — tolerations, affinity, volumes, an init
+            # container — as a JSON object merged over the rendered pod spec:
+            # - name: PRIMEFLOW_KUBE_POD_SPEC_PATCH
+            #   value: "/etc/primeflow/podspec.json"
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

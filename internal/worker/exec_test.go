@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -41,11 +42,13 @@ func TestExecChild(t *testing.T) {
 
 func testLauncher(t *testing.T, behaviour string, env ...string) *processLauncher {
 	t.Helper()
-	return newProcessLauncher(
+	// The concrete type: the tests reach into the process table the interface
+	// deliberately does not expose.
+	return NewProcessLauncher(
 		os.Args[0], []string{"-test.run=^TestExecChild$"},
 		append([]string{"PF_EXEC_CHILD=" + behaviour}, env...),
 		"worker-1", slog.New(slog.NewTextHandler(io.Discard, nil)),
-	)
+	).(*processLauncher)
 }
 
 var testRun = &core.FlowRun{ID: "run-1", FlowName: "child-flow"}
@@ -53,10 +56,10 @@ var testRun = &core.FlowRun{ID: "run-1", FlowName: "child-flow"}
 // A child that exits non-zero is a run nobody settled, which is the signal the
 // worker turns into an expired lease and hands to the janitor.
 func TestProcessLauncherReportsAnAbnormalExit(t *testing.T) {
-	if err := testLauncher(t, "ok").Launch(testRun); err != nil {
+	if err := testLauncher(t, "ok").Launch(context.Background(), testRun); err != nil {
 		t.Errorf("Launch of a clean child = %v, want nil", err)
 	}
-	if err := testLauncher(t, "fail").Launch(testRun); err == nil {
+	if err := testLauncher(t, "fail").Launch(context.Background(), testRun); err == nil {
 		t.Error("Launch of a child that exited 3 returned nil")
 	}
 }
@@ -65,7 +68,7 @@ func TestProcessLauncherChildEnvironment(t *testing.T) {
 	// PRIMEFLOW_EXEC_MODE is inherited as "process" and must not stay that way,
 	// or the child would fork a grandchild per run.
 	t.Setenv(EnvExecMode, ExecProcess)
-	err := testLauncher(t, "assert-env", "PRIMEFLOW_DATABASE_URL=postgres://child").Launch(testRun)
+	err := testLauncher(t, "assert-env", "PRIMEFLOW_DATABASE_URL=postgres://child").Launch(context.Background(), testRun)
 	if err != nil {
 		t.Errorf("child did not see the environment it was promised: %v", err)
 	}
@@ -76,7 +79,7 @@ func TestProcessLauncherCancelStopsTheChild(t *testing.T) {
 	l.grace = time.Second
 
 	done := make(chan error, 1)
-	go func() { done <- l.Launch(testRun) }()
+	go func() { done <- l.Launch(context.Background(), testRun) }()
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -116,7 +119,7 @@ func TestProcessLauncherCancelStopsTheChild(t *testing.T) {
 // what Cancel looks in, and a stale entry there would signal the wrong process.
 func TestProcessLauncherForgetsFinishedRuns(t *testing.T) {
 	l := testLauncher(t, "ok")
-	if err := l.Launch(testRun); err != nil {
+	if err := l.Launch(context.Background(), testRun); err != nil {
 		t.Fatalf("Launch: %v", err)
 	}
 	l.mu.Lock()

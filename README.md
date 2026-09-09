@@ -275,6 +275,29 @@ lease ให้ทันที งานจึงตกไปเข้าทา�
 อีกต่อไป เพราะมันเกิดในโปรเซสที่จบไปแล้ว flow ที่สั้นและถี่มากจึงควรอยู่ในเลนที่เป็น `inline` ตามเดิม
 โหมดนี้ใช้กับ pull pool เท่านั้น — push receiver รันในโปรเซสตัวเองเสมอ
 
+### แยก Job ต่อหนึ่งงาน (Kubernetes)
+
+`PRIMEFLOW_EXEC_MODE=kubernetes` ไปอีกขั้น: แต่ละงานได้ **pod ของตัวเอง** พร้อม image,
+resource limit และ service account ของตัวเอง worker ที่ตั้งค่าแบบนี้เรียกว่า *launcher* —
+มันยัง lease งานตามปกติทุกอย่าง (คิวเดียวกัน, concurrency limit เดียวกัน, ลำดับเดียวกัน)
+แต่แทนที่จะรันเอง มันสร้าง Job แล้วรอ:
+
+```yaml
+PRIMEFLOW_EXEC_MODE: kubernetes
+PRIMEFLOW_CONCURRENCY: "10"            # = จำนวน Job ที่วิ่งพร้อมกันได้
+PRIMEFLOW_KUBE_IMAGE: registry.example.com/primex/primeflow:latest
+PRIMEFLOW_KUBE_MEMORY_LIMIT: 1Gi       # limit ต่อ "หนึ่งงาน" ไม่ใช่ต่อ worker
+```
+
+แมนิเฟสต์ที่พร้อมใช้ พร้อม Role ที่ให้สิทธิ์แค่ `create/get/delete` บน Job อยู่ที่
+[`deploy/k8s/job-launcher.yaml`](deploy/k8s/job-launcher.yaml) ตัว server ไม่เคยถือ
+credential ของคลัสเตอร์ — launcher เป็นคนถือ และมันรันอยู่ในคลัสเตอร์นั้นเอง
+
+pod ต่ออายุ lease ของตัวเองด้วย (โหมด `process` ไม่ต้อง เพราะพ่อมีชีวิตอยู่เท่ากับลูกพอดี)
+launcher จึงถูก rollout ทับได้โดยที่ Job ที่วิ่งอยู่ไม่ถูก janitor ตัดสินว่า crash แล้วสั่งรันซ้ำ
+และถ้า pod ไม่ยอมสตาร์ท — ดึง image ไม่ได้, ไม่มี node รับ — `PRIMEFLOW_KUBE_START_DEADLINE`
+คือเส้นตายที่ launcher จะเลิกรอ ลบ Job ทิ้ง แล้วคืนงานเข้าทาง retry ปกติ
+
 ### เรียก flow จากโค้ดอื่น
 
 ไม่มีแพ็กเกจ client ฝั่ง Go — `internal/store/remote` เป็น `internal/` และพูดเฉพาะ worker API
@@ -296,7 +319,8 @@ curl -X POST https://primeflow.example.com/api/external/v1/runs \
 | `PRIMEFLOW_REDIS_URL` | Redis URL สำหรับอัปเดตสด | ไม่บังคับ |
 | `PRIMEFLOW_QUEUES` | เลนที่จะ poll คั่นด้วยจุลภาค | `default` |
 | `PRIMEFLOW_CONCURRENCY` | จำนวนงานที่รันขนานกัน | `4` |
-| `PRIMEFLOW_EXEC_MODE` | `inline` = งานเป็น goroutine, `process` = หนึ่งโปรเซสต่อหนึ่งงาน | `inline` |
+| `PRIMEFLOW_EXEC_MODE` | `inline` = งานเป็น goroutine, `process` = หนึ่งโปรเซสต่อหนึ่งงาน, `kubernetes` = หนึ่ง Job ต่อหนึ่งงาน | `inline` |
+| `PRIMEFLOW_KUBE_*` | รูปร่างของ pod ในโหมด `kubernetes` (image, limit, service account, …) | ดู [`deploy/k8s/job-launcher.yaml`](deploy/k8s/job-launcher.yaml) |
 | `PRIMEFLOW_LEASE` | ระยะเวลา lease | `60s` |
 | `PRIMEFLOW_POLL` | ช่วงเวลา poll สำรอง | `2s` |
 | `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | `RunDeployment` ซ้อนได้ลึกแค่ไหน | `8` |

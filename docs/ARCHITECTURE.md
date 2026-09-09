@@ -233,7 +233,8 @@ pool name; the `owner` field is how the console attributes it.
 
 **Per-run isolation is a deployment switch, not a second architecture.**
 `PRIMEFLOW_EXEC_MODE=process` makes a worker start a child process of its own
-binary for each run it leases, instead of a goroutine. Everything the
+binary for each run it leases, instead of a goroutine; `=kubernetes` makes it a
+Job instead of a process. Everything the
 orchestrator sees is unchanged: the parent leases through the same statement, so
 capped lanes still count correctly; the parent's heartbeat renews the lease and
 carries cancellations, which it delivers to the child as a SIGTERM — the signal
@@ -252,6 +253,35 @@ flow and task timings, because they now happen in a process that exits.
 — a wait beyond `SuspendThreshold` still gives up the process — but under this
 mode giving it up means the child exits and a later one replays, so a run that
 waits a long time in many short suspensions pays a start each time.
+
+**The Kubernetes launcher is that same worker with a different launcher.** It
+leases, heartbeats, renews and drains identically; `internal/kube` creates a Job
+per leased run and blocks until it settles, so a worker slot is a pod and
+`PRIMEFLOW_CONCURRENCY` is how many pods may exist at once. Two properties are
+worth naming:
+
+- **PrimeFlow still owns retries.** Every Job is rendered with `backoffLimit: 0`
+  and `restartPolicy: Never`. A Job that restarted its own pod would re-enter
+  the flow under a lease already counted as one attempt, which is the one way to
+  get a run executed twice.
+- **The pod renews the lease itself** (`PRIMEFLOW_LEASE_RENEW`), unlike a
+  process-mode child, whose parent lives exactly as long as it does. A pod
+  outlives a rolled or evicted launcher, and a run whose lease lapsed under a
+  live pod would be crashed by the janitor and leased again — the same flow
+  twice. Renewing from inside the pod closes that, and the renewal answer
+  carries cancellations, so an operator's cancel reaches a pod whose launcher is
+  gone.
+
+A Job that never starts — an image that will not pull, a pod nothing will
+schedule — is neither running nor failed, and would hold its lease for as long
+as the cluster kept trying. `PRIMEFLOW_KUBE_START_DEADLINE` is the bound: the
+launcher watches for the run to leave PENDING, and past the deadline deletes the
+Job and lets the run take the crash path.
+
+The server is still free of cluster credentials. The launcher holds them, runs
+inside the cluster it launches into, and its Role grants `create`, `get`,
+`list` and `delete` on Jobs in one namespace — see `deploy/k8s/job-launcher.yaml`. The run
+pods get a service account with no permissions and no token mounted at all.
 
 **Push pools** invert the flow for scale-to-zero. A pool with `pool_type='push'`
 has no leased workers; the leader's dispatch loop `POST`s each ready run to the

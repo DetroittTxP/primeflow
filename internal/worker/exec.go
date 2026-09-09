@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -10,25 +11,47 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
-// Execution modes. Inline is the default and what every worker did before this
-// existed: each leased run is a goroutine of the worker process. Process gives
-// each run a child process of the same binary, so a panic that escapes a flow,
-// a goroutine that outlives it, or an OOM kill reaches one run instead of every
-// run sharing the process.
+// Execution modes. Inline is the default and what every worker did before any
+// of this existed: each leased run is a goroutine of the worker process.
+// Process gives each run a child process of the same binary, and Kubernetes a
+// Job of its own, so a panic that escapes a flow, a goroutine that outlives it,
+// or an OOM kill reaches one run instead of every run sharing the process.
+//
+// Only where a run executes changes. The worker still leases through the same
+// statement, still heartbeats, still renews and still drains, so per-queue
+// concurrency, cancellation and crash recovery behave identically in all three.
 const (
-	ExecInline  = "inline"
-	ExecProcess = "process"
+	ExecInline     = "inline"
+	ExecProcess    = "process"
+	ExecKubernetes = "kubernetes"
 )
 
-// The environment a process-mode child is started with. Both public entry
+// The environment an out-of-process child is started with. Both public entry
 // points check for EnvRunID before serving: finding it, they execute that one
-// run under the parent's lease and exit, so a worker's main() is the same
-// program whichever mode it runs in.
+// run under the lease named in EnvLeaseWorkerID and exit, so a worker's main()
+// is the same program whichever mode it runs in.
+//
+// EnvLeaseRenew asks the child to renew that lease itself. A process-mode child
+// does not need to — its parent is alive for exactly as long as it is — but a
+// pod outlives a rolled launcher, and a run whose lease lapsed under a live pod
+// would be crashed and leased again while still executing.
 const (
 	EnvRunID         = "PRIMEFLOW_RUN_ID"
 	EnvLeaseWorkerID = "PRIMEFLOW_LEASE_WORKER_ID"
 	EnvExecMode      = "PRIMEFLOW_EXEC_MODE"
+	EnvLeaseRenew    = "PRIMEFLOW_LEASE_RENEW"
 )
+
+// Launcher runs one leased run somewhere other than this goroutine. The worker
+// holds the slot and the lease for as long as Launch blocks, and an error from
+// it means "nobody settled this run" — never the flow's own failure, which the
+// engine settles wherever it ran.
+type Launcher interface {
+	Launch(ctx context.Context, run *core.FlowRun) error
+	// Cancel stops the run if this launcher is still running it, reporting
+	// whether there was anything to stop.
+	Cancel(runID string) bool
+}
 
 // killGrace is how long a cancelled child has to settle its run before it is
 // killed outright. Comfortably above the engine's settle path and well below a
@@ -55,17 +78,20 @@ type processLauncher struct {
 	procs map[string]*os.Process
 }
 
-func newProcessLauncher(path string, args, env []string, workerID string, log *slog.Logger) *processLauncher {
+// NewProcessLauncher builds the process-mode launcher. path is the binary to
+// re-invoke — this one — and env is the route to the orchestrator for a worker
+// that was configured in Go rather than through the environment.
+func NewProcessLauncher(path string, args, env []string, workerID string, log *slog.Logger) Launcher {
 	return &processLauncher{
 		path: path, args: args, env: env, workerID: workerID,
 		grace: killGrace, log: log, procs: map[string]*os.Process{},
 	}
 }
 
-// Launch runs one child to completion. It returns the child's exit error, which
-// the caller treats as "this run was not settled" — never as the flow's own
-// failure, because a flow that fails settles itself and exits 0.
-func (p *processLauncher) Launch(run *core.FlowRun) error {
+// Launch runs one child to completion. The context is deliberately unused: a
+// draining worker waits for its runs rather than killing them, exactly as the
+// inline path does.
+func (p *processLauncher) Launch(_ context.Context, run *core.FlowRun) error {
 	cmd := exec.Command(p.path, p.args...)
 	// os/exec keeps the last of a repeated variable, so what is appended here
 	// overrides what the worker inherited — including the exec mode, since a

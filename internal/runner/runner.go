@@ -26,6 +26,7 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/core"
 	"github.com/DetroittTxP/primeflow/internal/engine"
 	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/kube"
 	"github.com/DetroittTxP/primeflow/internal/metrics"
 	"github.com/DetroittTxP/primeflow/internal/pushsig"
 	"github.com/DetroittTxP/primeflow/internal/store"
@@ -37,9 +38,10 @@ import (
 // public entry points can name them without importing internal/worker under an
 // alias — both are themselves called "worker".
 const (
-	ExecInline  = worker.ExecInline
-	ExecProcess = worker.ExecProcess
-	EnvExecMode = worker.EnvExecMode
+	ExecInline     = worker.ExecInline
+	ExecProcess    = worker.ExecProcess
+	ExecKubernetes = worker.ExecKubernetes
+	EnvExecMode    = worker.EnvExecMode
 )
 
 // Deps is the infrastructure a runner borrows. Events may be nil: a remote
@@ -74,10 +76,12 @@ type Config struct {
 	PushAddr   string
 	PushSecret string
 
-	// ExecMode is worker.ExecInline (the default) or worker.ExecProcess, which
-	// gives every run a child process of this binary. ExecEnv is what such a
-	// child needs to reach the orchestrator when the parent was configured in
-	// Go rather than through the environment.
+	// ExecMode is worker.ExecInline (the default), worker.ExecProcess — a child
+	// process of this binary per run — or worker.ExecKubernetes, a Job per run.
+	// ExecEnv is what a process-mode child needs to reach the orchestrator when
+	// the parent was configured in Go rather than through the environment; a
+	// pod is given its route by the Job template, which PRIMEFLOW_KUBE_*
+	// describes in full — see kube.TemplateFromEnv.
 	ExecMode string
 	ExecEnv  []string
 
@@ -97,29 +101,80 @@ func ServeWorker(ctx context.Context, d Deps, c Config) error {
 		MaxSubflowDepth:    c.MaxSubflowDepth,
 		CancelPollInterval: c.CancelPollInterval,
 		ExecMode:           c.ExecMode,
-		ExecEnv:            c.ExecEnv,
 	}
+	// Everything that can fail about a launcher is resolved here, at start-up:
+	// a worker that cannot find its own binary, read a service-account token or
+	// parse a Job template must not discover it while holding a lease.
 	switch c.ExecMode {
 	case "", worker.ExecInline:
 		cfg.ExecMode = worker.ExecInline
 	case worker.ExecProcess:
-		// Resolved once, here, so a binary that cannot find itself fails at
-		// start-up rather than once per leased run.
 		path, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("%s=%s needs this binary's own path: %w",
 				worker.EnvExecMode, worker.ExecProcess, err)
 		}
-		cfg.ExecPath = path
+		cfg.NewLauncher = func(workerID string) worker.Launcher {
+			return worker.NewProcessLauncher(path, nil, c.ExecEnv, workerID, d.Log)
+		}
+	case worker.ExecKubernetes:
+		client, tmpl, err := kubeSetup()
+		if err != nil {
+			return err
+		}
+		// Jobs left by a previous launcher whose runs have since finished — a
+		// roll, an eviction — are collected before this one starts leasing.
+		kube.SweepFinished(ctx, client, d.Store, d.Log)
+		cfg.NewLauncher = func(workerID string) worker.Launcher {
+			return kube.NewLauncher(client, tmpl, d.Store, workerID,
+				func(runID string) map[string]string { return childEnv(runID, workerID) },
+				d.Log, kube.LauncherOptions{StartDeadline: tmpl.StartDeadline})
+		}
 	default:
-		return fmt.Errorf("%s=%q is not a mode: use %q or %q",
-			worker.EnvExecMode, c.ExecMode, worker.ExecInline, worker.ExecProcess)
+		return fmt.Errorf("%s=%q is not a mode: use %q, %q or %q", worker.EnvExecMode,
+			c.ExecMode, worker.ExecInline, worker.ExecProcess, worker.ExecKubernetes)
 	}
 	return worker.New(d.Store, d.Bus, c.Registry, d.Events, d.Log, cfg).Run(ctx)
 }
 
-// Leased reports the run a process-mode child was started for, and the lease it
-// is to execute under. Both public entry points check it before serving: a
+// kubeSetup builds the cluster client and the Job template from the launcher's
+// own environment. One launcher per work queue — the shape the deployment docs
+// already recommend — is what makes an image, a set of limits and a service
+// account per lane a matter of that launcher's manifest.
+func kubeSetup() (*kube.Client, kube.Template, error) {
+	tmpl, err := kube.TemplateFromEnv()
+	if err != nil {
+		return nil, kube.Template{}, err
+	}
+	cfg, err := kube.InCluster()
+	if err != nil {
+		return nil, kube.Template{}, err
+	}
+	if tmpl.Namespace != "" {
+		cfg.Namespace = tmpl.Namespace
+	}
+	client, err := kube.New(cfg)
+	if err != nil {
+		return nil, kube.Template{}, err
+	}
+	return client, tmpl, nil
+}
+
+// childEnv is what any out-of-process child is told: which run, under whose
+// lease, and that it is a child rather than another launcher. A pod is also
+// asked to renew the lease itself, because it can outlive the launcher that
+// created it — see worker.EnvLeaseRenew.
+func childEnv(runID, workerID string) map[string]string {
+	return map[string]string{
+		worker.EnvRunID:         runID,
+		worker.EnvLeaseWorkerID: workerID,
+		worker.EnvExecMode:      worker.ExecInline,
+		worker.EnvLeaseRenew:    "true",
+	}
+}
+
+// Leased reports the run an out-of-process child was started for, and the lease
+// it is to execute under. Both public entry points check it before serving: a
 // child is the same binary as its parent, and this is what tells it so.
 func Leased() (runID, workerID string, ok bool) {
 	runID = os.Getenv(worker.EnvRunID)
@@ -127,29 +182,80 @@ func Leased() (runID, workerID string, ok bool) {
 	return runID, workerID, runID != "" && workerID != ""
 }
 
-// RunLeased executes a run the parent process has already leased, and is the
-// whole of what a process-mode child does.
+// RunLeased executes a run the process that started this one has already
+// leased, and is the whole of what a child — a forked process, a pod — does.
 //
 // It deliberately does none of what a worker does around a run: no lease of its
-// own (the parent's heartbeat renews the one it was handed), no catalogue, no
-// metrics listener, no heartbeat. Cancelling ctx — which is what the parent's
-// SIGTERM does — cancels the run exactly as Engine.Cancel would in the parent,
-// and the engine settles it either way.
+// own, no catalogue, no metrics listener, no heartbeat. Cancelling ctx, which
+// is what a SIGTERM from the launcher does, cancels the run exactly as
+// Engine.Cancel would in the parent, and the engine settles it either way.
+//
+// The exception is worker.EnvLeaseRenew, which the Kubernetes launcher sets: a
+// pod outlives the launcher that created it, so it renews the lease itself and
+// learns of a cancellation on the same call.
 func RunLeased(ctx context.Context, d Deps, c Config, runID, workerID string) error {
 	run, err := d.Store.GetFlowRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("read leased run %s: %w", runID, err)
 	}
-	// The lease can have moved on between the parent's fork and this read — a
-	// slow start against a short lease. The new holder is executing it now.
+	// The lease can have moved on between the launch and this read — a slow
+	// start against a short lease. The new holder is executing it now.
 	if run.WorkerID == nil || *run.WorkerID != workerID {
 		return fmt.Errorf("run %s is no longer leased by %s", runID, workerID)
 	}
-	engine.New(d.Store, c.Registry, d.Events, d.Log, engine.Config{
+
+	eng := engine.New(d.Store, c.Registry, d.Events, d.Log, engine.Config{
 		WorkerID: workerID, Metrics: d.Metrics, MaxSubflowDepth: c.MaxSubflowDepth,
 		CancelPollInterval: c.CancelPollInterval,
-	}).Execute(ctx, run)
+	})
+	if os.Getenv(worker.EnvLeaseRenew) != "" {
+		stop := renewOwnLease(ctx, d, c, runID, workerID, func() { eng.Cancel(runID) })
+		defer stop()
+	}
+	eng.Execute(ctx, run)
 	return nil
+}
+
+// renewOwnLease keeps one run's lease alive from inside the child, and stops
+// the run when the answer says it should: a lease that came back unrenewed was
+// reclaimed by the janitor and is somebody else's now, and a run listed as
+// cancelling is an operator's decision that reaches a pod no other way once its
+// launcher is gone. It is the worker's heartbeat loop, narrowed to one run.
+func renewOwnLease(ctx context.Context, d Deps, c Config, runID, workerID string, cancel func()) (stop func()) {
+	lease := c.LeaseDuration
+	if lease <= 0 {
+		lease = 60 * time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(lease / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+			}
+			renewed, cancelling, err := d.Store.RenewLeases(
+				context.WithoutCancel(ctx), workerID, []string{runID}, lease)
+			if err != nil {
+				// The lease still has its full period to run; ask again next tick.
+				d.Log.Warn("lease renewal failed; will retry", "run", runID, "err", err)
+				continue
+			}
+			if len(renewed) == 0 {
+				d.Log.Warn("lost lease; abandoning run", "run", runID)
+				cancel()
+				return
+			}
+			if len(cancelling) > 0 {
+				d.Log.Info("cancelling run on request", "run", runID)
+				cancel()
+				return
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 // RunOne claims a single scheduled run and executes it synchronously. It is the

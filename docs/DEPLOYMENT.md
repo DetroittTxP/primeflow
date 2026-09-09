@@ -300,6 +300,31 @@ same cancellation, same crash recovery — and the cost is a process start per r
 plus the loss of flow and task timings from this worker's `/metrics`, which now
 happen in a process that exits. Pull pools only.
 
+On Kubernetes, `PRIMEFLOW_EXEC_MODE=kubernetes` goes one further: each run gets
+a Job, and so its own image, resource limits and service account. The worker
+that does this is called a launcher, it leases exactly as a worker does, and
+`PRIMEFLOW_CONCURRENCY` becomes how many run pods may exist at once. Apply
+[`deploy/k8s/job-launcher.yaml`](../deploy/k8s/job-launcher.yaml), which carries
+the launcher Deployment, the Role that lets it `create`, `get`, `list` and
+`delete` Jobs in its namespace, and a no-permission service account for the run pods. It
+replaces the worker Deployment for that lane rather than joining it.
+
+The pod is described entirely by `PRIMEFLOW_KUBE_*` on the launcher:
+`_IMAGE` (required), `_COMMAND`, `_ARGS`, `_SERVICE_ACCOUNT`, `_NAMESPACE`,
+`_ENV_FROM_SECRET`, `_ENV_FROM_CONFIGMAP`, `_ENV`, `_CPU_REQUEST`, `_CPU_LIMIT`,
+`_MEMORY_REQUEST`, `_MEMORY_LIMIT`, `_NODE_SELECTOR`, `_IMAGE_PULL_SECRETS`,
+`_LABELS`, `_ANNOTATIONS`, `_RUN_AS_USER` (65532), `_TTL` (10m),
+`_ACTIVE_DEADLINE`, `_START_DEADLINE` (5m), and `_POD_SPEC_PATCH` — a path to a
+JSON object merged over the rendered pod spec, for tolerations, affinity,
+volumes or anything else not modelled.
+
+Two failure modes are worth knowing before you need them:
+
+| Symptom | Cause |
+|---|---|
+| runs go `RUNNING` then `CRASHED` in a loop, pods `CreateContainerConfigError` | the run image cannot see `PRIMEFLOW_DATABASE_URL` (or the API URL and token) — check `_ENV_FROM_SECRET` |
+| runs sit `PENDING` for `_START_DEADLINE`, then retry | no pod ever started: unpullable image, unschedulable pod, or an admission webhook rejecting the spec. `kubectl get jobs -l app.kubernetes.io/managed-by=primeflow` while it is waiting |
+
 No `PRIMEFLOW_DATABASE_URL`. Set beside the API variables it is ignored with a
 warning, but the point is that the VM should not hold a credential it does not
 use.
