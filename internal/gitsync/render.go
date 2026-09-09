@@ -97,6 +97,14 @@ spec:
       labels:
         app: %[1]s
     spec:
+      securityContext:
+        runAsNonRoot: true
+        # Keep the uid: the worker image's USER is the name "nonroot", and
+        # kubelet rejects a container whose non-rootness it cannot verify.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: worker
           image: %[4]s
@@ -104,6 +112,11 @@ spec:
           envFrom:
             - secretRef:
                 name: %[1]s-env
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
 `, spec.Name, spec.Namespace, spec.Replicas, spec.Image)
 }
 

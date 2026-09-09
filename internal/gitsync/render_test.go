@@ -64,6 +64,24 @@ func TestRenderGitBundle(t *testing.T) {
 	}
 }
 
+// A GitOps-delivered worker runs the same distroless image as the shipped
+// manifests, whose USER is a name: runAsNonRoot without a numeric uid is
+// rejected by kubelet with CreateContainerConfigError and never starts.
+func TestRenderedDeploymentRunsAsANonRootUID(t *testing.T) {
+	files, _ := Render(baseSpec(), core.GitConnection{})
+	dep := string(files["workers/primex-worker-3/deployment.yaml"])
+	for _, want := range []string{
+		"runAsNonRoot: true",
+		"runAsUser: 65532",
+		"runAsGroup: 65532",
+		"readOnlyRootFilesystem: true",
+	} {
+		if !strings.Contains(dep, want) {
+			t.Errorf("deployment.yaml missing %q:\n%s", want, dep)
+		}
+	}
+}
+
 func TestRenderEnvOverride(t *testing.T) {
 	s := baseSpec()
 	s.Env = map[string]string{"PRIMEFLOW_CONCURRENCY": "12", "EXTRA_FLAG": "yes"}

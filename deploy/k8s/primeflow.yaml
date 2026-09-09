@@ -84,6 +84,15 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        # runAsNonRoot alone is not enough for this image. Its final USER is the
+        # *name* `nonroot`, and kubelet cannot prove a name is not root: it
+        # refuses the container with CreateContainerConfigError, "image has
+        # non-numeric user (nonroot), cannot verify user is non-root", and the
+        # pod never starts. 65532 is the nonroot uid/gid in the distroless base.
+        # deploy/k8s/job-launcher.yaml and the Jobs internal/kube renders for
+        # per-run isolation set the same pair.
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: server
@@ -191,6 +200,9 @@ spec:
             capabilities: {drop: ["ALL"]}
       securityContext:
         runAsNonRoot: true
+        # Numeric uid/gid required; see primeflow-server.
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: worker
@@ -247,6 +259,9 @@ spec:
             capabilities: {drop: ["ALL"]}
       securityContext:
         runAsNonRoot: true
+        # Numeric uid/gid required; see primeflow-server.
+        runAsUser: 65532
+        runAsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: worker
@@ -344,7 +359,12 @@ spec:
 #     metadata: {labels: {app: primeflow, component: push-worker}}
 #     spec:
 #       terminationGracePeriodSeconds: 120
-#       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+#       securityContext:
+#         runAsNonRoot: true
+#         # Numeric uid/gid required; see primeflow-server.
+#         runAsUser: 65532
+#         runAsGroup: 65532
+#         seccompProfile: {type: RuntimeDefault}
 #       # Blocks until the schema is complete; see primeflow-worker-vcd.
 #       initContainers:
 #         - name: migrate
