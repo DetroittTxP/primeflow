@@ -231,6 +231,28 @@ free of cluster credentials and portable to a plain `docker compose` or a
 systemd unit. External teams run their own worker Deployment against their own
 pool name; the `owner` field is how the console attributes it.
 
+**Per-run isolation is a deployment switch, not a second architecture.**
+`PRIMEFLOW_EXEC_MODE=process` makes a worker start a child process of its own
+binary for each run it leases, instead of a goroutine. Everything the
+orchestrator sees is unchanged: the parent leases through the same statement, so
+capped lanes still count correctly; the parent's heartbeat renews the lease and
+carries cancellations, which it delivers to the child as a SIGTERM — the signal
+the child turns into a cancelled run context, the same thing `Engine.Cancel`
+does in-process. A child that dies without settling its run is the interesting
+case: the parent expires the lease itself (`RenewLease` for zero) rather than
+waiting out the period, which hands the run to the janitor's crash path a lease
+sooner. That path is unchanged too, retry budget included.
+
+What it buys is a blast radius of one run: a panic that escapes a flow, a
+goroutine that outlives it, a leaked file handle, an OOM kill. What it costs is
+a process start per run (a few milliseconds for a Go binary, but the flow's own
+start-up on top), and the worker's `/metrics` listener no longer sees the
+flow and task timings, because they now happen in a process that exits.
+`sdk.Sleep` and `RunDeploymentAndWait` are unaffected in the sense that matters
+— a wait beyond `SuspendThreshold` still gives up the process — but under this
+mode giving it up means the child exits and a later one replays, so a run that
+waits a long time in many short suspensions pays a start each time.
+
 **Push pools** invert the flow for scale-to-zero. A pool with `pool_type='push'`
 has no leased workers; the leader's dispatch loop `POST`s each ready run to the
 pool's `push_endpoint` with an HMAC (`X-PrimeFlow-Signature`) over the body, and

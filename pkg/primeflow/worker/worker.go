@@ -85,6 +85,13 @@ type Options struct {
 	PushAddr   string
 	PushSecret string
 
+	// ExecMode is "inline" (the default: every run is a goroutine of this
+	// process) or "process" (each run gets a child process of this same binary,
+	// so a panic, a leak or an OOM kill reaches one run rather than all of
+	// them). PRIMEFLOW_EXEC_MODE sets it. Pull pools only — a push receiver
+	// executes in process whatever this says.
+	ExecMode string
+
 	// Registry holds the flows this process can execute. Defaults to sdk.Default.
 	Registry *sdk.Registry
 
@@ -161,6 +168,7 @@ func (o *Options) applyEnv() {
 	o.MetricsAddr = firstNonEmpty(o.MetricsAddr, envOr("PRIMEFLOW_METRICS_ADDR", ":9090"))
 	o.PushAddr = firstNonEmpty(o.PushAddr, envOr("PRIMEFLOW_PUSH_ADDR", ":8090"))
 	o.PushSecret = firstNonEmpty(o.PushSecret, os.Getenv("PRIMEFLOW_PUSH_SECRET"))
+	o.ExecMode = firstNonEmpty(o.ExecMode, envOr(runner.EnvExecMode, runner.ExecInline))
 	if o.Registry == nil {
 		o.Registry = sdk.Default
 	}
@@ -333,11 +341,41 @@ func (a *App) config() runner.Config {
 		CancelPollInterval: cancelPoll,
 		MaxSubflowDepth:    o.MaxSubflowDepth, MetricsAddr: o.MetricsAddr,
 		PushAddr: o.PushAddr, PushSecret: o.PushSecret, Registry: o.Registry,
+		ExecMode: o.ExecMode, ExecEnv: execEnv(o),
 	}
 }
 
-// Serve runs the pull worker until ctx is cancelled.
+// execEnv is the route a process-mode child is given on top of the environment
+// it inherits. A worker configured entirely through PRIMEFLOW_* variables would
+// pass these anyway; one configured in Go would otherwise fork a child that has
+// no idea how to reach the orchestrator.
+func execEnv(o Options) []string {
+	var env []string
+	add := func(k, v string) {
+		if v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	if o.Remote() {
+		add("PRIMEFLOW_API_URL", o.APIURL)
+		add("PRIMEFLOW_WORKER_TOKEN", o.WorkerToken)
+	} else {
+		add("PRIMEFLOW_DATABASE_URL", o.DatabaseURL)
+	}
+	// The bus is what carries a child's state changes to the console's live
+	// feed, so a child opens the same one its parent did.
+	add("PRIMEFLOW_NATS_URL", o.NatsURL)
+	add("PRIMEFLOW_REDIS_URL", o.RedisURL)
+	add("PRIMEFLOW_MAX_SUBFLOW_DEPTH", strconv.Itoa(o.MaxSubflowDepth))
+	return env
+}
+
+// Serve runs the pull worker until ctx is cancelled — or, when this process is
+// itself a process-mode child, executes the one run it was started for.
 func (a *App) Serve(ctx context.Context) error {
+	if runID, workerID, ok := runner.Leased(); ok {
+		return runner.RunLeased(ctx, a.deps(), a.config(), runID, workerID)
+	}
 	return runner.ServeWorker(ctx, a.deps(), a.config())
 }
 

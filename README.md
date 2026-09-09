@@ -248,6 +248,33 @@ flow สองตัวที่ใช้งานได้จริง แล�
 worker เท่านั้น — server ไม่ต้องขยับ และ worker ที่ lease งานของ flow ที่ตัวเองไม่ได้ลงทะเบียนไว้
 จะไม่ทำให้งาน fail แต่คืนงานกลับคิวเป็น `AwaitingWorker` การทยอย rollout จึงไม่ใช่การล่ม
 
+### แยกโปรเซสต่อหนึ่งงาน
+
+โดยปกติทุกงานที่ worker lease มาจะรันเป็น goroutine ในโปรเซสเดียวกัน ตั้ง
+`PRIMEFLOW_EXEC_MODE=process` แล้ว worker จะ fork ไบนารีตัวเองขึ้นมาหนึ่งโปรเซสต่อหนึ่งงานแทน
+main() ของคุณไม่ต้องแก้อะไรเลย — ลูกคือโปรแกรมเดิมที่ถูกเรียกใหม่พร้อมตัวแปร `PRIMEFLOW_RUN_ID`
+และ `primeflow.RunWorker` เห็นตัวแปรนั้นแล้วรันแค่งานนั้นงานเดียวแล้วจบ:
+
+```yaml
+environment:
+  PRIMEFLOW_QUEUES: vcd
+  PRIMEFLOW_CONCURRENCY: "4"      # ยังหมายถึง 4 งานพร้อมกัน แต่เป็น 4 โปรเซส
+  PRIMEFLOW_EXEC_MODE: process
+```
+
+สิ่งที่ได้คือ blast radius เท่ากับหนึ่งงาน: panic ที่หลุดออกมาจาก flow, goroutine ที่ค้าง,
+หน่วยความจำที่รั่ว หรือ OOM kill จะกระทบแค่งานเดียว ไม่ลากงานข้างๆ ไปด้วย
+
+ฝั่ง orchestrator ไม่มีอะไรเปลี่ยน: พ่อยังเป็นคน lease (concurrency limit ของเลนจึงยังนับถูก),
+ยังส่ง heartbeat ต่อ lease ให้ลูก และการสั่งยกเลิกจะถูกส่งต่อเป็น SIGTERM ซึ่งลูกแปลงเป็นการยกเลิก
+context แบบเดียวกับที่ `Engine.Cancel` ทำในโหมดปกติ ถ้าลูกตายโดยยังไม่ปิดสถานะงาน พ่อจะหมดอายุ
+lease ให้ทันที งานจึงตกไปเข้าทาง crash ของ janitor เร็วกว่ารอ lease หมดเอง — และได้ retry
+ตามงบเดิมทุกประการ
+
+ต้นทุนคือการ start โปรเซสต่อหนึ่งงาน และ `/metrics` ของ worker จะไม่เห็นเวลาของ flow/task
+อีกต่อไป เพราะมันเกิดในโปรเซสที่จบไปแล้ว flow ที่สั้นและถี่มากจึงควรอยู่ในเลนที่เป็น `inline` ตามเดิม
+โหมดนี้ใช้กับ pull pool เท่านั้น — push receiver รันในโปรเซสตัวเองเสมอ
+
 ### เรียก flow จากโค้ดอื่น
 
 ไม่มีแพ็กเกจ client ฝั่ง Go — `internal/store/remote` เป็น `internal/` และพูดเฉพาะ worker API
@@ -269,6 +296,7 @@ curl -X POST https://primeflow.example.com/api/external/v1/runs \
 | `PRIMEFLOW_REDIS_URL` | Redis URL สำหรับอัปเดตสด | ไม่บังคับ |
 | `PRIMEFLOW_QUEUES` | เลนที่จะ poll คั่นด้วยจุลภาค | `default` |
 | `PRIMEFLOW_CONCURRENCY` | จำนวนงานที่รันขนานกัน | `4` |
+| `PRIMEFLOW_EXEC_MODE` | `inline` = งานเป็น goroutine, `process` = หนึ่งโปรเซสต่อหนึ่งงาน | `inline` |
 | `PRIMEFLOW_LEASE` | ระยะเวลา lease | `60s` |
 | `PRIMEFLOW_POLL` | ช่วงเวลา poll สำรอง | `2s` |
 | `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | `RunDeployment` ซ้อนได้ลึกแค่ไหน | `8` |

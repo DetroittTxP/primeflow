@@ -290,7 +290,15 @@ PRIMEFLOW_WORKER_NAME=vm-worker1
 PRIMEFLOW_CONCURRENCY=4                     # runs at once
 PRIMEFLOW_LEASE=60s                         # how long a claim survives without a heartbeat
 PRIMEFLOW_METRICS_ADDR=127.0.0.1:9090       # the only port a worker opens
+PRIMEFLOW_EXEC_MODE=inline                  # or "process": one child process per run
 ```
+
+`PRIMEFLOW_EXEC_MODE=process` runs each leased run in a child process of this
+same binary, so a panic, a leak or an OOM kill reaches one run rather than the
+four sharing the process. The orchestrator sees no difference — same leases,
+same cancellation, same crash recovery — and the cost is a process start per run
+plus the loss of flow and task timings from this worker's `/metrics`, which now
+happen in a process that exits. Pull pools only.
 
 No `PRIMEFLOW_DATABASE_URL`. Set beside the API variables it is ignored with a
 warning, but the point is that the VM should not hold a credential it does not

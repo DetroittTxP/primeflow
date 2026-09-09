@@ -122,6 +122,13 @@ type Options struct {
 	PushAddr   string
 	PushSecret string
 
+	// ExecMode is "inline" (the default: every run is a goroutine of this
+	// process) or "process" (each run gets a child process of this same binary,
+	// so a panic, a leak or an OOM kill reaches one run rather than all of
+	// them). PRIMEFLOW_EXEC_MODE sets it. Pull pools only — a push receiver
+	// executes in process whatever this says.
+	ExecMode string
+
 	// Registry holds the flows this process can execute. Defaults to sdk.Default.
 	Registry *sdk.Registry
 
@@ -231,6 +238,7 @@ func (o *Options) applyEnv() {
 	o.WorkerMetricsAddr = firstNonEmpty(o.WorkerMetricsAddr, envOr("PRIMEFLOW_METRICS_ADDR", ":9090"))
 	o.PushAddr = firstNonEmpty(o.PushAddr, envOr("PRIMEFLOW_PUSH_ADDR", ":8090"))
 	o.PushSecret = firstNonEmpty(o.PushSecret, os.Getenv("PRIMEFLOW_PUSH_SECRET"))
+	o.ExecMode = firstNonEmpty(o.ExecMode, envOr(runner.EnvExecMode, runner.ExecInline))
 	if o.Registry == nil {
 		o.Registry = sdk.Default
 	}
@@ -571,8 +579,12 @@ func (a *App) ServeAPI(ctx context.Context) error {
 	)
 }
 
-// ServeWorker runs a worker for the registered flows.
+// ServeWorker runs a worker for the registered flows — or, when this process is
+// itself a process-mode child, executes the one run it was started for.
 func (a *App) ServeWorker(ctx context.Context) error {
+	if runID, workerID, ok := runner.Leased(); ok {
+		return runner.RunLeased(ctx, a.runnerDeps(), a.runnerConfig(), runID, workerID)
+	}
 	return runner.ServeWorker(ctx, a.runnerDeps(), a.runnerConfig())
 }
 
@@ -604,14 +616,47 @@ func (a *App) runnerConfig() runner.Config {
 		MetricsAddr:     a.Options.WorkerMetricsAddr,
 		PushAddr:        a.Options.PushAddr,
 		PushSecret:      a.Options.PushSecret,
+		ExecMode:        a.Options.ExecMode,
+		ExecEnv:         execEnv(a.Options),
 		Registry:        a.Options.Registry,
 	}
+}
+
+// execEnv is the route a process-mode child is given on top of the environment
+// it inherits. A worker configured entirely through PRIMEFLOW_* variables would
+// pass these anyway; one configured in Go would otherwise fork a child that has
+// no idea how to reach the orchestrator.
+func execEnv(o Options) []string {
+	var env []string
+	add := func(k, v string) {
+		if v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	if o.Remote() {
+		add("PRIMEFLOW_API_URL", o.APIURL)
+		add("PRIMEFLOW_WORKER_TOKEN", o.WorkerToken)
+	} else {
+		add("PRIMEFLOW_DATABASE_URL", o.DatabaseURL)
+	}
+	// The bus is what carries a child's state changes to the console's live
+	// feed, so a child opens the same one its parent did.
+	add("PRIMEFLOW_NATS_URL", o.NatsURL)
+	add("PRIMEFLOW_REDIS_URL", o.RedisURL)
+	add("PRIMEFLOW_MAX_SUBFLOW_DEPTH", strconv.Itoa(o.MaxSubflowDepth))
+	return env
 }
 
 // ServeAll runs the API and a worker in one process — the mode to use for
 // development, a small deployment, or when PrimeFlow is embedded directly in
 // the PrimeX backend.
 func (a *App) ServeAll(ctx context.Context) error {
+	// A process-mode child re-enters whichever entry point its parent's main()
+	// calls. Here that must be the run it was started for, not a second API
+	// server on a port the parent already holds.
+	if _, _, ok := runner.Leased(); ok {
+		return a.ServeWorker(ctx)
+	}
 	return runAll(ctx, a.ServeAPI, a.ServeWorker)
 }
 

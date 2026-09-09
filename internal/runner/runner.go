@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,6 +31,15 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/internal/worker"
 	"github.com/DetroittTxP/primeflow/pkg/sdk"
+)
+
+// Execution modes and the variable that selects one, re-exported so the two
+// public entry points can name them without importing internal/worker under an
+// alias — both are themselves called "worker".
+const (
+	ExecInline  = worker.ExecInline
+	ExecProcess = worker.ExecProcess
+	EnvExecMode = worker.EnvExecMode
 )
 
 // Deps is the infrastructure a runner borrows. Events may be nil: a remote
@@ -64,12 +74,19 @@ type Config struct {
 	PushAddr   string
 	PushSecret string
 
+	// ExecMode is worker.ExecInline (the default) or worker.ExecProcess, which
+	// gives every run a child process of this binary. ExecEnv is what such a
+	// child needs to reach the orchestrator when the parent was configured in
+	// Go rather than through the environment.
+	ExecMode string
+	ExecEnv  []string
+
 	Registry *sdk.Registry
 }
 
 // ServeWorker runs a pull worker until ctx is cancelled.
 func ServeWorker(ctx context.Context, d Deps, c Config) error {
-	w := worker.New(d.Store, d.Bus, c.Registry, d.Events, d.Log, worker.Config{
+	cfg := worker.Config{
 		Name:               c.Name,
 		Queues:             c.Queues,
 		Concurrency:        c.Concurrency,
@@ -79,8 +96,60 @@ func ServeWorker(ctx context.Context, d Deps, c Config) error {
 		MetricsAddr:        c.MetricsAddr,
 		MaxSubflowDepth:    c.MaxSubflowDepth,
 		CancelPollInterval: c.CancelPollInterval,
-	})
-	return w.Run(ctx)
+		ExecMode:           c.ExecMode,
+		ExecEnv:            c.ExecEnv,
+	}
+	switch c.ExecMode {
+	case "", worker.ExecInline:
+		cfg.ExecMode = worker.ExecInline
+	case worker.ExecProcess:
+		// Resolved once, here, so a binary that cannot find itself fails at
+		// start-up rather than once per leased run.
+		path, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("%s=%s needs this binary's own path: %w",
+				worker.EnvExecMode, worker.ExecProcess, err)
+		}
+		cfg.ExecPath = path
+	default:
+		return fmt.Errorf("%s=%q is not a mode: use %q or %q",
+			worker.EnvExecMode, c.ExecMode, worker.ExecInline, worker.ExecProcess)
+	}
+	return worker.New(d.Store, d.Bus, c.Registry, d.Events, d.Log, cfg).Run(ctx)
+}
+
+// Leased reports the run a process-mode child was started for, and the lease it
+// is to execute under. Both public entry points check it before serving: a
+// child is the same binary as its parent, and this is what tells it so.
+func Leased() (runID, workerID string, ok bool) {
+	runID = os.Getenv(worker.EnvRunID)
+	workerID = os.Getenv(worker.EnvLeaseWorkerID)
+	return runID, workerID, runID != "" && workerID != ""
+}
+
+// RunLeased executes a run the parent process has already leased, and is the
+// whole of what a process-mode child does.
+//
+// It deliberately does none of what a worker does around a run: no lease of its
+// own (the parent's heartbeat renews the one it was handed), no catalogue, no
+// metrics listener, no heartbeat. Cancelling ctx — which is what the parent's
+// SIGTERM does — cancels the run exactly as Engine.Cancel would in the parent,
+// and the engine settles it either way.
+func RunLeased(ctx context.Context, d Deps, c Config, runID, workerID string) error {
+	run, err := d.Store.GetFlowRun(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("read leased run %s: %w", runID, err)
+	}
+	// The lease can have moved on between the parent's fork and this read — a
+	// slow start against a short lease. The new holder is executing it now.
+	if run.WorkerID == nil || *run.WorkerID != workerID {
+		return fmt.Errorf("run %s is no longer leased by %s", runID, workerID)
+	}
+	engine.New(d.Store, c.Registry, d.Events, d.Log, engine.Config{
+		WorkerID: workerID, Metrics: d.Metrics, MaxSubflowDepth: c.MaxSubflowDepth,
+		CancelPollInterval: c.CancelPollInterval,
+	}).Execute(ctx, run)
+	return nil
 }
 
 // RunOne claims a single scheduled run and executes it synchronously. It is the

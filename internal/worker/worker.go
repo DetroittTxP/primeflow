@@ -3,6 +3,10 @@
 // A worker owns no state. Everything it knows is re-derivable from Postgres, so
 // killing one mid-run loses nothing: the lease expires, the janitor marks the
 // run crashed, and another worker resumes it from its last checkpoint.
+//
+// Where a run executes is a deployment choice, not a change to any of that: in
+// a goroutine of this process by default, or in a child process per run when
+// Config.ExecMode is ExecProcess. See exec.go.
 package worker
 
 import (
@@ -55,6 +59,17 @@ type Config struct {
 	// the heartbeat already carries cancellations, and one read per running
 	// flow every few seconds is the WAN cost the heartbeat exists to remove.
 	CancelPollInterval time.Duration
+
+	// ExecMode is ExecInline (default) or ExecProcess — see exec.go. The three
+	// Exec fields below are only read in process mode, and the caller is
+	// expected to have resolved ExecPath already: a worker that cannot find its
+	// own binary is a start-up failure, not a per-run one.
+	ExecMode string
+	ExecPath string
+	ExecArgs []string
+	// ExecEnv is what a child needs to reach the orchestrator when the parent
+	// was configured in Go rather than through the environment.
+	ExecEnv []string
 }
 
 func (c *Config) applyDefaults() {
@@ -89,8 +104,12 @@ type Worker struct {
 	store  store.WorkerStore
 	bus    bus.Bus
 	engine *engine.Engine
-	reg    *sdk.Registry
-	log    *slog.Logger
+	// exec is nil in inline mode, where the engine above executes every run in
+	// this process. In process mode it starts one child per run instead, and
+	// the engine is left holding only the lease bookkeeping.
+	exec *processLauncher
+	reg  *sdk.Registry
+	log  *slog.Logger
 
 	slots   chan struct{}
 	active  atomic.Int64
@@ -112,13 +131,17 @@ func New(s store.WorkerStore, b bus.Bus, reg *sdk.Registry, em *events.Emitter, 
 		WorkerID: id, Metrics: cfg.Metrics, MaxSubflowDepth: cfg.MaxSubflowDepth,
 		CancelPollInterval: cfg.CancelPollInterval,
 	})
-	return &Worker{
+	w := &Worker{
 		id: id, cfg: cfg, store: s, bus: b, engine: eng, reg: reg, log: log,
 		slots:   make(chan struct{}, cfg.Concurrency),
 		wake:    make(chan struct{}, 1),
 		leases:  map[string]struct{}{},
 		started: time.Now().UTC(),
 	}
+	if cfg.ExecMode == ExecProcess {
+		w.exec = newProcessLauncher(cfg.ExecPath, cfg.ExecArgs, cfg.ExecEnv, id, log)
+	}
+	return w
 }
 
 // ID returns the worker's identity, used in lease records.
@@ -128,7 +151,7 @@ func (w *Worker) ID() string { return w.id }
 func (w *Worker) Run(ctx context.Context) error {
 	w.log.Info("worker starting",
 		"id", w.id, "name", w.cfg.Name, "queues", w.cfg.Queues,
-		"concurrency", w.cfg.Concurrency, "flows", w.reg.Names())
+		"concurrency", w.cfg.Concurrency, "exec", w.execMode(), "flows", w.reg.Names())
 
 	w.publishCatalogue(ctx)
 	w.subscribe(ctx)
@@ -194,9 +217,63 @@ func (w *Worker) dispatch(ctx context.Context) {
 			w.log.Info("executing run",
 				"run", run.ID, "flow", run.FlowName, "queue", run.WorkQueue,
 				"priority", run.Priority, "attempt", run.RunCount)
-			w.engine.Execute(context.WithoutCancel(ctx), &run)
+			w.execute(context.WithoutCancel(ctx), &run)
 		}()
 	}
+}
+
+// execute runs one leased run, in this process or in a child of it. Either way
+// it blocks for the whole run, because the slot it occupies is the concurrency
+// limit and the lease the heartbeat renews.
+func (w *Worker) execute(ctx context.Context, run *core.FlowRun) {
+	if w.exec == nil {
+		w.engine.Execute(ctx, run)
+		return
+	}
+	if err := w.exec.Launch(run); err != nil {
+		w.log.Warn("run process exited abnormally", "run", run.ID, "err", err)
+		w.reap(ctx, run, err)
+	}
+}
+
+// reap deals with a child that died without settling its run — killed, OOMed,
+// or unable to start at all. The run is still PENDING or RUNNING under a lease
+// this worker holds and no longer intends to renew, so expiring the lease now
+// hands it to the janitor's crash path a lease period earlier than waiting
+// would. That path is the one an inline worker's death takes, retry budget
+// ("one extra attempt beyond the configured retries") included.
+func (w *Worker) reap(ctx context.Context, run *core.FlowRun, cause error) {
+	cur, err := w.store.GetFlowRun(ctx, run.ID)
+	if err != nil {
+		w.log.Warn("could not re-read run after its process exited", "run", run.ID, "err", err)
+		return
+	}
+	// Every settling transition clears the lease, so still holding it is what
+	// says the child left the run behind.
+	if cur.WorkerID == nil || *cur.WorkerID != w.id {
+		return
+	}
+	if err := w.store.RenewLease(ctx, run.ID, w.id, 0); err != nil {
+		w.log.Warn("could not expire the lease of an unsettled run", "run", run.ID, "err", err)
+		return
+	}
+	w.log.Warn("run process left its run unsettled; lease expired for the janitor",
+		"run", run.ID, "state", cur.State, "cause", cause)
+}
+
+// cancelRun stops a run this worker is executing, wherever it is executing.
+func (w *Worker) cancelRun(runID string) bool {
+	if w.exec != nil {
+		return w.exec.Cancel(runID)
+	}
+	return w.engine.Cancel(runID)
+}
+
+func (w *Worker) execMode() string {
+	if w.exec != nil {
+		return ExecProcess
+	}
+	return ExecInline
 }
 
 func (w *Worker) nudge() {
@@ -236,7 +313,7 @@ func (w *Worker) subscribe(ctx context.Context) {
 			if json.Unmarshal(m.Payload, &c) != nil || c.Action != "cancel" {
 				return
 			}
-			if w.engine.Cancel(c.FlowRunID) {
+			if w.cancelRun(c.FlowRunID) {
 				w.log.Info("cancelling run on request", "run", c.FlowRunID)
 			}
 		}
@@ -355,11 +432,11 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 		for _, id := range held {
 			if !keep[id] {
 				w.log.Warn("lost lease; abandoning run", "run", id)
-				w.engine.Cancel(id)
+				w.cancelRun(id)
 			}
 		}
 		for _, id := range cancelling {
-			if w.engine.Cancel(id) {
+			if w.cancelRun(id) {
 				w.log.Info("cancelling run on request", "run", id)
 			}
 		}
