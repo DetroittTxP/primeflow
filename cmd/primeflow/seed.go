@@ -17,10 +17,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/primex/primeflow/internal/authn"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/pkg/primeflow"
+	"github.com/DetroittTxP/primeflow/internal/authn"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/pkg/primeflow"
 )
 
 // The lanes the compose worker polls (PRIMEFLOW_QUEUES=default,vcd,metering).

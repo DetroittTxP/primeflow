@@ -7,9 +7,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/internal/store/postgres"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/store/postgres"
 )
 
 func resetAuth(t *testing.T, st *postgres.Store) {

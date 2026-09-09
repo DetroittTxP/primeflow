@@ -5,7 +5,7 @@ module github.com/DetroittTxP/primeflow-myworker
 
 go 1.25.0
 
-require github.com/primex/primeflow v0.0.0
+require github.com/DetroittTxP/primeflow v0.0.0
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -45,9 +45,15 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
-// The published module path github.com/primex/primeflow is not the repository
-// this code actually lives in (github.com/DetroittTxP/primeflow), so it cannot
-// be resolved by `go get`. Until those agree, point the dependency at a
-// checkout. `..` is right when this directory sits inside the primeflow repo;
-// move it out and this becomes a path to wherever you cloned it.
-replace github.com/primex/primeflow => ..
+// The module path and the repository agree, so this dependency resolves on its
+// own once a tag carrying the renamed path is pushed. The replace is kept
+// because it is the useful default while developing the two together: it
+// builds against the working tree instead of the last release. `..` is right
+// when this directory sits inside the primeflow repo; move it out and this
+// becomes a path to wherever you cloned it.
+//
+// To depend on a release instead:
+//
+//	go mod edit -dropreplace github.com/DetroittTxP/primeflow
+//	go get github.com/DetroittTxP/primeflow@v0.2.0
+replace github.com/DetroittTxP/primeflow => ..

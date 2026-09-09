@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 func mustTime(t *testing.T, s string) time.Time {

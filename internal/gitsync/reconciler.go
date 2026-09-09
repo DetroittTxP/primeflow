@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/store"
 )
 
 // Reconciler pushes auto-sync worker specs whose rendered manifests have

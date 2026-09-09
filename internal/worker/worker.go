@@ -18,13 +18,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/primex/primeflow/internal/bus"
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/engine"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/metrics"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/internal/bus"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/engine"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // Config describes one worker process.

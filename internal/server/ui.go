@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/scheduler"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/scheduler"
 )
 
 //go:embed ui/*

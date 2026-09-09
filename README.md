@@ -207,8 +207,8 @@ import (
     "context"
     "log"
 
-    "github.com/primex/primeflow/pkg/primeflow"
-    "github.com/primex/primeflow/pkg/sdk"
+    "github.com/DetroittTxP/primeflow/pkg/primeflow"
+    "github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 func main() {
@@ -217,6 +217,46 @@ func main() {
 
     log.Fatal(primeflow.RunWorker(context.Background(), primeflow.Options{}))
 }
+```
+
+### ใช้จาก repository อื่น
+
+worker ไม่จำเป็นต้องอยู่ในรีโปนี้ — และไม่ควรอยู่ มันคือโมดูล Go ของตัวเองที่ *พึ่งพา* PrimeFlow
+ไม่ใช่การ fork:
+
+```bash
+go mod init github.com/you/my-worker
+go get github.com/DetroittTxP/primeflow@v0.2.0
+```
+
+tag `v0.1.0` ยังประกาศ module path เดิม (`github.com/primex/primeflow`) จึงดึงไม่ได้
+ต้องใช้ tag ที่ออกหลังการเปลี่ยนชื่อ path เท่านั้น
+
+รีโปเป็น private ดังนั้นเครื่องที่ดึงต้องข้าม module proxy และดึงผ่าน SSH — ตั้งครั้งเดียว
+ต่อเครื่องและใน CI:
+
+```bash
+go env -w GOPRIVATE=github.com/DetroittTxP/*
+git config --global url."git@github.com:".insteadOf "https://github.com/"
+```
+
+[`myworker/`](myworker/) คือโครงที่พร้อมคัดลอกออกไปตั้งเป็นรีโปของตัวเอง: go.mod ของตัวเอง,
+flow สองตัวที่ใช้งานได้จริง และ Dockerfile
+
+โค้ดของ flow ไม่ได้อยู่บน server เลย การเพิ่มหรือแก้ flow จึงเป็นการ build และ deploy image ของ
+worker เท่านั้น — server ไม่ต้องขยับ และ worker ที่ lease งานของ flow ที่ตัวเองไม่ได้ลงทะเบียนไว้
+จะไม่ทำให้งาน fail แต่คืนงานกลับคิวเป็น `AwaitingWorker` การทยอย rollout จึงไม่ใช่การล่ม
+
+### เรียก flow จากโค้ดอื่น
+
+ไม่มีแพ็กเกจ client ฝั่ง Go — `internal/store/remote` เป็น `internal/` และพูดเฉพาะ worker API
+ระบบอื่นสร้างงานผ่าน External API ด้วย key ที่มี scope `write:runs`:
+
+```bash
+curl -X POST https://primeflow.example.com/api/external/v1/runs \
+  -H "X-API-Key: $PRIMEFLOW_KEY" -H 'Content-Type: application/json' \
+  -d '{"flow_name":"http-healthcheck","work_queue":"default",
+       "parameters":{"targets":["https://example.com/health"]}}'
 ```
 
 การตั้งค่ามาจาก environment ดังนั้น image เดียวกันรันได้ทุกที่:
@@ -498,6 +538,7 @@ internal/gitsync/       การเรนเดอร์ worker spec + เอ�
 internal/metrics/       Prometheus registry + ตัวเก็บคิว ณ เวลา scrape
 internal/otelinit/      การตั้งค่า OTLP tracing (ไม่ทำงานถ้าไม่ตั้ง endpoint)
 examples/primex-worker/ เดโม provisioning VM, metering และ sub-flow fleet
+myworker/               โครงของ worker เป็นโมดูลแยก — จุดเริ่มต้นของ image ของคุณเอง
 deploy/k8s/             แมนิเฟสต์ + ตัวอย่าง autoscaling KEDA/HPA
 ```
 

@@ -87,10 +87,30 @@ you depend on two packages:
 
 ```go
 import (
-    "github.com/primex/primeflow/pkg/sdk"              // Flow, Task, Do, Sleep
-    "github.com/primex/primeflow/pkg/primeflow/worker" // Run, RunPush
+    "github.com/DetroittTxP/primeflow/pkg/sdk"              // Flow, Task, Do, Sleep
+    "github.com/DetroittTxP/primeflow/pkg/primeflow/worker" // Run, RunPush
 )
 ```
+
+That worker lives in a repository of its own:
+
+```bash
+go mod init github.com/you/my-worker
+go get github.com/DetroittTxP/primeflow@v0.2.0
+```
+
+Only tags cut *after* the module path was renamed resolve — `v0.1.0` still
+declares the old `github.com/primex/primeflow` and `go get` will refuse it. The
+repository is private, so each developer machine and each CI runner needs the
+module proxy bypassed and fetches sent over SSH, once:
+
+```bash
+go env -w GOPRIVATE=github.com/DetroittTxP/*
+git config --global url."git@github.com:".insteadOf "https://github.com/"
+```
+
+[`myworker/`](../myworker/) in this repository is that skeleton already written
+— its own `go.mod`, two working flows, a Dockerfile — meant to be copied out.
 
 ```dockerfile
 FROM golang:1.25-alpine AS build

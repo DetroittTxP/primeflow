@@ -1,13 +1,14 @@
 # A worker image carrying your own flows.
 #
 # The build context is the PARENT directory, not this one, because go.mod
-# replaces github.com/primex/primeflow with `..`:
+# replaces github.com/DetroittTxP/primeflow with `..`:
 #
 #   docker buildx build --platform linux/amd64 \
 #     -f myworker/Dockerfile -t <registry>/myworker:$(git describe --tags --always) --push .
 #
-# Once the primeflow module path resolves on its own, drop the replace, and
-# this context narrows to `myworker/` alone.
+# The module path resolves on its own now, so swapping that replace for a
+# tagged release narrows this context to `myworker/` alone -- and lets the two
+# COPY lines below collapse into one.
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src

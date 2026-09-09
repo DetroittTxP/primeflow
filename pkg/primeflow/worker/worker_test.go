@@ -125,10 +125,10 @@ func TestPackageDoesNotLinkTheServer(t *testing.T) {
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		pkg := strings.TrimSpace(line)
-		if !strings.HasPrefix(pkg, "github.com/primex/primeflow/") {
+		if !strings.HasPrefix(pkg, "github.com/DetroittTxP/primeflow/") {
 			continue
 		}
-		suffix := strings.TrimPrefix(pkg, "github.com/primex/primeflow/")
+		suffix := strings.TrimPrefix(pkg, "github.com/DetroittTxP/primeflow/")
 		for _, b := range banned {
 			if suffix == b {
 				t.Errorf("this package must not link %s — see the package doc", pkg)

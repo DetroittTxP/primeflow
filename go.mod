@@ -1,4 +1,4 @@
-module github.com/primex/primeflow
+module github.com/DetroittTxP/primeflow
 
 go 1.25.0
 

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/primex/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/core"
 )
 
 // The wire shape a worker publishes for a flow like:

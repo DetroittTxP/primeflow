@@ -23,11 +23,11 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	"github.com/primex/primeflow/internal/core"
-	"github.com/primex/primeflow/internal/events"
-	"github.com/primex/primeflow/internal/metrics"
-	"github.com/primex/primeflow/internal/store"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/store"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 // Config tunes execution behaviour.

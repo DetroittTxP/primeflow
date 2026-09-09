@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/primex/primeflow/internal/store/postgres"
-	"github.com/primex/primeflow/pkg/primeflow"
-	"github.com/primex/primeflow/pkg/sdk"
+	"github.com/DetroittTxP/primeflow/internal/store/postgres"
+	"github.com/DetroittTxP/primeflow/pkg/primeflow"
+	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
