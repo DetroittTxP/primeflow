@@ -1,9 +1,9 @@
 // The Add-worker wizard: a form that writes no server state until Save, and
 // generates the env file, unit file or manifest that gets a worker running.
 import { ME, act, api, canWrite, isAdmin, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { esc, state } from '../fmt.js';
 import { registerViews, show } from '../router.js';
+import { registerActions } from '../actions.js';
 
 // PrimeFlow never launches workers itself. This wizard captures the config,
 // makes the operator confirm the host-side package/component requirements,
@@ -64,19 +64,19 @@ async function renderNewWorker() {
   body.innerHTML = `
     <div class="panel">
       <h2>Worker</h2>
-      <form class="inline" id="wk-form" onsubmit="return false" oninput="wkGen()">
+      <form class="inline" id="wk-form" data-submit data-input="wkGen">
         <label>Worker name<input name="name" value="${nm}" required></label>
         <label>Concurrency<input name="concurrency" type="number" min="1" value="4"></label>
         <label>Image<input name="image" value="primex/primeflow:latest"></label>
         <label>Connection
-          <select name="conn" onchange="nwConnToggle()">
+          <select name="conn" data-change="nwConnToggle">
             <option value="database">Database (beside Postgres)</option>
             <option value="api">API (remote site)</option>
           </select>
         </label>
         <label class="full">Work pools this worker serves
-          <span class="wk-pools" id="wk-pools" onchange="wkGen()">${nwPoolChecks()}</span>
-          <button type="button" class="act" style="margin-top:8px;align-self:flex-start" onclick="openCreatePool()">+ Create pool…</button>
+          <span class="wk-pools" id="wk-pools" data-change="wkGen">${nwPoolChecks()}</span>
+          <button type="button" class="act" style="margin-top:8px;align-self:flex-start" data-click="openCreatePool">+ Create pool…</button>
         </label>
         <div class="full nw-api" style="display:none;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
           <label>PrimeFlow API URL<input name="api_url" value="${esc(location.origin)}" placeholder="https://primeflow.example.com"></label>
@@ -85,7 +85,7 @@ async function renderNewWorker() {
             The worker holds this key and no database credential. It may lease only from the pools the key names;
             wake-ups ride <code>/api/v1/worker/stream</code> on the same connection and the poll backstop defaults to 15s.
             ${isAdmin()
-              ? '<button type="button" class="act" style="margin-left:8px" onclick="wkIssueKey()">Issue key…</button> mints an api-worker key scoped to the ticked pools and fills it in.'
+              ? '<button type="button" class="act" style="margin-left:8px" data-click="wkIssueKey">Issue key…</button> mints an api-worker key scoped to the ticked pools and fills it in.'
               : 'Ask an admin for an api-worker key scoped to these pools (Settings → External API).'}
           </p>
         </div>
@@ -93,9 +93,9 @@ async function renderNewWorker() {
     </div>
     <div class="panel">
       <h2>Delivery <span class="muted">— how the worker reaches its host / cluster</span></h2>
-      <form class="inline" id="wk-delivery" onsubmit="return false" oninput="wkGen()">
+      <form class="inline" id="wk-delivery" data-submit data-input="wkGen">
         <label>Method
-          <select name="method" onchange="nwDeliveryToggle(); wkGen()">
+          <select name="method" data-change="nwDelivery">
             <option value="git">Git commit + PR/MR (GitHub / GitLab)</option>
             <option value="argocd">Argo CD Application (GitOps)</option>
             <option value="flux">Flux Kustomization (GitOps)</option>
@@ -103,13 +103,13 @@ async function renderNewWorker() {
           </select>
         </label>
         <label id="nw-runtime" style="display:none">Runtime target
-          <select name="target" onchange="wkGen()">
+          <select name="target" data-change="wkGen">
             <option value="docker">Docker</option>
             <option value="systemd">systemd (bare host)</option>
             <option value="k8s">Kubernetes</option>
           </select>
         </label>
-        <label class="wk-chk full"><input type="checkbox" name="autosync"${gAuto} onchange="wkGen()">Auto-sync — the GitOps controller continuously reconciles this worker (off = one-shot / manual sync)</label>
+        <label class="wk-chk full"><input type="checkbox" name="autosync"${gAuto} data-change="wkGen">Auto-sync — the GitOps controller continuously reconciles this worker (off = one-shot / manual sync)</label>
         <div class="full nw-git" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px">
           <label>Git repo URL<input name="repo" value="${gRepo}" placeholder="https://github.com/acme/gitops.git"></label>
           <label>Path in repo<input name="path" value="${esc(gBase)}/${nm}"></label>
@@ -136,11 +136,11 @@ async function renderNewWorker() {
       </p>
       <pre class="logs" id="wk-out" style="margin:0 16px"></pre>
       <div class="row" style="padding:12px 16px;gap:8px">
-        <button class="act primary" id="wk-gen" disabled onclick="wkGen()">Generate</button>
-        <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wk-out').textContent).then(()=>toast('Copied'))">Copy</button>
+        <button class="act primary" id="wk-gen" disabled data-click="wkGen">Generate</button>
+        <button class="act" data-click="copy" data-target="wk-out">Copy</button>
         <span class="grow"></span>
-        <button class="act" id="wk-save" disabled onclick="saveWorkerSpec(false)" title="Persist this as a worker spec (git/argocd/flux delivery only)">Save spec</button>
-        <button class="act primary" id="wk-savesync" disabled onclick="saveWorkerSpec(true)" title="Save the spec and commit it to the GitOps repo now">Save &amp; sync</button>
+        <button class="act" id="wk-save" disabled data-click="saveWorkerSpec" title="Persist this as a worker spec (git/argocd/flux delivery only)">Save spec</button>
+        <button class="act primary" id="wk-savesync" disabled data-click="saveWorkerSpec" data-sync="1" title="Save the spec and commit it to the GitOps repo now">Save &amp; sync</button>
       </div>
       <p class="muted" id="wk-save-note" style="padding:0 16px 12px"></p>
     </div>`;
@@ -222,8 +222,8 @@ function wkReqs() {
   const el = document.getElementById('wk-reqs');
   if (!el) return;
   el.innerHTML = `<div class="wk-reqlist">${wkReqComponents().map(c =>
-    `<label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">${esc(c)}</label>`).join('')}
-    <label class="wk-chk"><input type="checkbox" class="wk-req" onchange="wkReqGate()">All flow-specific SDKs / CLIs the registered flows import are installed and on PATH</label>
+    `<label class="wk-chk"><input type="checkbox" class="wk-req" data-change="wkReqGate">${esc(c)}</label>`).join('')}
+    <label class="wk-chk"><input type="checkbox" class="wk-req" data-change="wkReqGate">All flow-specific SDKs / CLIs the registered flows import are installed and on PATH</label>
   </div>`;
   wkReqGate();
 }
@@ -487,7 +487,13 @@ export {
   nwReloadPools, wkComponentsFor, wkConnOf, wkEnv, wkK8s,
 };
 
-publish({
-  nwConnToggle, nwDeliveryToggle, wkIssueKey, wkReqGate, wkGen,
-  saveWorkerSpec,
+registerActions({
+  wkGen,
+  wkIssueKey,
+  wkReqGate,
+  nwConnToggle,
+  // The delivery picker changes which fields apply and what the package looks
+  // like, so it does both in one action rather than two attributes.
+  nwDelivery: () => { nwDeliveryToggle(); wkGen(); },
+  saveWorkerSpec: el => saveWorkerSpec(el.dataset.sync === '1'),
 });

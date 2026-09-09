@@ -1,8 +1,8 @@
 // Automations: the event-triggered rules table and the form that adds one.
 import { act, api, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { esc, when } from '../fmt.js';
 import { registerViews } from '../router.js';
+import { registerActions } from '../actions.js';
 
 async function loadAutomations() {
   const as = (await api('/automations')) || [];
@@ -14,7 +14,7 @@ async function loadAutomations() {
       <td>${a.threshold}${a.window ? ' / ' + Math.round(a.window / 1e9) + 's' : ''}</td>
       <td class="mono">${esc(a.action)}</td>
       <td>${when(a.last_fired_at)}</td>
-      <td class="writer-only"><button class="act" onclick="if(confirm('Delete ' + ${esc(JSON.stringify(a.name))} + '?'))act('/automations/${a.id}',{method:'DELETE'})">Delete</button></td>
+      <td class="writer-only"><button class="act" data-click="deleteAutomation" data-id="${esc(a.id)}" data-name="${esc(a.name)}">Delete</button></td>
     </tr>`).join('') : '<tr><td colspan="6" class="empty">No automations yet.</td></tr>';
 }
 
@@ -37,6 +37,10 @@ async function saveAutomation(ev) {
 
 registerViews({ automations: { refresh: loadAutomations } });
 
-publish({
-  loadAutomations, saveAutomation,
+registerActions({
+  loadAutomations,
+  saveAutomation: (el, ev) => saveAutomation(ev),
+  deleteAutomation: el => {
+    if (confirm('Delete ' + el.dataset.name + '?')) act('/automations/' + el.dataset.id, { method: 'DELETE' });
+  },
 });

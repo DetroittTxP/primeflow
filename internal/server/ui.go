@@ -52,9 +52,30 @@ func (s *Server) uiHandler() http.Handler {
 			}
 		}
 		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Content-Security-Policy", consolePolicy)
 		http.ServeContent(w, r, name, modTime, bytes.NewReader(data))
 	})
 }
+
+// consolePolicy is what the console needs and nothing else. Every script it
+// runs is a file of its own, so scripts are same-origin only: an injected
+// <script>, an onclick= smuggled into a run name, a javascript: URL -- none of
+// them execute. That is worth more here than anywhere else in the product,
+// because the console renders names, parameters and log lines that came from
+// whatever a worker chose to write.
+//
+// style-src still allows inline styles: the markup positions things with
+// style="..." attributes, and an attacker who can only set a style cannot run
+// anything. connect-src covers both fetch and the EventSource feed.
+const consolePolicy = "default-src 'none'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; " +
+	"font-src 'self'; " +
+	"connect-src 'self'; " +
+	"form-action 'self'; " +
+	"base-uri 'none'; " +
+	"frame-ancestors 'none'"
 
 // validateSchedule rejects a schedule the scheduler could never act on, at the
 // moment it is submitted rather than silently every cycle afterwards.

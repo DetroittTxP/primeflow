@@ -2,18 +2,13 @@
 // counters that doubles as that filter.
 import { act, api } from '../api.js';
 import { poolContext, poolPill, runBlocker } from '../blockers.js';
-import { publish } from '../bridge.js';
 import { line, svg } from '../charts.js';
 import { STCOL, esc, prio, state, when } from '../fmt.js';
 import { registerViews } from '../router.js';
+import { registerActions } from '../actions.js';
 import { runLink } from './run.js';
 
 let runsFilterState = '';
-document.querySelectorAll('#f-state button').forEach(b => b.onclick = () => {
-  runsFilterState = b.dataset.s;
-  document.querySelectorAll('#f-state button').forEach(x => x.classList.toggle('active', x === b));
-  loadRuns();
-});
 
 async function loadRuns() {
   const q = document.getElementById('f-search').value.trim();
@@ -30,7 +25,7 @@ async function loadRuns() {
 
   document.getElementById('runs-strip').innerHTML = runsStrip(runs);
   document.getElementById('runs').innerHTML = runs.length ? runs.map(r => `
-    <tr class="pick" onclick="rowOpen(event,'${r.id}')">
+    <tr class="pick" data-click="rowOpen" data-id="${esc(r.id)}">
       <td>${runLink(r.id, esc(r.name), 'mono')}</td>
       <td>${esc(r.flow_name)}</td>
       <td>${state(r.state)}</td>
@@ -40,9 +35,9 @@ async function loadRuns() {
       <td>${r.run_count}${r.retries ? ' / ' + (r.retries + 1) : ''}</td>
       <td class="row">
         ${['SCHEDULED', 'RUNNING', 'PENDING'].includes(r.state)
-          ? `<button class="act writer-only" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button>` : ''}
+          ? `<button class="act writer-only" data-click="cancelRun" data-id="${esc(r.id)}">Cancel</button>` : ''}
         ${['FAILED', 'CRASHED', 'CANCELLED', 'COMPLETED'].includes(r.state)
-          ? `<button class="act writer-only" onclick="act('/runs/${r.id}/retry',{method:'POST'})">Resume</button>` : ''}
+          ? `<button class="act writer-only" data-click="retryRun" data-id="${esc(r.id)}">Resume</button>` : ''}
       </td>
     </tr>`).join('') : '<tr><td colspan="8" class="empty">No runs match.</td></tr>';
 }
@@ -56,7 +51,7 @@ function runsStrip(runs) {
   const ticks = runs.map(r => {
     const x = ((+new Date(r.scheduled_at) - t0) / span) * (W - 8) + 4;
     return `<rect x="${x.toFixed(1)}" y="8" width="3" height="30" rx="1.5" fill="${STCOL(r.state)}"
-      style="cursor:pointer" onclick="openRun('${r.id}')"><title>${esc(r.name)} — ${r.state} — ${new Date(r.scheduled_at).toLocaleString()}</title></rect>`;
+      style="cursor:pointer" data-click="openRun" data-id="${esc(r.id)}"><title>${esc(r.name)} — ${r.state} — ${new Date(r.scheduled_at).toLocaleString()}</title></rect>`;
   }).join('');
   return svg(`<line x1="0" y1="38" x2="${W}" y2="38" class="gridline"/>` + ticks, W, H) +
     `<div class="muted" style="font-size:10.5px;display:flex;justify-content:space-between">
@@ -65,6 +60,13 @@ function runsStrip(runs) {
 
 registerViews({ runs: { refresh: loadRuns } });
 
-publish({
+registerActions({
   loadRuns,
+  // The segmented control above the table. Which state it filters on is the
+  // button's own data-s, the same attribute the CSS and the active mark use.
+  filterRuns: el => {
+    runsFilterState = el.dataset.s;
+    document.querySelectorAll('#f-state button').forEach(b => b.classList.toggle('active', b === el));
+    loadRuns();
+  },
 });

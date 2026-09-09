@@ -1,0 +1,56 @@
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #16181d; --muted: #6b7280;
+  --line: #e3e6ea; --accent: #2f6feb; --err: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115; --panel: #171a21; --ink: #e6e8ec; --muted: #9aa3b2;
+    --line: #262b35; --accent: #6ea1ff; --err: #f87171;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; display: grid; place-items: center;
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 28px 26px; width: min(360px, 92vw); box-shadow: 0 8px 30px rgba(0,0,0,.10);
+}
+.brand {
+  display: flex; align-items: center; justify-content: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.brand-logo {
+  display: block; width: auto; height: 40px;
+}
+.brand-name {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.brand-name .accent {
+  color: var(--accent);
+}
+.sub { color: var(--muted); font-size: 12.5px; margin-bottom: 20px; }
+label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+input {
+  width: 100%; font: inherit; padding: 8px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+button {
+  width: 100%; margin-top: 20px; font: inherit; font-weight: 600; cursor: pointer;
+  padding: 9px 12px; border-radius: 7px; border: 1px solid var(--accent);
+  background: var(--accent); color: #fff;
+}
+button:disabled { opacity: .6; cursor: default; }
+button.sso {
+  background: var(--panel); color: var(--ink); border-color: var(--line);
+  margin-top: 10px;
+}
+.or { text-align: center; color: var(--muted); font-size: 11.5px; margin: 14px 0 0; }
+.err { color: var(--err); font-size: 12.5px; margin-top: 14px; min-height: 1.2em; }

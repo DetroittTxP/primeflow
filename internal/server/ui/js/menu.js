@@ -1,22 +1,24 @@
-import { esc } from './fmt.js';
+import { registerActions } from './actions.js';
+import { dataAttrs } from './fmt.js';
 
 // Every table's row actions hang off a "⋯" button instead of sitting inline:
 // a row of four or five buttons wrapped onto two lines and buried the row's
 // own data, and the actions moved around as the buttons on offer changed.
 //
-// Items are [label, javascript] pairs, falsy entries dropped so a caller can
-// write `cond && [...]`; a third element marks a destructive item. A row with
-// nothing left to offer gets no button at all, only the empty cell that keeps
-// the column count. The label is HTML, the javascript is an onclick body --
-// esc() lets it carry the quotes that JSON.stringify puts in.
+// Items are [label, action] pairs, falsy entries dropped so a caller can write
+// `cond && [...]`; a third element marks a destructive item. A row with nothing
+// left to offer gets no button at all, only the empty cell that keeps the
+// column count. The label is HTML; the action is an object naming a registered
+// action and the arguments it needs -- { act: 'bump', id: r.id, priority: 100 }
+// -- which dataAttrs turns into the attributes the delegated listener reads.
 function menuCell(items, cls) {
   const on = items.filter(Boolean);
   if (!on.length) return `<td class="${cls || ''}"></td>`;
   return `<td class="${cls || ''}" style="text-align:right">
-    <button class="act kebab" title="Actions" aria-haspopup="menu" onclick="rowMenu(this)">⋯</button>
-    <div class="menu" role="menu" popover onclick="this.hidePopover()">
-      ${on.map(([label, js, danger]) =>
-        `<button role="menuitem"${danger ? ' class="danger"' : ''} onclick="${esc(js)}">${label}</button>`).join('')}
+    <button class="act kebab" title="Actions" aria-haspopup="menu" data-click="rowMenu">⋯</button>
+    <div class="menu" role="menu" popover>
+      ${on.map(([label, action, danger]) =>
+        `<button role="menuitem"${danger ? ' class="danger"' : ''} ${dataAttrs(action)}>${label}</button>`).join('')}
     </div>
   </td>`;
 }
@@ -41,10 +43,17 @@ function rowMenu(btn) {
   // -- trackpad momentum, a scrollIntoView -- would otherwise shut it again at
   // once. Capture, because the scroll is the table's .scroll box, not the page.
   const close = () => { if (m.matches(':popover-open')) m.hidePopover(); };
+  // Picking an item closes the menu. This listener sits on the menu itself, so
+  // it runs before the delegated one on the document does the item's work --
+  // which is what keeps the refresh that follows from finding the menu open and
+  // skipping itself.
+  m.addEventListener('click', close, { once: true });
   requestAnimationFrame(() => {
     addEventListener('scroll', close, { once: true, capture: true });
     addEventListener('resize', close, { once: true });
   });
 }
 
-export { menuCell, rowMenu };
+registerActions({ rowMenu: el => rowMenu(el) });
+
+export { menuCell };

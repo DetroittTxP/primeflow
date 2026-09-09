@@ -9,6 +9,8 @@
 // spell itself as a path -- and app.js does the saying. That is what lets a
 // view import the router without the router importing the view back.
 
+import { registerActions } from './actions.js';
+
 // name -> { refresh, enter?, path? }
 //   refresh  what a background tick calls, and what arriving falls back to
 //   enter    arriving is not refreshing for every view: Settings loads a whole
@@ -90,4 +92,7 @@ export function refreshCurrent(force) {
 }
 
 document.getElementById('nav').innerHTML = VIEWS.map(([v, label, ic]) =>
-  `<button data-v="${v}" onclick="show('${v}')"><span class="ic">${ic}</span>${label}</button>`).join('');
+  `<button data-v="${v}" data-click="show" data-view="${v}"><span class="ic">${ic}</span>${label}</button>`).join('');
+
+// The sidebar, and every "← back to the list" button, name the view they open.
+registerActions({ show: el => show(el.dataset.view) });

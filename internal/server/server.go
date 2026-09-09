@@ -375,6 +375,14 @@ func openOperatorPath(method, path string) bool {
 		return true
 	case path == "/login.html" || path == "/reset.html" || path == "/primeflow.png" || path == "/favicon.ico":
 		return true
+	// Those two pages are shown before a session exists, so the stylesheet and
+	// module each one loads has to be reachable as well: otherwise the redirect
+	// below answers a stylesheet request with the login page's HTML and the
+	// form renders unstyled. Both pages are deliberately dependency-free, so
+	// this is the whole list -- the rest of the console stays behind the gate.
+	case path == "/css/login.css" || path == "/css/reset.css" ||
+		path == "/js/login.js" || path == "/js/reset.js":
+		return true
 	}
 	return false
 }

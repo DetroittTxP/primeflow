@@ -4,10 +4,10 @@
 // that lands there, so a link to a run is this module's business too.
 import { act, api } from '../api.js';
 import { poolContext, poolPill, runBlocker } from '../blockers.js';
-import { publish } from '../bridge.js';
 import { bars, line, svg } from '../charts.js';
-import { STCOL, dur, esc, goDur, prio, runMS, state, when } from '../fmt.js';
+import { STCOL, dataAttrs, dur, esc, goDur, prio, runMS, state, when } from '../fmt.js';
 import { registerRoutes, registerViews, show, syncURL } from '../router.js';
+import { registerActions } from '../actions.js';
 import { evClass } from './events.js';
 
 // A run gets a page rather than a dialog: an operator arrives here from a link
@@ -27,7 +27,7 @@ const RUN_TAB_LABEL = {
 // it carries the API token.
 const runHref = id => '/runs/' + encodeURIComponent(id) + location.search;
 const runLink = (id, html, cls) =>
-  `<a href="${runHref(id)}" class="rlink${cls ? ' ' + cls : ''}" onclick="openRun('${id}');return false">${html}</a>`;
+  `<a href="${runHref(id)}" class="rlink${cls ? ' ' + cls : ''}" data-click="openRun" data-id="${esc(id)}">${html}</a>`;
 
 // openRun is the single entry point every list links through.
 function openRun(id, tab) {
@@ -98,7 +98,7 @@ function renderRun() {
 
   const count = { checkpoints: tasks.length, logs: logs.length, artifacts: arts.length, subflows: kids.length };
   const nav = RUN_TABS.filter(t => t !== 'subflows' || kids.length).map(t =>
-    `<button data-t="${t}"${t === runTab ? ' class="active"' : ''} onclick="showRunTab('${t}')">${RUN_TAB_LABEL[t]}` +
+    `<button data-t="${t}"${t === runTab ? ' class="active"' : ''} data-click="showRunTab" data-tab="${t}">${RUN_TAB_LABEL[t]}` +
     (count[t] ? ` <span class="muted">${count[t]}</span>` : '') + '</button>').join('');
   const body = {
     timeline: runTimeline, checkpoints: runCheckpointsTab, logs: runLogsTab,
@@ -114,9 +114,9 @@ function renderRun() {
 function runActions(run) {
   const live = ['SCHEDULED', 'RUNNING', 'PENDING'].includes(run.state);
   const settled = ['FAILED', 'CRASHED', 'CANCELLED', 'COMPLETED'].includes(run.state);
-  return (live ? `<button class="act writer-only" onclick="act('/runs/${run.id}/cancel',{method:'POST'})">Cancel</button>` : '')
-    + (settled ? `<button class="act primary writer-only" onclick="act('/runs/${run.id}/retry',{method:'POST'})">Resume</button>` : '')
-    + '<button class="act" onclick="loadRun()">Refresh</button>';
+  return (live ? `<button class="act writer-only" data-click="cancelRun" data-id="${esc(run.id)}">Cancel</button>` : '')
+    + (settled ? `<button class="act primary writer-only" data-click="retryRun" data-id="${esc(run.id)}">Resume</button>` : '')
+    + '<button class="act" data-click="loadRun">Refresh</button>';
 }
 
 // The five numbers an operator checks first. Queue wait is split out from
@@ -145,7 +145,7 @@ function runFacts(run, ctx) {
   const rows = [
     ['State', state(run.state)],
     ['Run id', `<span class="mono">${esc(run.id)}</span>`],
-    ['Flow', `<a href="#" class="rlink" onclick="openFlow(${JSON.stringify(run.flow_name).replace(/"/g, '&quot;')});return false">${esc(run.flow_name)}</a>`],
+    ['Flow', `<a href="/flows" class="rlink" data-click="openFlow" data-name="${esc(run.flow_name)}">${esc(run.flow_name)}</a>`],
     run.deployment_id && ['Deployment', `<span class="mono" title="${esc(run.deployment_id)}">${esc(run.deployment_id.slice(0, 8))}</span>`],
     ['Pool', esc(run.work_queue) + poolPill(runBlocker(run, ctx))],
     ['Priority', prio(run)],
@@ -193,12 +193,12 @@ function swimlane(run, tasks, kids) {
   }];
   tasks.forEach(t => lanes.push({
     label: t.task_key, state: t.state, start: num(t.started_at), end: num(t.ended_at),
-    sub: t.run_count > 1 ? '×' + t.run_count : '', onclick: "showRunTab('checkpoints')",
+    sub: t.run_count > 1 ? '×' + t.run_count : '', action: { act: 'showRunTab', tab: 'checkpoints' },
   }));
   (kids || []).forEach(k => lanes.push({
     label: '⑃ ' + k.name, state: k.state,
     start: num(k.started_at) || num(k.scheduled_at), end: num(k.ended_at),
-    onclick: `openRun('${k.id}')`,
+    action: { act: 'openRun', id: k.id },
   }));
 
   const live = !run.ended_at && ['RUNNING', 'PENDING', 'CANCELLING', 'SCHEDULED'].includes(run.state);
@@ -241,7 +241,7 @@ function swimlane(run, tasks, kids) {
         <title>${esc(l.label)} — ${l.state}${l.end != null ? ' — ' + dur(l.end - l.start) : ' — running, ' + dur(now - l.start)}</title></rect>`;
       if (l.sub) body += `<text class="axis" x="${(x + w + 4).toFixed(1)}" y="${y + ROW / 2 + 3}">${l.sub}</text>`;
     }
-    const cur = l.onclick ? ` style="cursor:pointer" onclick="${esc(l.onclick)}"` : '';
+    const cur = l.action ? ` style="cursor:pointer" ${dataAttrs(l.action)}` : '';
     return `<g${cur}>
       <text class="axis" x="0" y="${y + ROW / 2 + 3}" fill="var(--muted)">${esc(label)}</text>${body}</g>`;
   }).join('');
@@ -294,7 +294,7 @@ function taskBars(tasks) {
   const W = 900, LABEL = 220, TRACK = W - LABEL - 74, ROW = 22, H = rows.length * ROW + 6;
   const body = rows.map((r, i) => {
     const y = i * ROW, w = Math.max(2, (r.ms / max) * TRACK);
-    return `<g onclick="showRunTab('checkpoints')">
+    return `<g data-click="showRunTab" data-tab="checkpoints">
       <text class="axis" x="0" y="${y + ROW / 2 + 4}" fill="var(--muted)">${esc(r.k.length > 34 ? r.k.slice(0, 33) + '…' : r.k)}</text>
       <rect x="${LABEL}" y="${y + 4}" width="${w.toFixed(1)}" height="${ROW - 9}" rx="3" fill="${STCOL(r.state)}" opacity=".9">
         <title>${esc(r.k)} — ${dur(r.ms)}</title></rect>
@@ -345,11 +345,11 @@ const visibleLogs = logs => logs.filter(l =>
 function runLogsTab({ logs }) {
   const levels = ['', 'ERROR', 'WARN', 'INFO', 'DEBUG'];
   const seg = `<span class="seg" id="run-loglevels">${levels.map(l =>
-    `<button data-l="${l}"${l === logLevel ? ' class="active"' : ''} onclick="setLogLevel('${l}')">${l || 'All'}</button>`).join('')}</span>`;
+    `<button data-l="${l}"${l === logLevel ? ' class="active"' : ''} data-click="setLogLevel" data-level="${l}">${l || 'All'}</button>`).join('')}</span>`;
   return `<div class="panel">
     <h2>Logs<span class="grow"></span><span class="muted" id="run-logcount">${visibleLogs(logs).length} of ${logs.length}</span></h2>
     <div class="logbar">${seg}
-      <input placeholder="filter message" value="${esc(logQuery)}" oninput="filterLogs(this.value)" size="20">
+      <input placeholder="filter message" value="${esc(logQuery)}" data-input="filterLogs" size="20">
       <span class="grow"></span><span class="muted">oldest first</span>
     </div>
     <pre class="logs" id="run-logs">${logLines(logs)}</pre></div>`;
@@ -453,7 +453,7 @@ function runSubflowsTab({ kids }) {
   return `<div class="panel"><h2>Sub-flows<span class="grow"></span><span class="muted">${kids.length}</span></h2>
     <div class="scroll"><table>
       <thead><tr><th>Run</th><th>Flow</th><th>State</th><th>Pool</th><th>Started</th><th>Duration</th></tr></thead>
-      <tbody>${kids.map(k => `<tr class="pick" onclick="rowOpen(event,'${k.id}')">
+      <tbody>${kids.map(k => `<tr class="pick" data-click="rowOpen" data-id="${esc(k.id)}">
         <td>${runLink(k.id, esc(k.name), 'mono')}</td>
         <td>${esc(k.flow_name)}</td>
         <td>${state(k.state)}</td>
@@ -495,9 +495,16 @@ registerRoutes([['runs', (id, tab) => {
 }]]);
 
 export {
-  runLink,
+  runHref, runLink,
 };
 
-publish({
-  loadRun, openRun, rowOpen, showRunTab, setLogLevel, filterLogs,
+registerActions({
+  loadRun,
+  openRun: el => openRun(el.dataset.id),
+  rowOpen: (el, ev) => rowOpen(ev, el.dataset.id),
+  showRunTab: el => showRunTab(el.dataset.tab),
+  setLogLevel: el => setLogLevel(el.dataset.level),
+  filterLogs: el => filterLogs(el.value),
+  cancelRun: el => act(`/runs/${el.dataset.id}/cancel`, { method: 'POST' }),
+  retryRun: el => act(`/runs/${el.dataset.id}/retry`, { method: 'POST' }),
 });

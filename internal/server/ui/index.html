@@ -15,7 +15,7 @@
   </div>
   <div class="grow"></div>
   <div class="seg" id="win-switch" hidden>
-    <button data-w="8h">8h</button><button data-w="24h" class="active">24h</button><button data-w="168h">1w</button>
+    <button data-w="8h" data-click="setDashWindow">8h</button><button data-w="24h" class="active" data-click="setDashWindow">24h</button><button data-w="168h" data-click="setDashWindow">1w</button>
   </div>
   <div class="live"><span class="dot" id="livedot"></span><span id="livetext">connecting…</span></div>
   <div class="who" id="who"></div>
@@ -46,16 +46,16 @@
     <div class="panel">
       <h2>
         <span class="seg" id="f-state">
-          <button data-s="" class="active">All</button>
-          <button data-s="RUNNING">Running</button>
-          <button data-s="COMPLETED">Completed</button>
-          <button data-s="FAILED">Failed</button>
-          <button data-s="SCHEDULED">Scheduled</button>
+          <button data-s="" class="active" data-click="filterRuns">All</button>
+          <button data-s="RUNNING" data-click="filterRuns">Running</button>
+          <button data-s="COMPLETED" data-click="filterRuns">Completed</button>
+          <button data-s="FAILED" data-click="filterRuns">Failed</button>
+          <button data-s="SCHEDULED" data-click="filterRuns">Scheduled</button>
         </span>
         <span class="grow"></span>
         <select id="f-queue"><option value="">All pools</option></select>
         <input id="f-search" placeholder="search name / id" size="16">
-        <button class="act" onclick="loadRuns()">Refresh</button>
+        <button class="act" data-click="loadRuns">Refresh</button>
       </h2>
       <div class="strip" id="runs-strip"></div>
       <div class="scroll"><table>
@@ -70,7 +70,7 @@
 
   <section id="v-run">
     <div class="view-head">
-      <button class="act" onclick="show('runs')">&larr; Runs</button>
+      <button class="act" data-click="show" data-view="runs">&larr; Runs</button>
       <h1 id="run-title">Run</h1>
       <span id="run-state"></span>
       <span class="grow"></span>
@@ -85,7 +85,7 @@
   <section id="v-flows">
     <div class="view-head"><h1>Flows</h1></div>
     <div class="panel">
-      <h2>Registered flows<span class="grow"></span><button class="act" onclick="loadFlowsPage()">Refresh</button></h2>
+      <h2>Registered flows<span class="grow"></span><button class="act" data-click="loadFlowsPage">Refresh</button></h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
         Every flow a worker has registered. Flows are Go functions — this is the catalogue, not an editor.
         Open one for its parameters, recent runs, and a quick-run form.
@@ -100,7 +100,7 @@
   <section id="v-queues">
     <div class="view-head"><h1>Work pools</h1></div>
     <div class="panel">
-      <h2>Pools<span class="grow"></span><button class="act primary" onclick="openCreatePool()">Create pool…</button><button class="act" onclick="loadQueues()">Refresh</button></h2>
+      <h2>Pools<span class="grow"></span><button class="act primary" data-click="openCreatePool">Create pool…</button><button class="act" data-click="loadQueues">Refresh</button></h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
         A pool is a named lane of work. <b>Desired</b> is the worker count PrimeFlow publishes as
         <code>primeflow_queue_desired_workers</code> for a KEDA <code>ScaledObject</code> or an HPA to act on —
@@ -116,8 +116,8 @@
     </div>
     <div class="panel">
       <h2>Dispatch order<span class="grow"></span>
-        <select id="q-pick" onchange="loadPending()"></select>
-        <button class="act" onclick="loadPending()">Refresh</button>
+        <select id="q-pick" data-change="loadPending"></select>
+        <button class="act" data-click="loadPending">Refresh</button>
       </h2>
       <p class="muted" style="padding:10px 14px;margin:0;border-bottom:1px solid var(--line)">
         The exact order the next worker will take work in. Pinned runs first, then priority, then age.
@@ -132,7 +132,7 @@
   <section id="v-deployments">
     <div class="view-head"><h1>Deployments</h1></div>
     <div class="panel">
-      <h2>Deployments<span class="grow"></span><button class="act" onclick="loadDeployments()">Refresh</button></h2>
+      <h2>Deployments<span class="grow"></span><button class="act" data-click="loadDeployments">Refresh</button></h2>
       <div class="scroll"><table>
         <thead><tr><th>Name</th><th>Flow</th><th>Schedule</th><th>Pool</th><th>Priority</th><th>State</th><th></th></tr></thead>
         <tbody id="deployments"></tbody>
@@ -140,7 +140,7 @@
     </div>
     <div class="panel writer-only">
       <h2>New / update deployment</h2>
-      <form class="inline" id="dep-form" onsubmit="saveDeployment(event)">
+      <form class="inline" id="dep-form" data-submit="saveDeployment">
         <label>Name<input name="name" required placeholder="nightly-metering"></label>
         <label>Flow<select name="flow_name" id="dep-flow" required></select></label>
         <label>Work pool<input name="work_queue" placeholder="default"></label>
@@ -163,7 +163,7 @@
 
   <section id="v-deployment">
     <div class="view-head">
-      <button class="act" onclick="show('deployments')">&larr; Deployments</button>
+      <button class="act" data-click="show" data-view="deployments">&larr; Deployments</button>
       <h1 id="dep-title">Deployment</h1>
       <span id="dep-state"></span>
       <span class="grow"></span>
@@ -178,7 +178,7 @@
   <section id="v-automations">
     <div class="view-head"><h1>Automations</h1></div>
     <div class="panel">
-      <h2>Automations<span class="grow"></span><button class="act" onclick="loadAutomations()">Refresh</button></h2>
+      <h2>Automations<span class="grow"></span><button class="act" data-click="loadAutomations">Refresh</button></h2>
       <div class="scroll"><table>
         <thead><tr><th>Name</th><th>Trigger</th><th>Threshold</th><th>Action</th><th>Last fired</th><th></th></tr></thead>
         <tbody id="automations"></tbody>
@@ -186,7 +186,7 @@
     </div>
     <div class="panel writer-only">
       <h2>New / update automation</h2>
-      <form class="inline" onsubmit="saveAutomation(event)">
+      <form class="inline" data-submit="saveAutomation">
         <label>Name<input name="name" required placeholder="escalate-failed-provisioning"></label>
         <label>Match event<input name="match_event" placeholder="flow-run.FAILED  or  flow-run.*"></label>
         <label>Match flow<input name="match_flow" placeholder=""></label>
@@ -214,7 +214,7 @@
   <section id="v-workers">
     <div class="view-head"><h1>Workers</h1></div>
     <div class="panel">
-      <h2>Workers<span class="grow"></span><button class="act primary" onclick="show('newworker')">Add worker…</button><button class="act" onclick="loadWorkers()">Refresh</button></h2>
+      <h2>Workers<span class="grow"></span><button class="act primary" data-click="show" data-view="newworker">Add worker…</button><button class="act" data-click="loadWorkers">Refresh</button></h2>
       <div class="scroll"><table>
         <thead><tr><th>Name</th><th>Status</th><th>Pools</th><th>Active</th><th>Concurrency</th><th>Last heartbeat</th></tr></thead>
         <tbody id="workers"></tbody>
@@ -231,7 +231,7 @@
 
   <section id="v-newworker">
     <div class="view-head">
-      <button class="act" onclick="show('workers')">&larr; Workers</button>
+      <button class="act" data-click="show" data-view="workers">&larr; Workers</button>
       <h1>Add worker</h1>
     </div>
     <div id="nw-body"></div>
@@ -240,7 +240,7 @@
   <section id="v-events">
     <div class="view-head"><h1>Event feed</h1></div>
     <div class="panel">
-      <h2>Recent events<span class="grow"></span><button class="act" onclick="loadEvents()">Refresh</button></h2>
+      <h2>Recent events<span class="grow"></span><button class="act" data-click="loadEvents">Refresh</button></h2>
       <div class="tl" id="events"></div>
     </div>
   </section>
@@ -248,9 +248,9 @@
   <section id="v-settings" class="admin-only">
     <div class="view-head"><h1>Settings</h1></div>
     <div class="subnav" id="settings-subnav">
-      <button data-s="external" class="active" onclick="showSettings('external')">External API</button>
-      <button data-s="git" onclick="showSettings('git')">Git connection</button>
-      <button data-s="users" onclick="showSettings('users')">Users</button>
+      <button data-s="external" class="active" data-click="showSettings" data-pane="external">External API</button>
+      <button data-s="git" data-click="showSettings" data-pane="git">Git connection</button>
+      <button data-s="users" data-click="showSettings" data-pane="users">Users</button>
     </div>
 
     <div id="settings-git" hidden>
@@ -264,7 +264,7 @@
           entry in the repo. Turn on <b>Auto-sync</b> per spec to have the reconciler push drift
           automatically.
         </p>
-        <form class="inline" id="git-form" onsubmit="saveGitConnection(event)">
+        <form class="inline" id="git-form" data-submit="saveGitConnection">
           <label class="full">Repo URL<input name="repo_url" placeholder="https://github.com/acme/gitops.git"></label>
           <label>Branch<input name="branch" value="main"></label>
           <label>Base path in repo<input name="base_path" placeholder="workers"></label>
@@ -283,7 +283,7 @@
       <div class="panel">
         <h2>Access<span class="grow"></span>
           <button class="toggle" id="ext-enabled" role="switch" aria-checked="false"
-                  onclick="toggleExternal()" title="Enable or disable every key at once"></button>
+                  data-click="toggleExternal" title="Enable or disable every key at once"></button>
         </h2>
         <p class="muted" style="padding:10px 14px;margin:0">
           The master switch for every key at once. With this off, all <code>/api/external/v1/*</code>
@@ -295,7 +295,7 @@
 
       <div class="panel">
         <h2>Log retention</h2>
-        <form class="inline" onsubmit="saveRetention(event)">
+        <form class="inline" data-submit="saveRetention">
           <label class="row"><input type="checkbox" id="lr-enabled"> Prune old <code>pf_logs</code></label>
           <label>Keep for (hours)<input id="lr-hours" type="number" min="1" placeholder="720"></label>
           <div class="full row"><button class="act primary" type="submit">Save</button>
@@ -304,18 +304,18 @@
       </div>
 
       <div class="subnav">
-        <button data-t="keys" class="active" onclick="showExtTab('keys')">API Keys</button>
-        <button data-t="explorer" onclick="showExtTab('explorer')">API Explorer</button>
+        <button data-t="keys" class="active" data-click="showExtTab" data-tab="keys">API Keys</button>
+        <button data-t="explorer" data-click="showExtTab" data-tab="explorer">API Explorer</button>
       </div>
 
       <div id="ext-keys" class="panel">
         <h2>API keys<span class="grow"></span>
-          <input id="k-search" placeholder="name / owner / prefix" size="16" oninput="loadKeys()">
-          <select id="k-role" onchange="loadKeys()"><option value="">All roles</option></select>
-          <select id="k-status" onchange="loadKeys()">
+          <input id="k-search" placeholder="name / owner / prefix" size="16" data-input="loadKeys">
+          <select id="k-role" data-change="loadKeys"><option value="">All roles</option></select>
+          <select id="k-status" data-change="loadKeys">
             <option value="">All statuses</option><option value="active">active</option><option value="inactive">inactive</option>
           </select>
-          <button class="act primary" onclick="openKeyForm()">New API key</button>
+          <button class="act primary" data-click="openKeyForm">New API key</button>
         </h2>
         <div class="scroll"><table>
           <thead><tr>
@@ -340,7 +340,7 @@
 
     <div id="settings-users" hidden>
       <div class="panel">
-        <h2>Operator accounts<span class="grow"></span><button class="act" onclick="loadUsers()">Refresh</button></h2>
+        <h2>Operator accounts<span class="grow"></span><button class="act" data-click="loadUsers">Refresh</button></h2>
         <div class="scroll"><table>
           <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead>
           <tbody id="users"></tbody>
@@ -348,7 +348,7 @@
       </div>
       <div class="panel">
         <h2>New user</h2>
-        <form class="inline" onsubmit="createUser(event)">
+        <form class="inline" data-submit="createUser">
           <label>Email<input name="email" type="email" required placeholder="ops@primex"></label>
           <label>Password<input name="password" type="password" required minlength="8" placeholder="min 8 chars"></label>
           <label>Role<select name="role">
@@ -364,7 +364,7 @@
 <dialog id="key-dialog">
   <div class="dlg-head">
     <strong id="kd-title">New API key</strong><span class="grow"></span>
-    <button class="act" onclick="document.getElementById('key-dialog').close()">Close</button>
+    <button class="act" data-click="closeDialog" data-dialog="key-dialog">Close</button>
   </div>
   <div class="dlg-body" id="kd-body"></div>
 </dialog>
@@ -372,7 +372,7 @@
 <dialog id="flow-dialog">
   <div class="dlg-head">
     <strong id="fd-title">Flow</strong><span class="grow"></span>
-    <button class="act" onclick="document.getElementById('flow-dialog').close()">Close</button>
+    <button class="act" data-click="closeDialog" data-dialog="flow-dialog">Close</button>
   </div>
   <div class="dlg-body" id="fd-body"></div>
 </dialog>
@@ -380,7 +380,7 @@
 <dialog id="dep-run-dialog">
   <div class="dlg-head">
     <strong id="rnd-title">Run deployment</strong><span class="grow"></span>
-    <button class="act" onclick="document.getElementById('dep-run-dialog').close()">Close</button>
+    <button class="act" data-click="closeDialog" data-dialog="dep-run-dialog">Close</button>
   </div>
   <div class="dlg-body" id="rnd-body"></div>
 </dialog>
@@ -388,7 +388,7 @@
 <dialog id="worker-detail">
   <div class="dlg-head">
     <strong id="wdt-title">Worker</strong><span class="grow"></span>
-    <button class="act" onclick="document.getElementById('worker-detail').close()">Close</button>
+    <button class="act" data-click="closeDialog" data-dialog="worker-detail">Close</button>
   </div>
   <div class="dlg-body" id="wdt-body"></div>
 </dialog>
@@ -396,13 +396,13 @@
 <dialog id="pool-dialog">
   <div class="dlg-head">
     <strong>Create work pool</strong><span class="grow"></span>
-    <button class="act" onclick="document.getElementById('pool-dialog').close()">Close</button>
+    <button class="act" data-click="closeDialog" data-dialog="pool-dialog">Close</button>
   </div>
   <div class="dlg-body">
-    <form class="inline" id="pool-form" onsubmit="createPool(event)">
+    <form class="inline" id="pool-form" data-submit="createPool">
       <label>Name *<input name="name" required placeholder="e.g. gpu-builds" pattern="[A-Za-z0-9._-]+" title="letters, digits, . _ - only"></label>
       <label>Pool type
-        <select name="pool_type" onchange="poolTypeToggle()">
+        <select name="pool_type" data-change="poolTypeToggle">
           <option value="pull">pull — workers lease from the queue</option>
           <option value="push">push — server POSTs each ready run to an endpoint</option>
         </select>

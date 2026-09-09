@@ -8,11 +8,11 @@
 // What is left here is boot: who is logged in, what that lets them see, and the
 // two standing subscriptions -- the 15s tick and the event stream -- that keep
 // whatever is on screen current.
-import { publish } from './bridge.js';
-import { ME, TOKEN, act, api, canWrite, isAdmin, setME, toLogin, toast, onMutate } from './api.js';
+import { registerActions } from './actions.js';
+import { ME, TOKEN, api, canWrite, isAdmin, setME, toLogin, toast, onMutate } from './api.js';
 import { esc } from './fmt.js';
-import { rowMenu } from './menu.js';
-import { refreshCurrent, show, showPath } from './router.js';
+import './menu.js';
+import { refreshCurrent, showPath } from './router.js';
 import { connect } from './stream.js';
 import { loadFlows } from './views/workers.js';
 
@@ -48,7 +48,7 @@ async function bootstrap() {
   document.body.classList.toggle('is-admin', isAdmin());
   document.getElementById('who').innerHTML =
     `<b>${esc(ME.email)}</b><span class="role">${esc(ME.machine ? 'machine' : ME.role)}</span>` +
-    `<button class="act" onclick="logout()">Log out</button>`;
+    `<button class="act" data-click="logout">Log out</button>`;
   if (!isAdmin()) {
     const b = document.querySelector('#nav button[data-v="settings"]');
     if (b) b.remove();
@@ -64,10 +64,13 @@ async function logout() {
   toLogin();
 }
 
-// The shell's own handlers. Every other name the markup calls is published by
-// the view that owns it; see bridge.js for why any of this is necessary.
-publish({
-  show, act, esc, toast, rowMenu, logout,
+// The shell's own handlers. Everything else is registered by the view that owns
+// it -- see actions.js for how the markup reaches any of them.
+registerActions({
+  logout,
+  closeDialog: el => document.getElementById(el.dataset.dialog).close(),
+  copy: el => navigator.clipboard.writeText(document.getElementById(el.dataset.target).textContent)
+    .then(() => toast('Copied'), () => toast('Could not copy', true)),
 });
 
 bootstrap();

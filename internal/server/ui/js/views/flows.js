@@ -2,10 +2,10 @@
 // paramFields/readParams are shared with the deployment views, which build
 // the same form from the same schema.
 import { act, api, canWrite, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { line } from '../charts.js';
 import { esc, safeJSON, state, when } from '../fmt.js';
 import { registerViews, show } from '../router.js';
+import { registerActions } from '../actions.js';
 import { runLink } from './run.js';
 
 async function loadFlowsPage() {
@@ -16,7 +16,7 @@ async function loadFlowsPage() {
       const { runs, total } = await api('/runs?flow=' + encodeURIComponent(f.name) + '&limit=1');
       count = total; if (runs[0]) last = state(runs[0].state) + ' ' + when(runs[0].scheduled_at);
     } catch (e) {}
-    return `<tr onclick="openFlow('${esc(f.name)}')" style="cursor:pointer">
+    return `<tr data-click="openFlow" data-name="${esc(f.name)}" style="cursor:pointer">
       <td><strong>${esc(f.name)}</strong></td>
       <td class="mono">${esc(f.version)}</td>
       <td class="muted">${esc(f.description || '')}</td>
@@ -108,7 +108,7 @@ async function openFlow(name) {
     </dl>
     <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
       <h2>Quick run</h2>
-      ${canWrite() ? `<form class="inline" onsubmit="quickRun(event, '${esc(f.name)}')">
+      ${canWrite() ? `<form class="inline" data-submit="quickRun" data-name="${esc(f.name)}">
         ${paramFields(schema, null)}
         <div class="full row"><button class="act primary" type="submit">Run flow</button></div>
       </form>` : '<p class="muted" style="padding:14px">Your account is read-only.</p>'}
@@ -143,6 +143,8 @@ export {
   paramFields, readParams,
 };
 
-publish({
-  loadFlowsPage, openFlow, quickRun,
+registerActions({
+  loadFlowsPage,
+  openFlow: el => openFlow(el.dataset.name),
+  quickRun: (el, ev) => quickRun(ev, el.dataset.name),
 });

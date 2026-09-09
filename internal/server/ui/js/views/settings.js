@@ -2,10 +2,10 @@
 // user administration. Each pane loads on its own; the view registration at
 // the foot says which one a background tick reloads.
 import { act, api, isAdmin, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { esc, when } from '../fmt.js';
 import { menuCell } from '../menu.js';
 import { registerRoutes, registerViews, show, syncURL } from '../router.js';
+import { registerActions } from '../actions.js';
 
 let settingsTab = 'external', extTab = 'keys', apiRoles = null;
 const SETTINGS_TABS = ['external', 'git', 'users'];
@@ -151,10 +151,10 @@ async function loadKeys() {
       <td>${k.expires_at ? esc(new Date(k.expires_at).toLocaleDateString()) : '—'}</td>
       <td>${k.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">inactive</span>'}</td>
       ${menuCell([
-        ['Edit', `openKeyForm('${k.id}')`],
-        ['History', `keyHistory('${k.id}')`],
-        ['Rotate', `rotateKey('${k.id}')`],
-        ['Delete', `deleteKey('${k.id}')`, true],
+        ['Edit', { act: 'openKeyForm', id: k.id }],
+        ['History', { act: 'keyHistory', id: k.id }],
+        ['Rotate', { act: 'rotateKey', id: k.id }],
+        ['Delete', { act: 'deleteKey', id: k.id }, true],
       ])}
     </tr>`;
   }).join('') : '<tr><td colspan="9" class="empty">No API keys yet.</td></tr>';
@@ -165,12 +165,12 @@ function openKeyForm(id) {
   const roles = (apiRoles && apiRoles.roles) || [];
   document.getElementById('kd-title').textContent = k ? 'Edit API key' : 'New API key';
   document.getElementById('kd-body').innerHTML = `
-    <form class="inline" onsubmit="saveKey(event, ${k ? `'${k.id}'` : 'null'})">
+    <form class="inline" data-submit="saveKey"${k ? ` data-id="${esc(k.id)}"` : ''}>
       <label>Name<input name="name" required value="${k ? esc(k.name) : ''}"></label>
       <label>Owner email<input name="owner_email" type="email" value="${k ? esc(k.owner_email || '') : ''}"></label>
       <label>Expires<input name="expires_at" type="date" value="${k && k.expires_at ? k.expires_at.slice(0, 10) : ''}"></label>
       <label class="full">Description<textarea name="description">${k ? esc(k.description || '') : ''}</textarea></label>
-      <label>Role<select name="role" onchange="showScopes()">
+      <label>Role<select name="role" data-change="showScopes">
         ${roles.map(r => `<option value="${r.id}" ${k && k.role === r.id ? 'selected' : ''}>${esc(r.label)}</option>`).join('')}
       </select></label>
       <label>Rate limit / min<input name="rate_limit_per_min" type="number" min="0" placeholder="role default"
@@ -227,7 +227,7 @@ function showSecret(secret, note) {
   document.getElementById('kd-body').innerHTML = `
     <p class="muted" style="padding:12px 14px 0;margin:0">${esc(note)}</p>
     <div class="secretbox"><code id="sv">${esc(secret)}</code>
-      <button class="act" onclick="navigator.clipboard.writeText(document.getElementById('sv').textContent).then(()=>toast('Copied'))">Copy</button>
+      <button class="act" data-click="copy" data-target="sv">Copy</button>
     </div>`;
   document.getElementById('key-dialog').showModal();
 }
@@ -265,15 +265,15 @@ async function loadUsers() {
     const sso = u.auth_provider === 'oidc';
     return `<tr>
       <td><strong>${esc(u.email)}</strong> ${sso ? '<span class="chip on">SSO</span>' : ''}</td>
-      <td><select onchange="setUserRole('${u.id}', this.value)">
+      <td><select data-change="setUserRole" data-id="${esc(u.id)}">
         ${['viewer', 'operator', 'admin'].map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}
       </select></td>
       <td>${u.active ? '<span class="pill s-COMPLETED">active</span>' : '<span class="pill s-PAUSED">disabled</span>'}</td>
       <td>${when(u.last_login_at)}</td>
       ${menuCell([
-        !sso && ['Reset password', `resetUserPw('${u.id}')`],
-        !sso && ['Reset link', `resetLink('${u.id}')`],
-        [u.active ? 'Deactivate' : 'Activate', `setUserActive('${u.id}', ${!u.active})`],
+        !sso && ['Reset password', { act: 'resetUserPw', id: u.id }],
+        !sso && ['Reset link', { act: 'resetLink', id: u.id }],
+        [u.active ? 'Deactivate' : 'Activate', { act: 'setUserActive', id: u.id, active: !u.active }],
       ])}
     </tr>`;
   }).join('');
@@ -328,9 +328,25 @@ registerRoutes([['settings', (tab, ext) => {
   return 'settings';
 }]]);
 
-publish({
-  showSettings, showExtTab, toggleExternal, saveRetention,
-  saveGitConnection, loadKeys, openKeyForm, showScopes, saveKey, rotateKey,
-  deleteKey, keyHistory, loadUsers, createUser, setUserRole, setUserActive,
-  resetUserPw, resetLink,
+registerActions({
+  showSettings: el => showSettings(el.dataset.pane),
+  showExtTab: el => showExtTab(el.dataset.tab),
+  toggleExternal,
+  saveRetention: (el, ev) => saveRetention(ev),
+  saveGitConnection: (el, ev) => saveGitConnection(ev),
+  loadKeys,
+  // No id on the "New API key" button, which is exactly what openKeyForm reads
+  // as "a new one".
+  openKeyForm: el => openKeyForm(el.dataset.id),
+  showScopes,
+  saveKey: (el, ev) => saveKey(ev, el.dataset.id || null),
+  rotateKey: el => rotateKey(el.dataset.id),
+  deleteKey: el => deleteKey(el.dataset.id),
+  keyHistory: el => keyHistory(el.dataset.id),
+  loadUsers,
+  createUser: (el, ev) => createUser(ev),
+  setUserRole: el => setUserRole(el.dataset.id, el.value),
+  setUserActive: el => setUserActive(el.dataset.id, el.dataset.active === 'true'),
+  resetUserPw: el => resetUserPw(el.dataset.id),
+  resetLink: el => resetLink(el.dataset.id),
 });

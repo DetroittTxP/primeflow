@@ -5,18 +5,18 @@
 // an import cycle between the list and the row it opens.
 import { act, api, canWrite, toast } from '../api.js';
 import { poolBlocker, poolContext, poolPill, runBlocker } from '../blockers.js';
-import { publish } from '../bridge.js';
 import { bars, svg } from '../charts.js';
 import { STCOL, dur, esc, goDur, prio, runAt, runMS, state, when } from '../fmt.js';
 import { menuCell } from '../menu.js';
 import { registerRoutes, registerViews, show, syncURL } from '../router.js';
+import { registerActions } from '../actions.js';
 import { paramFields, readParams } from './flows.js';
 import { runLink } from './run.js';
 
 async function loadDeployments() {
   const [ds, ctx] = await Promise.all([api('/deployments').then(x => x || []), poolContext()]);
   document.getElementById('deployments').innerHTML = ds.length ? ds.map(d => `
-    <tr onclick="openDeployment(event, '${esc(d.id)}')" style="cursor:pointer">
+    <tr data-click="openDeploymentRow" data-id="${esc(d.id)}" style="cursor:pointer">
       <td><strong>${esc(d.name)}</strong><div class="muted">${esc(d.description || '')}</div></td>
       <td>${esc(d.flow_name)}</td>
       <td class="mono">${d.schedule ? esc(d.schedule_kind + ' ' + d.schedule) + ' <span class="muted">' + esc(d.timezone || 'UTC') + '</span>' : '<span class="muted">manual</span>'}</td>
@@ -24,11 +24,11 @@ async function loadDeployments() {
       <td>${d.priority}</td>
       <td>${d.paused ? '<span class="pill s-PAUSED">paused</span>' : '<span class="pill s-COMPLETED">active</span>'}</td>
       ${menuCell([
-        ['Open', `openDeployment(null, '${d.id}')`],
-        ['Run now', `act('/deployments/${d.id}/run',{method:'POST',body:'{}'})`],
-        ['Run…', `openDeploymentRun('${d.id}')`],
-        [d.paused ? 'Resume' : 'Pause', `act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})`],
-        ['Delete', `if(confirm('Delete deployment ' + ${JSON.stringify(d.name)} + '?'))act('/deployments/${d.id}',{method:'DELETE'})`, true],
+        ['Open', { act: 'openDeployment', id: d.id }],
+        ['Run now', { act: 'runDeploymentNow', id: d.id }],
+        ['Run…', { act: 'openDeploymentRun', id: d.id }],
+        [d.paused ? 'Resume' : 'Pause', { act: d.paused ? 'resumeDeployment' : 'pauseDeployment', id: d.id }],
+        ['Delete', { act: 'deleteDeployment', id: d.id, name: d.name }, true],
       ], 'writer-only')}
     </tr>`).join('') : '<tr><td colspan="7" class="empty">No deployments yet.</td></tr>';
 }
@@ -61,7 +61,7 @@ async function openDeploymentRun(id) {
     </dl>
     <div class="panel" style="margin:0;border-radius:0;border-left:0;border-right:0">
       <h2>Parameters</h2>
-      ${canWrite() ? `<form class="inline" onsubmit="runDeployment(event, '${esc(d.id)}')">
+      ${canWrite() ? `<form class="inline" data-submit="runDeployment" data-id="${esc(d.id)}">
         ${paramFields(schema, d.parameters || {})}
         <label>priority <span class="muted">override</span><input name="__priority" type="number" min="0" max="100" placeholder="${d.priority}"></label>
         <label>pool <span class="muted">override</span><input name="__queue" type="text" placeholder="${esc(d.work_queue)}"></label>
@@ -157,7 +157,7 @@ function runBars(runs, h = 76) {
     const bh = Math.max(5, ((ms || 0) / max) * (h - 5));
     return `<rect x="${(i * bw + bw * 0.15).toFixed(1)}" y="${(h - bh).toFixed(1)}" ` +
       `width="${(bw * 0.7).toFixed(1)}" height="${bh.toFixed(1)}" rx="2" ` +
-      `fill="${STCOL(r.state)}" opacity="${ms == null ? '0.45' : '0.9'}" onclick="openRun('${r.id}')">` +
+      `fill="${STCOL(r.state)}" opacity="${ms == null ? '0.45' : '0.9'}" data-click="openRun" data-id="${esc(r.id)}">` +
       `<title>${esc(r.name)} — ${esc(r.state)}${ms == null ? '' : ' — ' + dur(ms)} · ` +
       `${esc(new Date(runAt(r)).toLocaleString())}</title></rect>`;
   }).join('');
@@ -239,10 +239,10 @@ async function loadDeployment() {
   document.getElementById('dep-title').textContent = d.name;
   document.getElementById('dep-state').innerHTML = depStatus(d) + poolPill(blocker);
   document.getElementById('dep-acts').innerHTML = canWrite() ? `
-    <button class="act primary" onclick="act('/deployments/${d.id}/run',{method:'POST',body:'{}'})">Run now</button>
-    <button class="act" onclick="openDeploymentRun('${d.id}')">Run…</button>
-    <button class="act" onclick="act('/deployments/${d.id}/${d.paused ? 'resume' : 'pause'}',{method:'POST'})">${d.paused ? 'Resume' : 'Pause'}</button>
-    <button class="act" onclick="removeDeployment('${d.id}', ${esc(JSON.stringify(d.name))})">Delete</button>` : '';
+    <button class="act primary" data-click="runDeploymentNow" data-id="${esc(d.id)}">Run now</button>
+    <button class="act" data-click="openDeploymentRun" data-id="${esc(d.id)}">Run…</button>
+    <button class="act" data-click="${d.paused ? 'resumeDeployment' : 'pauseDeployment'}" data-id="${esc(d.id)}">${d.paused ? 'Resume' : 'Pause'}</button>
+    <button class="act" data-click="removeDeployment" data-id="${esc(d.id)}" data-name="${esc(d.name)}">Delete</button>` : '';
 
   main.innerHTML = `
     <div class="cards">
@@ -267,7 +267,7 @@ async function loadDeployment() {
 
     <div class="subnav flat" id="dep-subnav">${DEP_TABS.map(t => {
       const n = t === 'runs' ? hist.total : t === 'upcoming' ? upcoming.length : 0;
-      return `<button data-t="${t}" onclick="showDepTab('${t}')">${t[0].toUpperCase() + t.slice(1)}` +
+      return `<button data-t="${t}" data-click="showDepTab" data-tab="${t}">${t[0].toUpperCase() + t.slice(1)}` +
         `${n ? ' <span class="muted">' + n + '</span>' : ''}</button>`;
     }).join('')}</div>
 
@@ -275,7 +275,7 @@ async function loadDeployment() {
       <h2>Flow runs<span class="grow"></span><span class="muted" style="font-weight:400">newest first</span></h2>
       <div class="scroll"><table>
         <thead><tr><th>Run</th><th>State</th><th>Pool</th><th>Started</th><th>Duration</th><th>Attempt</th></tr></thead>
-        <tbody>${runs.length ? runs.map(r => `<tr onclick="openRun('${r.id}')" style="cursor:pointer">
+        <tbody>${runs.length ? runs.map(r => `<tr data-click="openRun" data-id="${esc(r.id)}" style="cursor:pointer">
           <td class="mono">${esc(r.name)}</td>
           <td>${state(r.state)}${r.state_message ? ` <span class="muted" title="${esc(r.state_message)}">ⓘ</span>` : ''}</td>
           <td>${esc(r.work_queue)}</td>
@@ -297,7 +297,7 @@ async function loadDeployment() {
           <td>${prio(r)}</td>
           <td>${when(r.scheduled_at)} <span class="muted">${esc(new Date(r.scheduled_at).toLocaleString())}</span></td>
           <td class="writer-only" style="text-align:right">
-            <button class="act" onclick="act('/runs/${r.id}/cancel',{method:'POST'})">Cancel</button></td>
+            <button class="act" data-click="cancelRun" data-id="${esc(r.id)}">Cancel</button></td>
         </tr>`).join('') : `<tr><td colspan="5" class="empty">${
           !sched ? 'No schedule — this deployment runs only when something triggers it.'
             : d.paused ? 'Paused: nothing is queued while a deployment is paused.'
@@ -339,7 +339,7 @@ async function loadDeployment() {
     <div class="panel">
       <h2>Deployment</h2>
       <dl class="kv">
-        <dt>Flow</dt><dd><a href="#" class="rlink" onclick="openFlow('${esc(d.flow_name)}');return false">${esc(d.flow_name)}</a></dd>
+        <dt>Flow</dt><dd><a href="/flows" class="rlink" data-click="openFlow" data-name="${esc(d.flow_name)}">${esc(d.flow_name)}</a></dd>
         <dt>Status</dt><dd>${depStatus(d)}</dd>
         <dt>Work pool</dt><dd>${esc(d.work_queue)}${poolPill(blocker)}</dd>
         <dt>Priority</dt><dd>${depPrio(d)}</dd>
@@ -395,7 +395,25 @@ registerRoutes([['deployments', (id, tab) => {
   return 'deployment';
 }]]);
 
-publish({
-  loadDeployments, openDeployment, openDeploymentRun, runDeployment,
-  removeDeployment, showDepTab, saveDeployment,
+registerActions({
+  loadDeployments,
+  // From the row, the click is handed on so openDeployment can tell a click on
+  // the row itself from one on a control sitting in it; from the "⋯" menu there
+  // is nothing to tell apart, and the guard would swallow the item.
+  openDeploymentRow: (el, ev) => openDeployment(ev, el.dataset.id),
+  openDeployment: el => openDeployment(null, el.dataset.id),
+  openDeploymentRun: el => openDeploymentRun(el.dataset.id),
+  runDeployment: (el, ev) => runDeployment(ev, el.dataset.id),
+  runDeploymentNow: el => act(`/deployments/${el.dataset.id}/run`, { method: 'POST', body: '{}' }),
+  pauseDeployment: el => act(`/deployments/${el.dataset.id}/pause`, { method: 'POST' }),
+  resumeDeployment: el => act(`/deployments/${el.dataset.id}/resume`, { method: 'POST' }),
+  // From the list: confirm, delete, and let the table reload around the gap.
+  // removeDeployment is the detail page's version, which also has to leave the
+  // page it is standing on.
+  deleteDeployment: el => {
+    if (confirm('Delete deployment ' + el.dataset.name + '?')) act('/deployments/' + el.dataset.id, { method: 'DELETE' });
+  },
+  removeDeployment: el => removeDeployment(el.dataset.id, el.dataset.name),
+  showDepTab: el => showDepTab(el.dataset.tab),
+  saveDeployment: (el, ev) => saveDeployment(ev),
 });

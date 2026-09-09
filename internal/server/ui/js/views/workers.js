@@ -4,16 +4,16 @@
 // also fills the deployment form's flow picker, which is why boot calls it
 // once before any view is open.
 import { act, api, canWrite, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { line } from '../charts.js';
 import { esc, when } from '../fmt.js';
 import { registerViews, show } from '../router.js';
+import { registerActions } from '../actions.js';
 import { wkComponentsFor, wkConnOf, wkEnv, wkK8s } from './worker-wizard.js';
 
 async function loadWorkers() {
   const ws = (await api('/workers')) || [];
   document.getElementById('workers').innerHTML = ws.length ? ws.map(w => `
-    <tr onclick="openWorkerDetail('${w.id}')" style="cursor:pointer" title="View parameters, config, YAML and packages">
+    <tr data-click="openWorkerDetail" data-id="${esc(w.id)}" style="cursor:pointer" title="View parameters, config, YAML and packages">
       <td><strong>${esc(w.name)}</strong><div class="muted mono">${esc(w.id.slice(0, 8))}</div></td>
       <td>${w.online ? '<span class="pill s-COMPLETED">online</span>' : '<span class="pill s-FAILED">stale</span>'}</td>
       <td class="mono">${(w.queues || []).map(esc).join(', ')}</td>
@@ -60,7 +60,7 @@ async function openWorkerDetail(id) {
     <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
       <h2>Deployment YAML <span class="muted">— rendered from this worker's live config</span></h2>
       <pre class="logs" id="wdt-yaml" style="margin:0 16px">${esc(km.secret + '\n---\n' + km.dep)}</pre>
-      <div class="row" style="padding:10px 16px"><button class="act" onclick="navigator.clipboard.writeText(document.getElementById('wdt-yaml').textContent).then(()=>toast('Copied'))">Copy YAML</button></div>
+      <div class="row" style="padding:10px 16px"><button class="act" data-click="copy" data-target="wdt-yaml">Copy YAML</button></div>
     </div>
     <div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)">
       <h2>Package list <span class="muted">— components this worker's host needs</span></h2>
@@ -77,7 +77,7 @@ function gitDeliveryPanel(w, git, spec) {
   const head = `<div class="panel" style="margin:0;border-radius:0;border:0;border-top:1px solid var(--line)"><h2>GitOps delivery</h2>`;
   if (!spec) {
     return head + `<p class="muted" style="padding:0 16px 12px">No worker spec backs this worker yet.
-      <a href="#" class="rlink" onclick="show('newworker');return false">Add one from the wizard</a> to enable server-side sync.</p></div>`;
+      <a href="/newworker" class="rlink" data-click="show" data-view="newworker">Add one from the wizard</a> to enable server-side sync.</p></div>`;
   }
   const st = spec.sync_state || 'pending';
   const pill = { synced: 's-COMPLETED', pending: 's-SCHEDULED', drift: 's-RUNNING', error: 's-FAILED' }[st] || 's-SCHEDULED';
@@ -90,8 +90,8 @@ function gitDeliveryPanel(w, git, spec) {
       ${spec.last_error ? `<dt>Error</dt><dd class="mono" style="color:var(--bad)">${esc(spec.last_error)}</dd>` : ''}
     </dl>
     <div class="row" style="padding:10px 16px;gap:12px">
-      <button class="act primary" onclick="syncWorkerSpecNow('${spec.id}')">Sync now</button>
-      <label class="wk-chk"><input type="checkbox" ${spec.auto_sync ? 'checked' : ''} onchange="toggleWorkerSpecAutoSync('${spec.id}', this.checked)">Auto-sync</label>
+      <button class="act primary" data-click="syncWorkerSpecNow" data-id="${esc(spec.id)}">Sync now</button>
+      <label class="wk-chk"><input type="checkbox" ${spec.auto_sync ? 'checked' : ''} data-change="toggleWorkerSpecAutoSync" data-id="${esc(spec.id)}">Auto-sync</label>
     </div></div>`;
 }
 
@@ -135,7 +135,9 @@ export {
   loadFlows,
 };
 
-publish({
-  loadWorkers, openWorkerDetail, syncWorkerSpecNow,
-  toggleWorkerSpecAutoSync,
+registerActions({
+  loadWorkers,
+  openWorkerDetail: el => openWorkerDetail(el.dataset.id),
+  syncWorkerSpecNow: el => syncWorkerSpecNow(el.dataset.id),
+  toggleWorkerSpecAutoSync: el => toggleWorkerSpecAutoSync(el.dataset.id, el.checked),
 });

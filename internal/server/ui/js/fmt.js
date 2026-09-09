@@ -40,4 +40,13 @@ const STCOL = s => ({
 
 const safeJSON = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
-export { esc, when, dur, runAt, runMS, goDur, state, prio, STCOL, safeJSON };
+// An action and its arguments as data attributes: { act: 'bump', id: 'r1' }
+// becomes data-click="bump" data-id="r1". A nullish value is dropped rather
+// than written out as "undefined", so a caller can pass a field that is only
+// sometimes there. Keys stay single words -- the DOM lowercases them, and
+// data-poolType would come back as poolType only by accident.
+const dataAttrs = ({ act, ...args }, on = 'click') =>
+  `data-${on}="${esc(act)}"` +
+  Object.entries(args).map(([k, v]) => v == null ? '' : ` data-${k}="${esc(v)}"`).join('');
+
+export { esc, when, dur, runAt, runMS, goDur, state, prio, STCOL, safeJSON, dataAttrs };

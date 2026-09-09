@@ -5,25 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reset password · PrimeFlow</title>
 <link rel="icon" type="image/png" href="/primeflow.png">
-<style>
-  :root { --bg:#f6f7f9; --panel:#fff; --ink:#16181d; --muted:#6b7280; --line:#e3e6ea; --accent:#2f6feb; --err:#c0392b; --ok:#1a7f47; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --panel:#171a21; --ink:#e6e8ec; --muted:#9aa3b2; --line:#262b35; --accent:#6ea1ff; --err:#f87171; --ok:#4ade80; } }
-  * { box-sizing: border-box; }
-  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--ink);
-         font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:28px 26px;
-          width:min(360px,92vw); box-shadow:0 8px 30px rgba(0,0,0,.10); }
-  .brand { font-weight:650; font-size:17px; margin-bottom:2px; } .brand span { color:var(--accent); }
-  .sub { color:var(--muted); font-size:12.5px; margin-bottom:20px; }
-  label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
-  input { width:100%; font:inherit; padding:8px 10px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--ink); }
-  input:focus { outline:2px solid var(--accent); border-color:var(--accent); }
-  button { width:100%; margin-top:20px; font:inherit; font-weight:600; cursor:pointer; padding:9px 12px;
-           border-radius:7px; border:1px solid var(--accent); background:var(--accent); color:#fff; }
-  button:disabled { opacity:.6; cursor:default; }
-  .msg { font-size:12.5px; margin-top:14px; min-height:1.2em; }
-  .msg.err { color:var(--err); } .msg.ok { color:var(--ok); }
-</style>
+<link rel="stylesheet" href="/css/reset.css">
 </head>
 <body>
 <form class="card" id="f">
@@ -36,28 +18,6 @@
   <button id="go" type="submit">Set password</button>
   <div class="msg" id="msg"></div>
 </form>
-<script>
-  const token = new URLSearchParams(location.search).get('token') || '';
-  const msg = document.getElementById('msg');
-  const go = document.getElementById('go');
-  if (!token) { msg.className = 'msg err'; msg.textContent = 'This link is missing its token.'; go.disabled = true; }
-  document.getElementById('f').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    msg.textContent = '';
-    if (document.getElementById('pw').value !== document.getElementById('pw2').value) {
-      msg.className = 'msg err'; msg.textContent = 'The passwords do not match.'; return;
-    }
-    go.disabled = true;
-    try {
-      const r = await fetch('/api/v1/auth/reset', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
-        body: JSON.stringify({ token, password: document.getElementById('pw').value }),
-      });
-      if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error || r.statusText); }
-      msg.className = 'msg ok'; msg.textContent = 'Password set. Redirecting to sign in…';
-      setTimeout(() => { location.href = '/login.html'; }, 1200);
-    } catch (ex) { msg.className = 'msg err'; msg.textContent = ex.message; go.disabled = false; }
-  });
-</script>
+<script type="module" src="/js/reset.js"></script>
 </body>
 </html>

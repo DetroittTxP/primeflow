@@ -3,17 +3,15 @@
 import { api } from '../api.js';
 import { bars, line, spark } from '../charts.js';
 import { STCOL, esc, state, when } from '../fmt.js';
+import { registerActions } from '../actions.js';
 import { registerViews } from '../router.js';
+import { runHref } from './run.js';
 
+// The window an operator last chose outlives the tab, so the remembered one is
+// marked before anything is drawn.
 let dashWindow = localStorage.getItem('pf-window') || '24h';
-document.querySelectorAll('#win-switch button').forEach(b => {
-  b.classList.toggle('active', b.dataset.w === dashWindow);
-  b.onclick = () => {
-    dashWindow = b.dataset.w; localStorage.setItem('pf-window', dashWindow);
-    document.querySelectorAll('#win-switch button').forEach(x => x.classList.toggle('active', x === b));
-    loadDashboard();
-  };
-});
+document.querySelectorAll('#win-switch button').forEach(b =>
+  b.classList.toggle('active', b.dataset.w === dashWindow));
 const winLabel = w => ({ '8h': 'last 8 hours', '24h': 'last 24 hours', '168h': 'last 7 days' }[w] || w);
 const trend = arr => {
   const h = arr.slice(0, Math.floor(arr.length / 2)).reduce((a, b) => a + b, 0);
@@ -66,7 +64,7 @@ async function loadDashboard() {
         <h3>${esc(flow)}</h3>
         <div class="muted" style="font-size:12px">${rs.length} recent · last ${when(rs[0].scheduled_at)}</div>
         <div class="fdots">${rs.slice(0, 14).map(r => `<span class="fdot" style="background:${STCOL(r.state)}" title="${esc(r.name)} — ${r.state}"></span>`).join('')}</div>
-        ${rs.slice(0, 2).map(r => `<div class="fmini"><a href="#" onclick="openRun('${r.id}');return false">${esc(r.name)}</a>${state(r.state)}</div>`).join('')}
+        ${rs.slice(0, 2).map(r => `<div class="fmini"><a href="${runHref(r.id)}" data-click="openRun" data-id="${esc(r.id)}">${esc(r.name)}</a>${state(r.state)}</div>`).join('')}
       </div>`).join('');
     document.getElementById('dash-flows').innerHTML = cards || '<div class="empty">No runs yet.</div>';
   } catch (e) { /* non-fatal */ }
@@ -98,6 +96,15 @@ const desiredWorkers = q => {
 };
 
 registerViews({ dashboard: { refresh: loadDashboard } });
+
+registerActions({
+  setDashWindow: el => {
+    dashWindow = el.dataset.w;
+    localStorage.setItem('pf-window', dashWindow);
+    document.querySelectorAll('#win-switch button').forEach(b => b.classList.toggle('active', b === el));
+    loadDashboard();
+  },
+});
 
 export {
   desiredWorkers,

@@ -1,16 +1,22 @@
 // Work pools: the table of pools, the dialog that creates one, and the
 // pending queue underneath -- the order the next worker takes work in.
 import { act, api, canWrite, toast } from '../api.js';
-import { publish } from '../bridge.js';
 import { esc, prio, when } from '../fmt.js';
 import { menuCell } from '../menu.js';
 import { currentView, registerViews, show } from '../router.js';
+import { registerActions } from '../actions.js';
 import { desiredWorkers } from './dashboard.js';
 import { runLink } from './run.js';
 import { nwReloadPools } from './worker-wizard.js';
 
+// The pool rows a menu item refers to. An action is named by a string and
+// carries strings, so "Autoscale…" passes the pool's name and looks the rest of
+// it up here rather than smuggling a JSON blob through an attribute.
+let poolsByName = {};
+
 async function loadQueues() {
   const [qs, ws] = await Promise.all([api('/queues').then(x => x || []), api('/workers').catch(() => [])]);
+  poolsByName = Object.fromEntries(qs.map(q => [q.name, q]));
   const online = q => ws.filter(w => w.online && (w.queues || []).includes(q)).length;
   document.getElementById('queues').innerHTML = qs.map(q => {
     const push = q.pool_type === 'push';
@@ -24,11 +30,11 @@ async function loadQueues() {
       <td>${push ? '<span class="muted">dispatched</span>' : `<b>${desiredWorkers(q)}</b> <span class="muted">${q.min_workers || 0}–${q.max_workers ?? '∞'}</span>`}</td>
       <td class="muted">${esc(q.owner || '—')}</td>
       ${menuCell([
-        [q.paused ? 'Resume' : 'Pause', `act('/queues/${encodeURIComponent(q.name)}/${q.paused ? 'resume' : 'pause'}',{method:'POST'})`],
-        ['Limit…', `setLimit(${JSON.stringify(q.name)}, ${q.concurrency_limit ?? 'null'})`],
-        push ? ['Push endpoint…', `setPushEndpoint(${JSON.stringify(q)})`]
-             : ['Autoscale…', `setAutoscale(${JSON.stringify(q)})`],
-        !push && ['Make push…', `setPushEndpoint({name:${JSON.stringify(q.name)},pool_type:'pull'})`],
+        [q.paused ? 'Resume' : 'Pause', { act: q.paused ? 'resumePool' : 'pausePool', name: q.name }],
+        ['Limit…', { act: 'setLimit', name: q.name }],
+        push ? ['Push endpoint…', { act: 'setPushEndpoint', name: q.name }]
+             : ['Autoscale…', { act: 'setAutoscale', name: q.name }],
+        !push && ['Make push…', { act: 'makePush', name: q.name }],
       ], 'writer-only')}
     </tr>`;
   }).join('');
@@ -144,12 +150,12 @@ async function loadPending() {
       <td>${prio(r)}</td>
       <td>${when(r.scheduled_at)}</td>
       ${menuCell([
-        ['<span title="Run this next">▲ Front</span>', `act('/runs/${r.id}/front',{method:'POST'})`],
-        ['Urgent', `bump('${r.id}', 100)`],
-        ['Normal', `bump('${r.id}', 50)`],
-        ['▼ Back', `act('/runs/${r.id}/back',{method:'POST'})`],
-        r.queue_position != null && ['Unpin', `act('/runs/${r.id}/unpin',{method:'POST'})`],
-        ['Move…', `moveQueue('${r.id}')`],
+        ['<span title="Run this next">▲ Front</span>', { act: 'runToFront', id: r.id }],
+        ['Urgent', { act: 'bump', id: r.id, priority: 100 }],
+        ['Normal', { act: 'bump', id: r.id, priority: 50 }],
+        ['▼ Back', { act: 'runToBack', id: r.id }],
+        r.queue_position != null && ['Unpin', { act: 'runUnpin', id: r.id }],
+        ['Move…', { act: 'moveQueue', id: r.id }],
       ], 'writer-only')}
     </tr>`).join('') : '<tr><td colspan="6" class="empty">Queue is empty.</td></tr>';
 }
@@ -162,7 +168,23 @@ function moveQueue(id) {
 
 registerViews({ queues: { refresh: async () => { await loadQueues(); await loadPending(); } } });
 
-publish({
-  loadQueues, loadPending, openCreatePool, poolTypeToggle, createPool,
-  setLimit, setAutoscale, setPushEndpoint, bump, moveQueue,
+registerActions({
+  loadQueues,
+  loadPending,
+  openCreatePool,
+  poolTypeToggle,
+  createPool: (el, ev) => createPool(ev),
+  // The prompts want the pool's current numbers, which the row does not carry:
+  // the name is the key, poolsByName is the record.
+  setLimit: el => setLimit(el.dataset.name, poolsByName[el.dataset.name].concurrency_limit ?? null),
+  setAutoscale: el => setAutoscale(poolsByName[el.dataset.name]),
+  setPushEndpoint: el => setPushEndpoint(poolsByName[el.dataset.name]),
+  makePush: el => setPushEndpoint({ name: el.dataset.name, pool_type: 'pull' }),
+  pausePool: el => act(`/queues/${encodeURIComponent(el.dataset.name)}/pause`, { method: 'POST' }),
+  resumePool: el => act(`/queues/${encodeURIComponent(el.dataset.name)}/resume`, { method: 'POST' }),
+  bump: el => bump(el.dataset.id, +el.dataset.priority),
+  moveQueue: el => moveQueue(el.dataset.id),
+  runToFront: el => act(`/runs/${el.dataset.id}/front`, { method: 'POST' }),
+  runToBack: el => act(`/runs/${el.dataset.id}/back`, { method: 'POST' }),
+  runUnpin: el => act(`/runs/${el.dataset.id}/unpin`, { method: 'POST' }),
 });

@@ -1,8 +1,8 @@
 // The event feed.
 import { api } from '../api.js';
-import { publish } from '../bridge.js';
 import { esc, when } from '../fmt.js';
 import { registerViews } from '../router.js';
+import { registerActions } from '../actions.js';
 
 function evClass(name) {
   if (/\.(FAILED|CRASHED)$/.test(name)) return 'ev-err';
@@ -35,6 +35,4 @@ export {
   evClass,
 };
 
-publish({
-  loadEvents,
-});
+registerActions({ loadEvents });
