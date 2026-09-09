@@ -11,10 +11,11 @@ tmp_dir = "tmp"
   bin  = "./tmp/server"
   args_bin = ["server"]
   log = "build-errors-server.log"
-  # html is in here on purpose: the console is compiled into the binary with
-  # //go:embed (internal/server/ui.go), so editing index.html is a Go rebuild.
-  # sql likewise — internal/store/postgres embeds the migrations.
-  include_ext = ["go", "html", "sql"]
+  # html, css and js are in here on purpose: the console is compiled into the
+  # binary with //go:embed (internal/server/ui.go), so editing any of the files
+  # under internal/server/ui is a Go rebuild. sql likewise — internal/store/postgres
+  # embeds the migrations.
+  include_ext = ["go", "html", "css", "js", "sql"]
   exclude_dir = ["bin", "tmp", "docs", "deploy", "sites", "resources", ".git", ".claude"]
   exclude_regex = ["_test\\.go"]
   # Coalesce the burst of events an editor emits when it saves.

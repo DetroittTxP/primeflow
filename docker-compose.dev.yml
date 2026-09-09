@@ -5,8 +5,8 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #   make dev              # the same thing
 #
-# Edit a .go file — or internal/server/ui/index.html, which is embedded in the
-# binary — and only the affected service restarts, in a second or two. The
+# Edit a .go file — or anything under internal/server/ui, which is embedded in
+# the binary — and only the affected service restarts, in a second or two. The
 # module and build caches are named volumes, so a `down` does not cost you a
 # cold compile. Ports, env and dependencies all come from the base file.
 services:
