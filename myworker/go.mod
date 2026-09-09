@@ -56,4 +56,5 @@ require (
 //
 //	go mod edit -dropreplace github.com/DetroittTxP/primeflow
 //	go get github.com/DetroittTxP/primeflow@v0.2.0
+//	go mod tidy
 replace github.com/DetroittTxP/primeflow => ..

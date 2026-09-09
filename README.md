@@ -227,18 +227,19 @@ worker ไม่จำเป็นต้องอยู่ในรีโปน�
 ```bash
 go mod init github.com/you/my-worker
 go get github.com/DetroittTxP/primeflow@v0.2.0
+# เขียน main.go ที่ import pkg/sdk แล้วค่อยดึง dependency ที่เหลือของกราฟ
+go mod tidy
 ```
+
+`go get` ดึงมาแค่โมดูลนี้โมดูลเดียว ยังไม่ได้เขียน go.sum ของ dependency ทางอ้อมที่แพ็กเกจใช้
+ถ้าข้าม `go mod tidy` การ build จะล้มด้วย `missing go.sum entry`
 
 tag `v0.1.0` ยังประกาศ module path เดิม (`github.com/primex/primeflow`) จึงดึงไม่ได้
 ต้องใช้ tag ที่ออกหลังการเปลี่ยนชื่อ path เท่านั้น
 
-รีโปเป็น private ดังนั้นเครื่องที่ดึงต้องข้าม module proxy และดึงผ่าน SSH — ตั้งครั้งเดียว
-ต่อเครื่องและใน CI:
-
-```bash
-go env -w GOPRIVATE=github.com/DetroittTxP/*
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-```
+รีโปเป็น public จึงไม่ต้องใช้ credential ไม่ต้องตั้ง `GOPRIVATE` และไม่ต้องเขียน URL ใหม่เป็น SSH —
+มันผ่าน module proxy และ checksum database เหมือน dependency ตัวอื่น ซึ่งเป็นสิ่งที่ควรเป็น
+เพราะ proxy ช่วย cache และ sumdb ทำให้การถูกแก้ไขระหว่างทางตรวจจับได้
 
 [`myworker/`](myworker/) คือโครงที่พร้อมคัดลอกออกไปตั้งเป็นรีโปของตัวเอง: go.mod ของตัวเอง,
 flow สองตัวที่ใช้งานได้จริง และ Dockerfile

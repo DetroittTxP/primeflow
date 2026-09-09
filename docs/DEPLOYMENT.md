@@ -97,17 +97,20 @@ That worker lives in a repository of its own:
 ```bash
 go mod init github.com/you/my-worker
 go get github.com/DetroittTxP/primeflow@v0.2.0
+# write main.go importing pkg/sdk, then resolve the rest of the graph
+go mod tidy
 ```
+
+`go get` records this module alone; it does not write go.sum entries for the
+indirect dependencies the imported packages pull in. Skip the `go mod tidy` and
+the build stops with `missing go.sum entry`.
 
 Only tags cut *after* the module path was renamed resolve — `v0.1.0` still
-declares the old `github.com/primex/primeflow` and `go get` will refuse it. The
-repository is private, so each developer machine and each CI runner needs the
-module proxy bypassed and fetches sent over SSH, once:
-
-```bash
-go env -w GOPRIVATE=github.com/DetroittTxP/*
-git config --global url."git@github.com:".insteadOf "https://github.com/"
-```
+declares the old `github.com/primex/primeflow` and `go get` will refuse it.
+`v0.2.0` is the first that works. The repository is public, so nothing else is
+needed: no credentials, no `GOPRIVATE`, no SSH rewrite. It comes through the
+module proxy and the checksum database like any other dependency, which is what
+you want — the proxy caches it and the sumdb makes a tampered fetch detectable.
 
 [`myworker/`](../myworker/) in this repository is that skeleton already written
 — its own `go.mod`, two working flows, a Dockerfile — meant to be copied out.

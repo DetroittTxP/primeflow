@@ -40,15 +40,21 @@ Drop it whenever you would rather pin a release:
 ```bash
 go mod edit -dropreplace github.com/DetroittTxP/primeflow
 go get github.com/DetroittTxP/primeflow@v0.2.0
+go mod tidy
 ```
+
+The `go mod tidy` is not optional: `go get` records this module alone, leaving
+no go.sum entries for the indirect dependencies the SDK pulls in, and the build
+stops with `missing go.sum entry`.
 
 That also narrows the Docker build context to `myworker/` alone — see the note
 in the [Dockerfile](Dockerfile). If instead you move this directory out of the
 primeflow tree and keep the replace, adjust `..` to point at your checkout.
 
-The repository is private, so a machine resolving it from a tag needs to be
-told to skip the module proxy and to fetch over SSH — once, per machine and in
-CI:
+The repository is public, so this needs no credentials, no `GOPRIVATE` and no
+SSH rewrite: it resolves through the module proxy like any other dependency.
+Should the repository ever be made private, that is when a resolving machine
+has to be told to bypass the proxy and fetch over SSH instead:
 
 ```bash
 go env -w GOPRIVATE=github.com/DetroittTxP/*
