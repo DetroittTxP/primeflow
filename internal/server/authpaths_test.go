@@ -3,6 +3,7 @@ package server
 import (
 	iofs "io/fs"
 	"net/http"
+	"net/http/httptest"
 	"path"
 	"regexp"
 	"strings"
@@ -107,4 +108,53 @@ func preAuthRefs(t *testing.T, page string) []string {
 		t.Fatalf("%s references nothing -- the scan is broken, not the allowlist", page)
 	}
 	return out
+}
+
+// A token in the query string authenticates the SSE stream and nothing else.
+// The stream is the one route a browser EventSource cannot set a header on;
+// everywhere else a query-string credential leaks into access logs, proxy logs,
+// Referer headers and history while granting a CSRF-exempt admin principal.
+func TestTokenQueryParamIsScopedToTheStream(t *testing.T) {
+	s := &Server{cfg: Config{APIToken: "s3cret"}}
+	for _, tc := range []struct {
+		method, target string
+		want           bool
+	}{
+		{http.MethodGet, streamPath + "?token=s3cret", true},
+		{http.MethodGet, "/api/v1/users?token=s3cret", false},
+		{http.MethodDelete, "/api/v1/users/u1?token=s3cret", false},
+		{http.MethodPost, streamPath + "?token=s3cret", false},
+		{http.MethodGet, streamPath + "?token=wrong", false},
+	} {
+		p, _ := s.resolvePrincipal(httptest.NewRequest(tc.method, tc.target, nil))
+		if got := p != nil && p.Machine; got != tc.want {
+			t.Errorf("%s %s: machine principal = %v, want %v", tc.method, tc.target, got, tc.want)
+		}
+	}
+
+	// The Authorization header is unaffected and still works on any route.
+	r := httptest.NewRequest(http.MethodDelete, "/api/v1/users/u1", nil)
+	r.Header.Set("Authorization", "Bearer s3cret")
+	if p, _ := s.resolvePrincipal(r); p == nil || !p.Machine {
+		t.Error("the bearer header should authenticate on any route")
+	}
+}
+
+// Without a cap every endpoint, the unauthenticated ones included, buffers
+// whatever a client chooses to send.
+func TestDecodeRejectsAnOversizedBody(t *testing.T) {
+	body := `{"x":"` + strings.Repeat("a", maxBodyBytes) + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(body))
+	var v struct {
+		X string `json:"x"`
+	}
+	if err := decode(r, &v); err == nil {
+		t.Fatal("expected a body over the limit to be rejected")
+	}
+
+	// A normal body still decodes.
+	r = httptest.NewRequest(http.MethodPost, "/api/v1/runs", strings.NewReader(`{"x":"ok"}`))
+	if err := decode(r, &v); err != nil || v.X != "ok" {
+		t.Fatalf("small body: err=%v x=%q", err, v.X)
+	}
 }

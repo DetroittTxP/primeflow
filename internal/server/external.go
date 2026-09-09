@@ -91,7 +91,7 @@ func (s *Server) extListWorkers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) extUpsertQueue(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Name                 string  `json:"name"`
-		Description           string  `json:"description"`
+		Description          string  `json:"description"`
 		ConcurrencyLimit     *int    `json:"concurrency_limit"`
 		Paused               *bool   `json:"paused"`
 		MinWorkers           *int    `json:"min_workers"`

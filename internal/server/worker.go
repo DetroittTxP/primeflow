@@ -229,8 +229,19 @@ func ipString(ip net.IP) string {
 	return ip.String()
 }
 
+// maxWorkerBodyBytes is the worker routes' body cap. It is larger than the
+// operator API's because a report carries a flow's buffered log batch, and it
+// matches the ceiling the worker's own client reads a response under.
+const maxWorkerBodyBytes = 8 << 20 // 8 MiB
+
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxWorkerBodyBytes)).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeErr(w, http.StatusRequestEntityTooLarge,
+				fmt.Errorf("body exceeds the %d byte limit", maxWorkerBodyBytes))
+			return false
+		}
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("decode body: %w", err))
 		return false
 	}

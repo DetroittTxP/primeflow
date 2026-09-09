@@ -188,17 +188,20 @@ func (e *Engine) Execute(parent context.Context, run *core.FlowRun) {
 		defer tcancel()
 	}
 
+	// RunInfo is copied by value into the context, and copied again into every
+	// task context derived from it, so the deployment id has to be set here
+	// rather than patched onto the value Run() hands back.
+	deploymentID := ""
+	if run.DeploymentID != nil {
+		deploymentID = *run.DeploymentID
+	}
 	sctx := sdk.NewContext(sdk.WithParams(execCtx, run.Parameters), bridge, sdk.RunInfo{
 		RunID: run.ID, RunName: run.Name, FlowName: run.FlowName,
-		WorkQueue: run.WorkQueue, Priority: run.Priority, Attempt: run.RunCount,
+		DeploymentID: deploymentID,
+		WorkQueue:    run.WorkQueue, Priority: run.Priority, Attempt: run.RunCount,
 		Tags: run.Tags, ScheduledAt: run.ScheduledAt,
 	})
 	sctx.SetSuspendThreshold(e.cfg.SuspendThreshold)
-	if run.DeploymentID != nil {
-		info := sctx.Run()
-		info.DeploymentID = *run.DeploymentID
-		_ = info
-	}
 
 	result, runErr := e.invoke(sctx, flow)
 	bridge.Flush(context.WithoutCancel(parent))

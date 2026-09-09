@@ -3,6 +3,7 @@ package gitsync
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,13 @@ func (f fakeConn) GitConnectionWithToken(ctx context.Context) (core.GitConnectio
 // TestEngineSyncFileRepo exercises the full clone/commit/push against a local
 // bare repo (the file transport needs no auth and no network).
 func TestEngineSyncFileRepo(t *testing.T) {
+	// go-git drives its file transport through git-upload-pack /
+	// git-receive-pack, so this needs a git binary even though no code here
+	// shells out to one. Without the guard the test fails rather than skips on
+	// a machine that simply has not got git.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed; skipping the file-transport sync test")
+	}
 	bare := filepath.Join(t.TempDir(), "gitops.git")
 	if _, err := git.PlainInitWithOptions(bare, &git.PlainInitOptions{
 		InitOptions: git.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName("main")},

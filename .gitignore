@@ -4,3 +4,4 @@ bin/
 sites/*.env
 !sites/tls.env
 tmp/
+.DS_Store
