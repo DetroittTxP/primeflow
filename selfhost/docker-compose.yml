@@ -1,0 +1,145 @@
+# PrimeFlow, self-hosted on one box: Postgres, NATS, the server (API + console)
+# and a worker. Every image is pulled — there is no build context here and no
+# copy of this repository is needed to run it.
+#
+#   cp .env.example .env && $EDITOR .env      # every CHANGE_ME
+#   docker compose up -d
+#   docker compose logs -f server
+#
+# Then open http://localhost:8080 and log in with PRIMEFLOW_ADMIN_EMAIL.
+#
+# The `worker` service below carries the example flows that ship in the image.
+# It is there so the stack is alive on the first `up` — your own flows live in
+# your own image; see the `my-worker` block at the bottom and ./worker/.
+
+name: primeflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: primeflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: primeflow
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U primeflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    # No published port: only this network needs the database. Uncomment to
+    # reach it with psql from the host itself.
+    # ports: ["127.0.0.1:5432:5432"]
+
+  # The wake-up bus. It carries hints, never state: if it is down, the server
+  # and workers fall back to polling and stay correct, just slower to start a
+  # run. Nothing here is persisted for that reason.
+  nats:
+    image: nats:2-alpine
+    command: ["-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot, and the reason both the server and the workers can start without
+  # racing: `primeflow server` applies the schema itself, but it does so after
+  # the container is up, and Compose's service_started fires the moment a
+  # container starts. A worker that wins that race publishes its flow catalogue
+  # against a half-migrated database, logs a warning per flow and moves on --
+  # it publishes once, so the console's Flows page stays empty until the next
+  # restart. Gating on this service instead makes the ordering explicit.
+  #
+  # Migrations are additive and idempotent, so this is a no-op on every boot
+  # after the first, and an upgrade is a new tag plus `up -d`.
+  migrate:
+    image: ${PRIMEFLOW_IMAGE:-detroitttttxp/primeflow:latest}
+    command: ["migrate"]
+    environment:
+      PRIMEFLOW_DATABASE_URL: postgres://primeflow:${POSTGRES_PASSWORD}@postgres:5432/primeflow?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  server:
+    image: ${PRIMEFLOW_IMAGE:-detroitttttxp/primeflow:latest}
+    command: ["server"]
+    environment:
+      PRIMEFLOW_DATABASE_URL: postgres://primeflow:${POSTGRES_PASSWORD}@postgres:5432/primeflow?sslmode=disable
+      PRIMEFLOW_NATS_URL: nats://nats:4222
+      PRIMEFLOW_HTTP_ADDR: ":8080"
+      # Seeds the first operator account, on an empty database only. Ignored
+      # once any user exists, so it is safe to leave in place.
+      PRIMEFLOW_ADMIN_EMAIL: ${PRIMEFLOW_ADMIN_EMAIL:?set PRIMEFLOW_ADMIN_EMAIL in .env}
+      PRIMEFLOW_ADMIN_PASSWORD: ${PRIMEFLOW_ADMIN_PASSWORD:?set PRIMEFLOW_ADMIN_PASSWORD in .env}
+      # Bearer token for machine clients — the primeflow CLI and your scripts.
+      # Not a worker credential: workers use pool-scoped keys issued from the
+      # console. Leave empty and those routes are admin-session only.
+      PRIMEFLOW_API_TOKEN: ${PRIMEFLOW_API_TOKEN:-}
+      PRIMEFLOW_SESSION_TTL: ${PRIMEFLOW_SESSION_TTL:-168h}
+      PRIMEFLOW_LOG_RETENTION: ${PRIMEFLOW_LOG_RETENTION:-720h}
+      PRIMEFLOW_LOG_LEVEL: ${PRIMEFLOW_LOG_LEVEL:-info}
+    ports: ["${PRIMEFLOW_HTTP_PORT:-8080}:8080"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      nats: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+  # The stock worker, built from ./examples/primex-worker in the PrimeFlow
+  # repository. It registers ten demo flows -- provision-vm, collect-metering,
+  # onboard-tenant, hello-world and the rest -- whose external calls are
+  # stubbed, so the console has something real to run, and real retries and
+  # crash recovery to watch, before you have written a flow of your own.
+  #
+  # Delete this service once `my-worker` below is carrying your flows.
+  worker:
+    image: ${PRIMEFLOW_IMAGE:-detroitttttxp/primeflow:latest}
+    entrypoint: ["/usr/local/bin/primex-worker"]
+    environment:
+      PRIMEFLOW_DATABASE_URL: postgres://primeflow:${POSTGRES_PASSWORD}@postgres:5432/primeflow?sslmode=disable
+      PRIMEFLOW_NATS_URL: nats://nats:4222
+      PRIMEFLOW_QUEUES: ${PRIMEFLOW_QUEUES:-default,vcd,metering}
+      PRIMEFLOW_CONCURRENCY: ${PRIMEFLOW_CONCURRENCY:-4}
+      PRIMEFLOW_WORKER_NAME: example-worker
+    depends_on:
+      server: {condition: service_started}
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    # Long enough to reach the next checkpoint before SIGKILL. Past it a killed
+    # run's lease lapses and another worker resumes it from its last
+    # checkpoint, so this is an optimisation, not a correctness requirement.
+    stop_grace_period: 120s
+
+  # ---------------------------------------------------------------------
+  # Your flows. Build the image from ./worker (a Go module of its own that
+  # imports the SDK — it does not fork PrimeFlow), then uncomment this.
+  #
+  #   cd worker
+  #   docker build -t my-worker:dev .
+  #   MY_WORKER_IMAGE=my-worker:dev docker compose up -d my-worker
+  #
+  # The server holds no flow code, so adding or changing a flow rebuilds this
+  # image alone. A worker that leases a run for a flow it has not registered
+  # does not fail it: the run returns to the queue as AwaitingWorker and is
+  # retried, which is what makes a partial rollout safe.
+  # ---------------------------------------------------------------------
+  # my-worker:
+  #   image: ${MY_WORKER_IMAGE:-my-worker:dev}
+  #   environment:
+  #     PRIMEFLOW_DATABASE_URL: postgres://primeflow:${POSTGRES_PASSWORD}@postgres:5432/primeflow?sslmode=disable
+  #     PRIMEFLOW_NATS_URL: nats://nats:4222
+  #     PRIMEFLOW_QUEUES: default
+  #     PRIMEFLOW_CONCURRENCY: "4"
+  #     PRIMEFLOW_WORKER_NAME: my-worker
+  #   depends_on:
+  #     server: {condition: service_started}
+  #     migrate: {condition: service_completed_successfully}
+  #   restart: unless-stopped
+  #   stop_grace_period: 120s
+
+volumes:
+  pgdata:

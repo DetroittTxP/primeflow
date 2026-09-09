@@ -491,6 +491,20 @@ External API อยู่ใต้ `/api/external/v1` และมีเอก�
 
 ## การ deploy
 
+**Self-hosted เครื่องเดียว** — [`selfhost/`](selfhost/) คือชุดที่ส่งต่อให้คนอื่นได้ทั้งก้อน:
+compose ที่ **ดึง image อย่างเดียว ไม่ต้อง build** (Postgres, NATS, migrate, server + console, worker),
+ไฟล์ `.env.example` และ [`selfhost/worker/`](selfhost/worker/) — โมดูล Go ที่ import SDK
+และ build ได้โดยไม่ต้องมีซอร์สของรีโปนี้เลย เหมาะกับคนที่จะเอา PrimeFlow ไปติดตั้งเองแล้วต่อ flow ของตัวเอง
+
+```bash
+cd selfhost && cp .env.example .env && $EDITOR .env
+docker compose up -d
+```
+
+เผยแพร่ image ที่ทั้งสองฝั่งดึงด้วย `make docker-push` (buildx, amd64 + arm64)
+ต่างจาก `myworker/` ตรงที่โครงใน `selfhost/worker/` ไม่มี `replace` ชี้กลับมาที่รีโปนี้
+— มันดึง PrimeFlow ผ่าน module proxy จึงคัดลอกออกไปเป็นรีโปของตัวเองได้ทันที
+
 **Kubernetes** — [`deploy/k8s/primeflow.yaml`](deploy/k8s/primeflow.yaml) มี Deployment ของ server
 (สเกลได้อย่างปลอดภัย: การเลือก leader จัดการ loop แบบ singleton) และ Deployment ของ worker หนึ่งตัวต่อคิว
 เพื่อให้เลนที่ช้าสเกลได้อิสระ
@@ -540,6 +554,7 @@ internal/metrics/       Prometheus registry + ตัวเก็บคิว ณ
 internal/otelinit/      การตั้งค่า OTLP tracing (ไม่ทำงานถ้าไม่ตั้ง endpoint)
 examples/primex-worker/ เดโม provisioning VM, metering และ sub-flow fleet
 myworker/               โครงของ worker เป็นโมดูลแยก — จุดเริ่มต้นของ image ของคุณเอง
+selfhost/               ชุดสำหรับ self-host: compose ที่ดึง image ล้วน + โครง worker ที่ build ได้ลำพัง
 deploy/k8s/             แมนิเฟสต์ + ตัวอย่าง autoscaling KEDA/HPA
 ```
 

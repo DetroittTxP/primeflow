@@ -3,6 +3,11 @@
 A control plane on one VM and a worker on another, connected over TLS. The
 worked example below uses `mainvm.example.com` and `vm2`; substitute your own.
 
+Running everything on **one** machine instead? [`selfhost/`](../selfhost/) is
+that stack in pull-only form — no TLS edge, no second VM, no build context —
+along with a worker skeleton that builds without a checkout of this repository.
+Come back here when the worker moves off the box.
+
 | Directory | Goes on | Runs |
 |---|---|---|
 | [`vm-server/`](vm-server/) | `mainvm` | Postgres, the server (API + console), nginx on 443 |

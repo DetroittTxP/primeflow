@@ -1,0 +1,6 @@
+.git/
+Dockerfile
+README.md
+# `go build ./...` leaves the binary here; the image builds its own.
+worker
+my-worker

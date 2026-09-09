@@ -164,6 +164,31 @@ spec:
       # settle. A worker killed past this deadline is not lost: its lease
       # expires and another worker resumes the run from its last checkpoint.
       terminationGracePeriodSeconds: 120
+      # Deployments have no ordering between them, and `primeflow server`
+      # applies the schema only once its own pod is running. A worker that
+      # starts first publishes its flow catalogue against a half-migrated
+      # database, logs a warning per flow and carries on — it publishes once,
+      # so the console's Flows page stays empty until that pod is replaced.
+      # This blocks the worker until the schema is complete, whoever applied
+      # it. The server needs no equivalent: it migrates before it serves.
+      #
+      # Every statement is IF NOT EXISTS, so concurrent runs are no-ops and a
+      # rollout re-applies nothing. It has to be the binary rather than a wait
+      # loop — the image is distroless and has no shell.
+      initContainers:
+        - name: migrate
+          image: registry.example.com/primex/primeflow:latest
+          args: ["migrate"]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
@@ -205,6 +230,21 @@ spec:
       labels: {app: primeflow, component: worker, queue: metering}
     spec:
       terminationGracePeriodSeconds: 300
+      # Blocks until the schema is complete; see primeflow-worker-vcd.
+      initContainers:
+        - name: migrate
+          image: registry.example.com/primex/primeflow:latest
+          args: ["migrate"]
+          envFrom:
+            - secretRef: {name: primeflow-secrets}
+            - configMapRef: {name: primeflow-config}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
       securityContext:
         runAsNonRoot: true
         seccompProfile: {type: RuntimeDefault}
@@ -305,6 +345,14 @@ spec:
 #     spec:
 #       terminationGracePeriodSeconds: 120
 #       securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+#       # Blocks until the schema is complete; see primeflow-worker-vcd.
+#       initContainers:
+#         - name: migrate
+#           image: registry.example.com/primex/primeflow:latest
+#           args: ["migrate"]
+#           envFrom:
+#             - secretRef: {name: primeflow-secrets}
+#             - configMapRef: {name: primeflow-config}
 #       containers:
 #         - name: push-worker
 #           image: registry.example.com/primex/primeflow:latest

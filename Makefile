@@ -13,7 +13,12 @@ SEED_PASSWORD ?= primeflow-demo
 SEED_RUNS     ?= 0
 SEED_ARGS     ?=
 
-.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker seed seed-compose dev dev-down docker clean tidy
+# The published image. Both the server and the worker run it; a self-hosted
+# install pulls it and needs nothing else from this repository.
+IMAGE     ?= detroitttttxp/primeflow
+PLATFORMS ?= linux/amd64,linux/arm64
+
+.PHONY: all build test test-unit test-integration lint fmt vet run-server run-worker seed seed-compose dev dev-down docker docker-push clean tidy
 
 all: build
 
@@ -73,8 +78,17 @@ dev: ## Bring the stack up with hot reload (air rebuilds server and workers on s
 dev-down: ## Stop the hot-reload stack (keeps the build caches)
 	$(DEV_COMPOSE) down
 
-docker: ## Build the container image
-	docker build --build-arg VERSION=$(VERSION) -t detroitttttxp/primeflow:$(VERSION) -t detroitttttxp/primeflow:latest .
+docker: ## Build the container image for this machine
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+
+# What a self-hosted user pulls, so it has to carry both architectures: a plain
+# `docker build` on an arm64 machine produces an amd64 binary (TARGETARCH
+# defaults to amd64 in the Dockerfile) inside an arm64-labelled image, which
+# runs under emulation and misleads everyone who inspects it later. buildx with
+# an explicit platform list makes the manifest and the binaries agree.
+docker-push: ## Build and push the multi-arch image (docker login first)
+	docker buildx build --platform $(PLATFORMS) --build-arg VERSION=$(VERSION) \
+		-t $(IMAGE):$(VERSION) -t $(IMAGE):latest --push .
 
 clean:
 	rm -rf $(BIN)
