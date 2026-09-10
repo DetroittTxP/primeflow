@@ -14,6 +14,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -23,6 +25,11 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/pkg/primeflow"
 )
+
+// version is stamped at build time with -ldflags "-X main.version=...".
+// The Makefile and the Dockerfile both pass the release tag; a plain
+// "go build" leaves it as "dev".
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -51,6 +58,8 @@ func main() {
 		err = cmdQueue(ctx, args)
 	case "deploy":
 		err = cmdDeploy(ctx, args)
+	case "version", "-v", "--version":
+		err = cmdVersion(args)
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -89,6 +98,9 @@ Admin (talks to a running server over the API):
   primeflow queue pause|resume <name>         stop or start dispatch for a queue
   primeflow queue front <run-id>              promote a waiting run to the front
   primeflow queue priority <run-id> <0-100>   change a waiting run's priority
+
+Other:
+  primeflow version [-short]                  print the build version and toolchain
 
 Environment:
   PRIMEFLOW_DATABASE_URL   postgres DSN                 (server, migrate)
@@ -579,6 +591,54 @@ func showPending(ctx context.Context, c *client, queue string) error {
 			i+1, trunc(r.Name, 38), r.Priority, pin, r.ScheduledAt.Local().Format("15:04:05"))
 	}
 	return nil
+}
+
+// ------------------------------------------------------------- version ---
+
+// cmdVersion reports the stamped release plus the toolchain and target it was
+// built for, which is what a bug report actually needs. -short prints the bare
+// string, for scripts that compare it against a tag.
+func cmdVersion(args []string) error {
+	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	short := fs.Bool("short", false, "print only the version string")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *short {
+		fmt.Println(version)
+		return nil
+	}
+
+	fmt.Printf("primeflow %s\n", version)
+	fmt.Printf("  go       %s\n", runtime.Version())
+	fmt.Printf("  platform %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	if rev, dirty, ok := vcsRevision(); ok {
+		if dirty {
+			rev += " (dirty)"
+		}
+		fmt.Printf("  revision %s\n", rev)
+	}
+	return nil
+}
+
+// vcsRevision pulls the commit out of the build info Go embeds. It reports
+// false when the build had no repository to read — the container build is one,
+// since .dockerignore keeps .git out of the context — so that the line is
+// omitted rather than printed as "unknown".
+func vcsRevision() (rev string, dirty, ok bool) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false, false
+	}
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	return rev, dirty, rev != ""
 }
 
 // -------------------------------------------------------------- helpers ---
