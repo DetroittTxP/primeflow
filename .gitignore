@@ -3,5 +3,7 @@ bin/
 .env
 sites/*.env
 !sites/tls.env
-tmp/
+# air's rebuild scratch. Everything but the go.mod that keeps `./...` out of it.
+tmp/*
+!tmp/go.mod
 .DS_Store

@@ -41,8 +41,12 @@ test: test-integration
 vet:
 	go vet ./...
 
+# Named directories rather than `.`: this tree also holds air's scratch dir and,
+# on a working copy, agent worktree checkouts of the repo itself. `go vet ./...`
+# skips both on its own -- each is a nested module -- but gofmt knows nothing
+# about modules and would happily rewrite whatever it walked into.
 fmt:
-	gofmt -l -w .
+	gofmt -l -w ./cmd ./examples ./internal ./pkg
 
 lint: fmt vet ## Format and vet; add golangci-lint here if you use it
 
