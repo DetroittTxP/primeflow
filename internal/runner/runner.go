@@ -29,6 +29,7 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/kube"
 	"github.com/DetroittTxP/primeflow/internal/metrics"
 	"github.com/DetroittTxP/primeflow/internal/pushsig"
+	"github.com/DetroittTxP/primeflow/internal/stdcapture"
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/internal/worker"
 	"github.com/DetroittTxP/primeflow/pkg/sdk"
@@ -85,7 +86,31 @@ type Config struct {
 	ExecMode string
 	ExecEnv  []string
 
+	// LogPrints routes what a flow prints on os.Stdout and os.Stderr into its
+	// own run log, on top of the process's stdout where it already went. Nil
+	// means on: a print an operator cannot find on the run page is the whole
+	// reason the capture exists. See internal/stdcapture.
+	LogPrints *bool
+
 	Registry *sdk.Registry
+}
+
+// capturePrints installs the stdout capture for a process that is about to
+// execute flows, and returns the function that undoes it. Failing to install is
+// worth a line and not worth refusing to run: prints stay where they were.
+func capturePrints(c Config, log *slog.Logger) func() {
+	if c.LogPrints != nil && !*c.LogPrints {
+		return func() {}
+	}
+	release, err := stdcapture.Install()
+	if err != nil {
+		if log != nil {
+			log.Warn("could not capture what flows print; their output stays on this process's stdout",
+				"err", err)
+		}
+		return func() {}
+	}
+	return release
 }
 
 // ServeWorker runs a pull worker until ctx is cancelled.
@@ -108,6 +133,10 @@ func ServeWorker(ctx context.Context, d Deps, c Config) error {
 	switch c.ExecMode {
 	case "", worker.ExecInline:
 		cfg.ExecMode = worker.ExecInline
+		// Only an inline worker runs flows in this process. A launcher's own
+		// stdout carries nothing but its structured log, and each child
+		// captures the run it was started for.
+		defer capturePrints(c, d.Log)()
 	case worker.ExecProcess:
 		path, err := os.Executable()
 		if err != nil {
@@ -194,6 +223,8 @@ func Leased() (runID, workerID string, ok bool) {
 // pod outlives the launcher that created it, so it renews the lease itself and
 // learns of a cancellation on the same call.
 func RunLeased(ctx context.Context, d Deps, c Config, runID, workerID string) error {
+	defer capturePrints(c, d.Log)()
+
 	run, err := d.Store.GetFlowRun(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("read leased run %s: %w", runID, err)
@@ -262,6 +293,8 @@ func renewOwnLease(ctx context.Context, d Deps, c Config, runID, workerID string
 // unit of work a push receiver performs per dispatch, and a handy entry point
 // for embedders and tests.
 func RunOne(ctx context.Context, d Deps, c Config, runID string) error {
+	defer capturePrints(c, d.Log)()
+
 	claimed, err := claim(ctx, d, c, runID)
 	if err != nil {
 		return err
@@ -321,6 +354,8 @@ func execute(ctx context.Context, d Deps, c Config, run *core.FlowRun) {
 // executes each run, so a scale-to-zero platform keeps the instance alive for
 // the duration.
 func ServePush(ctx context.Context, d Deps, c Config) error {
+	defer capturePrints(c, d.Log)()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

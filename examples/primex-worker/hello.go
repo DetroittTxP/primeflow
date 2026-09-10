@@ -66,6 +66,10 @@ func helloWorld(c *sdk.Context) (any, error) {
 			return nil, err
 		}
 		greetings = append(greetings, line)
+		// A plain print, deliberately: a worker captures os.Stdout and os.Stderr
+		// and records what a flow prints on this run's own page, so a flow does
+		// not have to reach for the SDK to leave a trace an operator can read.
+		fmt.Println(line)
 	}
 
 	who := workerName()

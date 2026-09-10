@@ -26,6 +26,7 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/core"
 	"github.com/DetroittTxP/primeflow/internal/events"
 	"github.com/DetroittTxP/primeflow/internal/metrics"
+	"github.com/DetroittTxP/primeflow/internal/stdcapture"
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
@@ -203,7 +204,20 @@ func (e *Engine) Execute(parent context.Context, run *core.FlowRun) {
 	})
 	sctx.SetSuspendThreshold(e.cfg.SuspendThreshold)
 
+	// What the flow prints belongs on its own page, not only in the worker's
+	// container log. The binding lasts exactly as long as the call: a worker
+	// with nothing running captures nothing.
+	unbind := stdcapture.Bind(run.ID, bridge.captureLine)
+
 	result, runErr := e.invoke(sctx, flow)
+
+	// The pipe is drained by a goroutine of its own, so a line printed by the
+	// last statement of the flow is still in flight here. Reach it before
+	// unbinding, or it is lost — or worse, recorded against whichever run is
+	// still executing in this process.
+	stdcapture.Sync(captureDrain)
+	unbind()
+
 	bridge.Flush(context.WithoutCancel(parent))
 
 	if _, suspended := sdk.IsSuspend(runErr); runErr != nil && !suspended {
@@ -215,6 +229,12 @@ func (e *Engine) Execute(parent context.Context, run *core.FlowRun) {
 	// cancellation dropped) so it can resume a suspended parent.
 	e.finish(context.WithoutCancel(ctx), run, flow, result, runErr)
 }
+
+// captureDrain bounds the wait for the tail of a finished run's printed output.
+// It is generous because the only thing on the other side is a reader goroutine
+// and a bounded pipe, and short enough that a pump wedged behind a stalled
+// store cannot hold a settled run open.
+const captureDrain = 2 * time.Second
 
 // invoke calls the flow function, converting a panic into an error so a bug in
 // one flow cannot take the worker down with it.

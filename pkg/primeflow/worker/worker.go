@@ -92,6 +92,19 @@ type Options struct {
 	// executes in process whatever this says.
 	ExecMode string
 
+	// LogPrints records what a flow prints on os.Stdout or os.Stderr —
+	// fmt.Println, log.Println, a command's output — in that run's own log, as
+	// well as on this process's stdout where it already went. On by default;
+	// PRIMEFLOW_LOG_PRINTS=false turns it off.
+	//
+	// A worker executing several runs in one process (ExecMode "inline" with
+	// Concurrency above 1) cannot tell which of them printed a given line: Go
+	// hands no writer identity to the other end of a pipe. Such a line is
+	// recorded against every run in flight and marked ambiguous. Give each run
+	// its own process — ExecMode "process", "kubernetes", or Concurrency 1 — and
+	// every line is attributed exactly.
+	LogPrints *bool
+
 	// Registry holds the flows this process can execute. Defaults to sdk.Default.
 	Registry *sdk.Registry
 
@@ -109,6 +122,18 @@ func envOr(key, def string) string {
 	}
 	return def
 }
+
+// envTrue reads a boolean variable, falling back to def when it is unset or
+// unreadable. "1" and "true" are on; anything else set is off.
+func envTrue(key string, def bool) bool {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	return raw == "1" || strings.EqualFold(raw, "true")
+}
+
+func ptr[T any](v T) *T { return &v }
 
 func firstNonEmpty(vs ...string) string {
 	for _, v := range vs {
@@ -169,6 +194,9 @@ func (o *Options) applyEnv() {
 	o.PushAddr = firstNonEmpty(o.PushAddr, envOr("PRIMEFLOW_PUSH_ADDR", ":8090"))
 	o.PushSecret = firstNonEmpty(o.PushSecret, os.Getenv("PRIMEFLOW_PUSH_SECRET"))
 	o.ExecMode = firstNonEmpty(o.ExecMode, envOr(runner.EnvExecMode, runner.ExecInline))
+	if o.LogPrints == nil {
+		o.LogPrints = ptr(envTrue("PRIMEFLOW_LOG_PRINTS", true))
+	}
 	if o.Registry == nil {
 		o.Registry = sdk.Default
 	}
@@ -341,7 +369,7 @@ func (a *App) config() runner.Config {
 		CancelPollInterval: cancelPoll,
 		MaxSubflowDepth:    o.MaxSubflowDepth, MetricsAddr: o.MetricsAddr,
 		PushAddr: o.PushAddr, PushSecret: o.PushSecret, Registry: o.Registry,
-		ExecMode: o.ExecMode, ExecEnv: execEnv(o),
+		ExecMode: o.ExecMode, ExecEnv: execEnv(o), LogPrints: o.LogPrints,
 	}
 }
 
@@ -367,6 +395,9 @@ func execEnv(o Options) []string {
 	add("PRIMEFLOW_NATS_URL", o.NatsURL)
 	add("PRIMEFLOW_REDIS_URL", o.RedisURL)
 	add("PRIMEFLOW_MAX_SUBFLOW_DEPTH", strconv.Itoa(o.MaxSubflowDepth))
+	if o.LogPrints != nil {
+		add("PRIMEFLOW_LOG_PRINTS", strconv.FormatBool(*o.LogPrints))
+	}
 	return env
 }
 

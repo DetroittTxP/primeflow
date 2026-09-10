@@ -324,6 +324,7 @@ curl -X POST https://primeflow.example.com/api/external/v1/runs \
 | `PRIMEFLOW_LEASE` | ระยะเวลา lease | `60s` |
 | `PRIMEFLOW_POLL` | ช่วงเวลา poll สำรอง | `2s` |
 | `PRIMEFLOW_MAX_SUBFLOW_DEPTH` | `RunDeployment` ซ้อนได้ลึกแค่ไหน | `8` |
+| `PRIMEFLOW_LOG_PRINTS` | บันทึกสิ่งที่ flow พิมพ์ออก stdout/stderr ลง log ของ run นั้นด้วย | `true` |
 | `PRIMEFLOW_LOG_RETENTION` | ตัด `pf_logs` ที่เก่ากว่านี้ (Go duration) | `720h` |
 | `PRIMEFLOW_GITSYNC_INTERVAL` | ทุกกี่ครั้งที่ตัว reconciler push worker spec ที่ตั้ง auto-sync แล้ว drift | `2m` |
 | `PRIMEFLOW_METRICS_ADDR` | listener `/metrics` ของ worker เอง (เวลาของ flow/task) | `:9090` |
@@ -398,6 +399,9 @@ return sdk.Permanent(err)               // ข้าม retry budget ทั้�
 
 ```go
 c.Info("provisioning", "org", p.OrgName)
+c.Println("plain print — ก็ลง log ของ run เหมือนกัน")   // ดู "สิ่งที่ flow พิมพ์" ด้านล่าง
+c.Printf("resized to %d vCPU", vm.CPU)
+cmd.Stdout, cmd.Stderr = c.Stdout(), c.Stderr()      // ต่อ output ของคำสั่งเข้า log ของ run
 c.Markdown("summary", "### VM created…")
 c.Table("usage", rows)
 c.Link("console", vm.Href, "เปิดใน Cloud Director")
@@ -597,6 +601,7 @@ internal/core/          โมเดลโดเมนและตาราง�
 internal/store/         interface การเก็บข้อมูล + การ implement บน PostgreSQL
 internal/engine/        การรันแบบทนทาน: checkpoint, retry, การยกเลิก
 internal/worker/        การ lease, heartbeat, การ drain อย่างนุ่มนวล
+internal/stdcapture/    ดัก os.Stdout/os.Stderr แล้วส่งเข้า log ของ run ที่กำลังรัน
 internal/server/        REST API, สตรีม SSE, console ที่ฝังมา
 internal/scheduler/     การสร้างงานตามตารางและ janitor ของ lease
 internal/automations/   กฎที่ขับด้วยเหตุการณ์
@@ -682,6 +687,54 @@ bus การแจ้งเตือนมีสามการ implement เ�
 **Trace** ตั้ง `OTEL_EXPORTER_OTLP_ENDPOINT` (env มาตรฐานของ OTEL) แล้ว PrimeFlow จะปล่อย span
 `flow_run` → `task_run` ผ่าน OTLP/HTTP โดย trace context ถูกส่งต่อจากผู้เรียก HTTP และข้าม
 `RunDeployment` เข้าไปยัง child run ถ้าไม่ตั้ง tracer จะเป็น no-op และไม่มีต้นทุน
+
+### สิ่งที่ flow พิมพ์
+
+flow คือฟังก์ชัน Go ธรรมดา สิ่งแรกที่คนเขียนหยิบใช้จึงเป็น `fmt.Println` ไม่ใช่ `c.Info`
+worker จึงดัก `os.Stdout` และ `os.Stderr` ไว้ และบันทึกทุกบรรทัดที่ flow พิมพ์ลง log ของ run นั้น
+— `fmt.Println`, `fmt.Printf`, `log.Println` หรือ output ของคำสั่งที่เขียนลง `os.Stdout` ก็ตาม:
+
+```go
+sdk.Flow("provision-vm", func(c *sdk.Context) (any, error) {
+    fmt.Println("starting")                 // ขึ้นหน้า run ติดป้าย stdout
+    fmt.Fprintln(os.Stderr, "vcd is slow")  // ขึ้นเป็น ERROR ติดป้าย stderr
+    …
+})
+```
+
+บรรทัดจาก `os.Stdout` ถูกบันทึกที่ระดับ `INFO` และจาก `os.Stderr` ที่ `ERROR` ทั้งคู่มี field
+`stream` ติดไปด้วย console จึงแยกออกว่าบรรทัดไหน flow เขียนเองด้วย `c.Info` และบรรทัดไหนแค่พิมพ์ออกมา
+**ทุกบรรทัดยังถูกเขียนลง stdout จริงของ worker เหมือนเดิม** — log ของ container คือสิ่งที่ operator
+เปิดดูตอนฐานข้อมูลเองมีปัญหา การดักจับต้องไม่ใช่เหตุผลที่มันเงียบ
+
+**ข้อจำกัดเรื่องการระบุเจ้าของบรรทัด** Go ไม่มี hook บนการเขียน `os.Stdout` — มันเป็น `*os.File`
+ไม่ใช่ interface — ทางเดียวคือสลับเป็น pipe แล้วอ่านปลายอีกด้าน ซึ่งทำให้ตัวตนของ goroutine ที่เขียนหายไป
+ดังนั้นเมื่อ worker แบบ `inline` รันหลายงานพร้อมกันในโปรเซสเดียว บรรทัดหนึ่งจึงบอกไม่ได้ว่าของงานไหน
+PrimeFlow เลือกบันทึกมันให้ **ทุก run ที่กำลังทำงานอยู่ พร้อมทำเครื่องหมาย `ambiguous`** (console
+แสดงเป็น `stdout?`) เพราะบรรทัดที่ operator ตามหา หายไปเลยแย่กว่าโผล่ซ้ำ
+
+จะให้ระบุได้แม่นยำเสมอ ก็ให้แต่ละงานมีโปรเซสของตัวเอง:
+
+| ตั้งค่า | ผลลัพธ์ |
+|---|---|
+| `PRIMEFLOW_EXEC_MODE=process` หรือ `kubernetes` | หนึ่งโปรเซส/pod ต่อหนึ่งงาน — แม่นยำเสมอ |
+| `PRIMEFLOW_CONCURRENCY=1` | inline แต่ทีละงาน — แม่นยำเสมอ |
+| `PRIMEFLOW_LOG_PRINTS=false` | ปิดการดักจับ output กลับไปอยู่แค่ stdout ของ worker |
+
+อีกทางคือใช้ API ของ SDK ซึ่งผูกกับ run โดยตรงและแม่นยำเสมอไม่ว่า concurrency เท่าไร:
+
+```go
+c.Println("attributed to this run, always")
+c.Printf("%d/%d done", i, n)
+
+// ต่อ output ของคำสั่งภายนอกเข้า log ของ run
+cmd := exec.CommandContext(c, "terraform", "apply", "-auto-approve")
+out, errw := c.Stdout(), c.Stderr()
+defer out.Close()
+defer errw.Close()
+cmd.Stdout, cmd.Stderr = out, errw
+err := cmd.Run()
+```
 
 ## Sub-flow
 

@@ -354,11 +354,26 @@ function runLogsTab({ logs }) {
     </div>
     <pre class="logs" id="run-logs">${logLines(logs)}</pre></div>`;
 }
+// A line a flow printed on stdout/stderr carries a stream field, and one the
+// worker could not trace to a single run -- several were executing in the same
+// process -- is also marked ambiguous. Both are worth a tag: an operator
+// reading a run page should be able to tell a line the flow wrote deliberately
+// from one it printed, and should not read a neighbouring run's output as this
+// run's fact.
+function logTag(l) {
+  const f = l.fields || {};
+  if (!f.stream) return '';
+  const amb = f.ambiguous ? '?' : '';
+  const title = f.ambiguous
+    ? 'printed while this worker was running several flows at once; it may belong to another run'
+    : 'printed by the flow on ' + f.stream;
+  return `<span class="logtag" title="${esc(title)}">${esc(f.stream + amb)}</span> `;
+}
 function logLines(logs) {
   const v = visibleLogs(logs);
   if (!v.length) return '<span class="muted">No log line matches.</span>';
   return v.map(l => `<span class="lvl-${esc(l.level)}">${new Date(l.timestamp).toLocaleTimeString()} ` +
-    `${esc(String(l.level || '').padEnd(5))} ${esc(l.message)}</span>`).join('\n');
+    `${esc(String(l.level || '').padEnd(5))} ${logTag(l)}${esc(l.message)}</span>`).join('\n');
 }
 // Filtering redraws the log pane alone: re-rendering the page would take the
 // focus out of the box being typed into.

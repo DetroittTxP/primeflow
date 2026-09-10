@@ -205,6 +205,10 @@ pre.logs {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55;
 }
 .lvl-ERROR { color: var(--err); } .lvl-WARN { color: var(--warn); } .lvl-DEBUG { color: var(--muted); }
+.logtag {
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+  color: var(--muted); font-size: 11px;
+}
 dialog {
   border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
   color: var(--ink); padding: 0; width: min(920px, 94vw); max-height: 88vh; box-shadow: 0 20px 60px rgba(0,0,0,.28);

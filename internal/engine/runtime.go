@@ -16,6 +16,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/DetroittTxP/primeflow/internal/core"
+	"github.com/DetroittTxP/primeflow/internal/stdcapture"
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/pkg/sdk"
 )
@@ -140,6 +141,26 @@ func (b *runtimeBridge) Log(e sdk.LogEntry) {
 	if full {
 		b.Flush(context.Background())
 	}
+}
+
+// captureLine records a line the flow printed on stdout or stderr. It is the
+// sink the engine binds for the length of the run — see internal/stdcapture,
+// which explains why a line can arrive marked ambiguous.
+//
+// stderr is recorded at ERROR because that is where a failing command says so,
+// and a run page an operator opens after a failure should not bury it at INFO;
+// the stream field is on the entry either way, so a console (or a query) can
+// tell a printed line from one the flow wrote deliberately.
+func (b *runtimeBridge) captureLine(ln stdcapture.Line) {
+	level := "INFO"
+	if ln.Stream == stdcapture.StreamStderr {
+		level = "ERROR"
+	}
+	fields := map[string]any{sdk.LogFieldStream: ln.Stream}
+	if ln.Ambiguous {
+		fields[sdk.LogFieldAmbiguous] = true
+	}
+	b.Log(sdk.LogEntry{Level: level, Message: ln.Text, Fields: fields, At: ln.At})
 }
 
 // Flush writes buffered log lines.

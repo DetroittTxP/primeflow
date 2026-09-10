@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/DetroittTxP/primeflow/internal/core"
 	"github.com/DetroittTxP/primeflow/internal/engine"
 	"github.com/DetroittTxP/primeflow/internal/events"
+	"github.com/DetroittTxP/primeflow/internal/stdcapture"
 	"github.com/DetroittTxP/primeflow/internal/store"
 	"github.com/DetroittTxP/primeflow/internal/store/postgres"
 	"github.com/DetroittTxP/primeflow/pkg/sdk"
@@ -539,5 +541,135 @@ func TestWaitingDoesNotSpendTheRetryBudget(t *testing.T) {
 	if attempts.Load() != waits+3 {
 		t.Errorf("flow function ran %d times, want %d (%d replays through the waits + 3 attempts)",
 			attempts.Load(), waits+3, waits)
+	}
+}
+
+// The headline of the print capture: a flow that reaches for fmt.Println —
+// which is what a flow author reaches for first — must find that line on the
+// run page, not only in the worker's container log.
+func TestPrintsFromAFlowLandInItsRunLog(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	h.reg.Register("noisy", func(c *sdk.Context) (any, error) {
+		fmt.Println("before the task")
+		return sdk.Task(c, "step", func(c *sdk.Context) (int, error) {
+			fmt.Printf("inside the task: %d\n", 42)
+			fmt.Fprintln(os.Stderr, "and something on stderr")
+			return 42, nil
+		})
+	})
+
+	// Capture is installed by the runner in production; the engine only binds
+	// to it, so a test has to stand in for the runner.
+	release, err := stdcapture.Install()
+	if err != nil {
+		t.Fatalf("install capture: %v", err)
+	}
+	defer release()
+
+	run := h.create(t, "noisy", 0)
+	h.engine.Execute(ctx, h.lease(t))
+
+	if got := h.reload(t, run.ID); got.State != core.StateCompleted {
+		t.Fatalf("state = %s (%s), want COMPLETED", got.State, got.StateMessage)
+	}
+
+	logs, err := h.store.ListLogs(ctx, run.ID, 0, 200)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	want := map[string]struct{ level, stream string }{
+		"before the task":         {"INFO", sdk.StreamStdout},
+		"inside the task: 42":     {"INFO", sdk.StreamStdout},
+		"and something on stderr": {"ERROR", sdk.StreamStderr},
+	}
+	for _, l := range logs {
+		w, ok := want[l.Message]
+		if !ok {
+			continue
+		}
+		delete(want, l.Message)
+		if l.Level != w.level {
+			t.Errorf("%q recorded at %s, want %s", l.Message, l.Level, w.level)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(l.Fields, &fields); err != nil {
+			t.Errorf("%q has no fields: %v", l.Message, err)
+			continue
+		}
+		if fields[sdk.LogFieldStream] != w.stream {
+			t.Errorf("%q tagged %v, want stream %q", l.Message, fields[sdk.LogFieldStream], w.stream)
+		}
+		if _, ambiguous := fields[sdk.LogFieldAmbiguous]; ambiguous {
+			t.Errorf("%q was marked ambiguous, but only one run was executing", l.Message)
+		}
+	}
+	for msg := range want {
+		t.Errorf("printed line %q never reached the run log", msg)
+	}
+}
+
+// A run whose print is the last thing it does is the case the capture barrier
+// exists for: the line is still in the pipe when the flow returns.
+func TestTheLastPrintOfAFlowIsNotLost(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	h.reg.Register("last-word", func(c *sdk.Context) (any, error) {
+		fmt.Println("the last word")
+		return nil, nil
+	})
+
+	release, err := stdcapture.Install()
+	if err != nil {
+		t.Fatalf("install capture: %v", err)
+	}
+	defer release()
+
+	run := h.create(t, "last-word", 0)
+	h.engine.Execute(ctx, h.lease(t))
+
+	logs, err := h.store.ListLogs(ctx, run.ID, 0, 200)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	for _, l := range logs {
+		if l.Message == "the last word" {
+			return
+		}
+	}
+	t.Fatalf("the flow's last printed line never reached its log (%d lines)", len(logs))
+}
+
+// Printing after a flow has returned is a goroutine that outlived its run.
+// There is nothing to attribute it to, and it must not be attached to whatever
+// run happens to start next.
+func TestPrintsOutsideARunAreNotRecorded(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+
+	h.reg.Register("quiet", func(c *sdk.Context) (any, error) { return nil, nil })
+
+	release, err := stdcapture.Install()
+	if err != nil {
+		t.Fatalf("install capture: %v", err)
+	}
+	defer release()
+
+	fmt.Println("nobody's line")
+	stdcapture.Sync(2 * time.Second)
+
+	run := h.create(t, "quiet", 0)
+	h.engine.Execute(ctx, h.lease(t))
+
+	logs, err := h.store.ListLogs(ctx, run.ID, 0, 200)
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	for _, l := range logs {
+		if l.Message == "nobody's line" {
+			t.Fatal("a line printed with no run bound was recorded against one")
+		}
 	}
 }
