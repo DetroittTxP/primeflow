@@ -11,8 +11,12 @@ RUN go mod download
 
 COPY . .
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+# Redeclared without defaults on purpose: BuildKit fills these from --platform,
+# but only for an ARG with no value of its own. A default here wins instead,
+# which pins GOARCH to amd64 and yields an amd64 binary inside an
+# arm64-labelled image — the exact mismatch docker-push exists to avoid.
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 
 # CGO off keeps the binary static; trimpath and -s -w keep it small.
